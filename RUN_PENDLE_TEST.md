@@ -10,7 +10,6 @@
 ## Run Test
 
 ```bash
-PRIVATE_KEY=0x17a0a9c70ef442a5234d60d718b1da38ed81027e499c4ac592129d338ba16075 \
 PENDLE_ROUTER_STATIC=0x6813d43782395A1F2AAb42f39aeEDE03ac655e09 \
 forge script script/TestPendleV2Adapter2EndToEnd.s.sol \
 --rpc-url https://rpc.hyperliquid.xyz/evm --broadcast -v

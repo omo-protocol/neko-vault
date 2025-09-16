@@ -19,14 +19,12 @@ Comprehensive test script for PendleV2Adapter2.sol integration with Morpho Vault
 
 ### Basic Test
 ```bash
-PRIVATE_KEY=0x17a0a9c70ef442a5234d60d718b1da38ed81027e499c4ac592129d338ba16075 \
 forge script script/TestPendleV2Adapter2EndToEnd.s.sol \
 --rpc-url https://rpc.hyperliquid.xyz/evm --broadcast -v
 ```
 
 ### With Custom RouterStatic
 ```bash
-PRIVATE_KEY=0x17a0a9c70ef442a5234d60d718b1da38ed81027e499c4ac592129d338ba16075 \
 PENDLE_ROUTER_STATIC=0x263833d47eA3fA4a30f269323aba6a107f9eB14C \
 forge script script/TestPendleV2Adapter2EndToEnd.s.sol \
 --rpc-url https://rpc.hyperliquid.xyz/evm --broadcast -v
