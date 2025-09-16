@@ -113,9 +113,75 @@ They are notably responsible for the vault's performance and liquidity.
 - **Sentinel(s)**: The sentinel role can be used to be able to derisk quickly a vault.
 They are able to revoke pending actions, deallocate funds to idle and decrease caps.
 
-## Developers
 
-Compilation, testing and formatting with [forge](https://book.getfoundry.sh/getting-started/installation).
+# VaultV2 Contract Verification Guide
+
+
+## 📋 Command Instructions
+
+### 1. Deploy New Contract WITH Verification
+
+```bash
+# Deploy and verify in one command
+source .env && forge create src/VaultV2.sol:VaultV2 \
+  --constructor-args 0x95e7EeA16ddbdb8F8aA8b4ec4B23df2067E9A413 0x5555555555555555555555555555555555555555 \
+  --rpc-url https://rpc.hyperliquid.xyz/evm \
+  --private-key $PRIVATE_KEY \
+  --verify \
+  --etherscan-api-key $ETHERSCAN_API_KEY \
+  --chain-id 999 \
+  --compiler-version 0.8.28 \
+  --num-of-optimizations 100000
+```
+
+### 2. Verify EXISTING Contract
+
+#### Step 1: Encode Constructor Arguments
+
+```bash
+cast abi-encode 'constructor(address,address)' 0x95e7EeA16ddbdb8F8aA8b4ec4B23df2067E9A413 0x5555555555555555555555555555555555555555
+
+# Output: 0x00000000000000000000000095e7eea16ddbdb8f8aa8b4ec4b23df2067e9a4130000000000000000000000005555555555555555555555555555555555555555
+```
+
+#### Step 2: Verify Contract
+
+```bash
+source .env && forge verify-contract 0x6427F104D2Ee54a395c61E55FaC5CD02d60F2dEF \
+  src/VaultV2.sol:VaultV2 \
+  --chain-id 999 \
+  --num-of-optimizations 100000 \
+  --constructor-args 0x00000000000000000000000095e7eea16ddbdb8f8aa8b4ec4b23df2067e9a4130000000000000000000000005555555555555555555555555555555555555555 \
+  --etherscan-api-key $ETHERSCAN_API_KEY \
+  --compiler-version 0.8.28
+```
+
+### 3. Alternative Verification (with custom verifier URL)
+
+```bash
+source .env && forge verify-contract 0x6427F104D2Ee54a395c61E55FaC5CD02d60F2dEF \
+  src/VaultV2.sol:VaultV2 \
+  --chain-id 999 \
+  --num-of-optimizations 100000 \
+  --constructor-args 0x00000000000000000000000095e7eea16ddbdb8f8aa8b4ec4b23df2067e9a4130000000000000000000000005555555555555555555555555555555555555555 \
+  --etherscan-api-key $ETHERSCAN_API_KEY \
+  --verifier-url https://api.hyperevmscan.io/api \
+  --compiler-version 0.8.28
+```
+
+---
+
+## 🔑 Key Parameters Explained
+
+| Parameter | Description |
+|-----------|-------------|
+| `--chain-id 999` | HyperEVM chain ID |
+| `--num-of-optimizations 100000` | Must match foundry.toml optimizer_runs |
+| `--compiler-version 0.8.28` | Must match pragma solidity version |
+| `--constructor-args` | ABI-encoded constructor parameters |
+| `--etherscan-api-key` | Use unified Etherscan V2 API key from .env |
+
+---
 
 ## Audits
 

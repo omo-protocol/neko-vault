@@ -15,3 +15,5 @@ docs/
 
 # Certora
 .certora_internal/
+/broadcast
+/.claude
