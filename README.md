@@ -113,6 +113,13 @@ They are notably responsible for the vault's performance and liquidity.
 - **Sentinel(s)**: The sentinel role can be used to be able to derisk quickly a vault.
 They are able to revoke pending actions, deallocate funds to idle and decrease caps.
 
+# Enable Big Block Feature for deploy moree tham 2M Gas
+
+```
+1. activate wallet for hyperliquid account, deposit usdc and swap to HYPE(5 usd)
+2. https://hyperevm-block-toggle.vercel.app/ sign and enable big block feature
+```
+
 
 # VaultV2 Contract Verification Guide
 
