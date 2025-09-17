@@ -190,6 +190,13 @@ source .env && forge verify-contract 0x6427F104D2Ee54a395c61E55FaC5CD02d60F2dEF 
 
 ---
 
+  1. Register adapter with addAdapter()
+  2. Set allocation caps with increaseAbsoluteCap() and increaseRelativeCap()
+  3. Use submit() calls for permissions
+  4. Then call allocate() and deallocate()
+
+  Let me create a proper test following this exact pattern:
+
 ## Audits
 
 All audits are stored in the [audits](./audits/)' folder.

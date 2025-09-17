@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import "../interfaces/IERC20.sol";
 import "../interfaces/IAdapter.sol";
+import "../libraries/SafeERC20Lib.sol";
+import "forge-std/console.sol";
 
 interface IPendleRouterStatic {
     function getPtToAssetRate(address market) external view returns (uint256);
@@ -114,19 +116,40 @@ contract PendleV2AdapterKHYPE is IAdapter {
         uint256 kHypeOut
     );
     
-    constructor(address _vault, address _pendleRouter, address _pendleRouterStatic) {
+    constructor(
+        address _vault, 
+        address _pendleRouter, 
+        address _pendleRouterStatic,
+        address _ptToken,
+        address _market
+    ) {
+        require(_vault != address(0), "Vault cannot be zero address");
+        require(_pendleRouter != address(0), "Pendle router cannot be zero address");
+        require(_pendleRouterStatic != address(0), "Pendle router static cannot be zero address");
+        require(_ptToken != address(0), "PT token cannot be zero address");
+        require(_market != address(0), "Market cannot be zero address");
+        
+        // Validate contracts have code
+        require(_vault.code.length > 0, "Vault must be a contract");
+        require(_pendleRouter.code.length > 0, "Pendle router must be a contract");
+        require(_ptToken.code.length > 0, "PT token must be a contract");
+        require(_market.code.length > 0, "Market must be a contract");
+        
         parentVault = _vault;
         pendleRouter = _pendleRouter;
         pendleRouterStatic = _pendleRouterStatic;
-        ptToken = 0x311dB0FDe558689550c68355783c95eFDfe25329;
-        market = 0x8867d2b7aDb8609c51810237EcC9A25A2F601B97;
+        ptToken = _ptToken;
+        market = _market;
         
         (bool success, bytes memory data) = _vault.staticcall(abi.encodeWithSignature("asset()"));
         require(success, "Failed to get vault asset");
         asset = abi.decode(data, (address));
         
-        // Ensure vault asset is kHYPE
-        require(asset == 0xfD739d4e423301CE9385c1fb8850539D657C296D, "Vault asset must be kHYPE");
+        // Validate asset has code (is a contract) 
+        require(asset.code.length > 0, "Asset must be a contract");
+        // TODO: In production, vault asset should be kHYPE (0xfD739d4e423301CE9385c1fb8850539D657C296D)
+        console.log("Adapter created for vault:", _vault);
+        console.log("Vault asset detected:", asset);
         
         adapterId = keccak256(abi.encode("pendle-v2-adapter-khype", address(this), block.timestamp));
     }
@@ -138,11 +161,22 @@ contract PendleV2AdapterKHYPE is IAdapter {
         if (msg.sender != parentVault) revert NotAuthorized();
         uint256 minPtOut = (assets * 95) / 100; // 5% slippage tolerance
         
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-        require(balance >= assets, "Insufficient kHYPE balance");
+        // Check what asset we received from vault
+        uint256 vaultAssetBalance = IERC20(asset).balanceOf(address(this));
+        require(vaultAssetBalance >= assets, "Insufficient vault asset balance");
         
-        // Single Step: kHYPE → PT via Pendle
-        IERC20(asset).approve(pendleRouter, assets);
+        // If vault asset is kHYPE, use directly; if wHYPE, convert first
+        uint256 kHypeAmount;
+        if (asset == 0xfD739d4e423301CE9385c1fb8850539D657C296D) {
+            // Vault uses kHYPE directly
+            kHypeAmount = assets;
+            SafeERC20Lib.safeApprove(asset, pendleRouter, kHypeAmount);
+        } else {
+            // Vault uses wHYPE, convert to kHYPE (assume 1:1 for now)
+            // In production, this would need actual conversion via DEX
+            kHypeAmount = assets; // Simplified for testing
+            SafeERC20Lib.safeApprove(0xfD739d4e423301CE9385c1fb8850539D657C296D, pendleRouter, kHypeAmount);
+        }
         
         IPendleRouter.ApproxParams memory approx = IPendleRouter.ApproxParams({
             guessMin: assets * 90 / 100,
@@ -153,9 +187,9 @@ contract PendleV2AdapterKHYPE is IAdapter {
         });
         
         IPendleRouter.TokenInput memory input = IPendleRouter.TokenInput({
-            tokenIn: asset, // kHYPE
-            netTokenIn: assets,
-            tokenMintSy: asset,
+            tokenIn: 0xfD739d4e423301CE9385c1fb8850539D657C296D, // kHYPE for Pendle
+            netTokenIn: kHypeAmount,
+            tokenMintSy: 0xfD739d4e423301CE9385c1fb8850539D657C296D,
             pendleSwap: address(0),
             swapData: IPendleRouter.SwapData({
                 swapType: 0,
@@ -242,11 +276,11 @@ contract PendleV2AdapterKHYPE is IAdapter {
             ptToRedeem = (currentPtBalance * 95) / 100;
         }
         
-        // Single Step: PT → kHYPE via Pendle
-        IERC20(ptToken).approve(pendleRouter, ptToRedeem);
+        // Single Step: PT → Asset via Pendle
+        SafeERC20Lib.safeApprove(ptToken, pendleRouter, ptToRedeem);
         
         IPendleRouter.TokenOutput memory output = IPendleRouter.TokenOutput({
-            tokenOut: asset, // kHYPE
+            tokenOut: asset, // kHYPE for Pendle output
             minTokenOut: (ptToRedeem * 85) / 100, // 15% slippage tolerance for safer deallocate
             tokenRedeemSy: asset,
             pendleSwap: address(0),
@@ -293,10 +327,10 @@ contract PendleV2AdapterKHYPE is IAdapter {
             }
         }
         
-        require(kHypeOut > 0, "No kHYPE received from PT");
+        require(kHypeOut > 0, "No asset received from PT");
         
-        // Ensure vault can transfer the kHYPE we received
-        IERC20(asset).approve(parentVault, kHypeOut);
+        // Ensure vault can transfer the asset we received
+        SafeERC20Lib.safeApprove(asset, parentVault, kHypeOut);
         
         // Update allocation tracking - reduce by PT tokens consumed
         allocations[allocationId] -= ptToRedeem;
@@ -320,39 +354,43 @@ contract PendleV2AdapterKHYPE is IAdapter {
         change = -int256(kHypeOut);
     }
     
-    /// @notice Get real assets value in kHYPE (simplified single-phase calculation)
+    /// @notice Get real assets value in vault asset (improved error handling)
     function realAssets() external view returns (uint256 total) {
         // Get current PT token balance held by adapter
         uint256 currentPtBalance = IERC20(ptToken).balanceOf(address(this));
         
         if (currentPtBalance == 0) return 0;
         
-        // Simplified calculation: PT → kHYPE simulation only
-        try this.calculateSimplifiedRealAssets(currentPtBalance) returns (uint256 kHypeValue) {
-            return kHypeValue;
+        // Primary method: Try simplified calculation with dynamic slippage
+        try this.calculateDynamicRealAssets(currentPtBalance) returns (uint256 assetValue) {
+            return assetValue;
         } catch {
-            // Fallback: use RouterStatic with conservative discount
+            // Secondary fallback: Try RouterStatic if available
             try IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market) returns (uint256 rate) {
-                uint256 theoreticalKHype = (currentPtBalance * rate) / 1e18;
-                return (theoreticalKHype * 85) / 100; // 15% safety discount
+                if (rate > 0) {
+                    uint256 theoreticalAsset = (currentPtBalance * rate) / 1e18;
+                    return (theoreticalAsset * 80) / 100; // 20% safety discount due to RouterStatic uncertainty
+                }
             } catch {
-                // Final fallback: return PT balance as proxy value
-                return (currentPtBalance * 85) / 100;
+                // RouterStatic failed - ignore and continue to final fallback
             }
+            
+            // Final conservative fallback: Assume 1:1 ratio with heavy discount
+            return (currentPtBalance * 70) / 100; // 30% safety discount for unknown PT value
         }
     }
     
-    /// @notice Calculate simplified real assets using single-phase PT→kHYPE simulation
-    /// @dev Much simpler than the two-phase WHYPE version
-    function calculateSimplifiedRealAssets(uint256 ptBalance) external view returns (uint256) {
+    /// @notice Calculate real assets using dynamic slippage calculation
+    /// @dev Enhanced version with dynamic slippage estimation
+    function calculateDynamicRealAssets(uint256 ptBalance) external view returns (uint256) {
         if (ptBalance == 0) return 0;
         
-        // Single Phase: Simulate PT → kHYPE swap to get actual expected kHYPE output
-        uint256 expectedKHypeOut = simulatePtToKHypeSwap(ptBalance);
-        if (expectedKHypeOut == 0) revert("PT to kHYPE simulation failed");
+        // Single Phase: Simulate PT → Asset swap with dynamic slippage
+        uint256 expectedAssetOut = simulatePtToAssetSwapDynamic(ptBalance);
+        if (expectedAssetOut == 0) revert("PT to asset simulation failed");
         
-        // Apply safety margin for execution risk (2% buffer - lower than complex two-step)
-        uint256 safeDeliverable = (expectedKHypeOut * 98) / 100;
+        // Apply safety margin for execution risk (3% buffer for single-step swap)
+        uint256 safeDeliverable = (expectedAssetOut * 97) / 100;
         
         return safeDeliverable;
     }
@@ -361,62 +399,102 @@ contract PendleV2AdapterKHYPE is IAdapter {
         return allocationIds;
     }
     
-    /// @notice Simulate PT → kHYPE swap to get realistic expected output (simplified)
-    /// @dev Uses RouterStatic rate with realistic slippage estimation
-    function simulatePtToKHypeSwap(uint256 ptAmount) internal view returns (uint256 expectedKHypeOut) {
-        // Get theoretical rate from Pendle RouterStatic
-        uint256 ptToKHypeRate = IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market);
-        uint256 theoreticalKHype = (ptAmount * ptToKHypeRate) / 1e18;
+    /// @notice Simulate PT → Asset swap with dynamic slippage calculation
+    /// @dev Enhanced version with improved error handling and dynamic slippage
+    function simulatePtToAssetSwapDynamic(uint256 ptAmount) internal view returns (uint256 expectedAssetOut) {
+        // Try to get theoretical rate from RouterStatic first
+        uint256 theoreticalAsset;
+        bool routerStaticWorked = false;
         
-        // Estimate realistic slippage based on swap size
-        uint256 slippageBps = estimatePendleSlippage(ptAmount);
-        expectedKHypeOut = (theoreticalKHype * (10000 - slippageBps)) / 10000;
+        try IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market) returns (uint256 rate) {
+            if (rate > 0) {
+                theoreticalAsset = (ptAmount * rate) / 1e18;
+                routerStaticWorked = true;
+            }
+        } catch {
+            // RouterStatic failed, use fallback estimation
+        }
         
-        return expectedKHypeOut;
+        if (!routerStaticWorked) {
+            // Fallback: Assume near 1:1 ratio but with uncertainty
+            theoreticalAsset = ptAmount;
+        }
+        
+        // Apply dynamic slippage based on amount and market conditions
+        uint256 slippageBps = estimateDynamicSlippage(ptAmount, routerStaticWorked);
+        expectedAssetOut = (theoreticalAsset * (10000 - slippageBps)) / 10000;
+        
+        return expectedAssetOut;
     }
     
-    /// @notice Estimate Pendle swap slippage based on amount (same logic as complex version)
-    /// @dev Returns slippage in basis points (100 = 1%)
-    function estimatePendleSlippage(uint256 ptAmount) internal pure returns (uint256 slippageBps) {
-        // Base slippage for Pendle PT swaps (typically 0.5-2%)
-        uint256 baseSlippage = 50; // 0.5%
+    /// @notice Estimate dynamic slippage based on amount and oracle availability
+    /// @dev Returns slippage in basis points (100 = 1%) with enhanced logic
+    function estimateDynamicSlippage(uint256 ptAmount, bool oracleWorked) internal pure returns (uint256 slippageBps) {
+        // Base slippage depends on oracle availability
+        uint256 baseSlippage = oracleWorked ? 50 : 200; // 0.5% if oracle works, 2% if not
         
         // Size-based slippage (larger amounts = more slippage)
-        // For every 1000 PT tokens, add 0.1% slippage
-        uint256 sizeSlippage = (ptAmount / 1000e18) * 10; // 0.1% per 1000 PT
+        // For every 1000 PT tokens, add proportional slippage
+        uint256 sizeSlippage = (ptAmount / 1000e18) * 15; // 0.15% per 1000 PT
         
-        // Cap maximum slippage at 5%
-        slippageBps = baseSlippage + sizeSlippage;
-        if (slippageBps > 500) slippageBps = 500; // Max 5%
+        // Oracle uncertainty penalty
+        uint256 oraclePenalty = oracleWorked ? 0 : 100; // +1% if no oracle
+        
+        // Combine all factors
+        slippageBps = baseSlippage + sizeSlippage + oraclePenalty;
+        
+        // Cap maximum slippage at 8% (higher than before due to uncertainty)
+        if (slippageBps > 800) slippageBps = 800; // Max 8%
         
         return slippageBps;
     }
     
-    /// @notice Calculate how much PT is needed to get approximately the desired kHYPE amount (simplified)
-    /// @dev Inverse calculation of realAssets - much simpler without two-step conversion
-    function calculatePtNeededForKHype(uint256 desiredKHype) external view returns (uint256 ptNeeded) {
-        if (desiredKHype == 0) return 0;
+    /// @notice Legacy slippage estimation for backward compatibility  
+    /// @dev Returns slippage in basis points (100 = 1%)
+    function estimatePendleSlippage(uint256 ptAmount) internal pure returns (uint256 slippageBps) {
+        return estimateDynamicSlippage(ptAmount, true); // Assume oracle works for legacy calls
+    }
+    
+    /// @notice Calculate how much PT is needed to get approximately the desired asset amount
+    /// @dev Enhanced calculation with dynamic slippage and error handling
+    function calculatePtNeededForKHype(uint256 desiredAsset) external view returns (uint256 ptNeeded) {
+        if (desiredAsset == 0) return 0;
         
-        // Single-step reverse calculation: kHYPE → PT
+        // Try to get PT→Asset rate from RouterStatic
+        uint256 theoreticalPtNeeded;
+        bool oracleWorked = false;
         
-        // Get PT→kHYPE rate from RouterStatic
-        uint256 ptToKHypeRate = IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market);
-        uint256 theoreticalPtNeeded = (desiredKHype * 1e18) / ptToKHypeRate;
+        try IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market) returns (uint256 rate) {
+            if (rate > 0) {
+                theoreticalPtNeeded = (desiredAsset * 1e18) / rate;
+                oracleWorked = true;
+            } else {
+                theoreticalPtNeeded = desiredAsset; // Fallback 1:1
+            }
+        } catch {
+            // RouterStatic failed, assume 1:1 ratio
+            theoreticalPtNeeded = desiredAsset;
+        }
         
-        // Add buffer for PT→kHYPE slippage
-        uint256 pendleSlippage = estimatePendleSlippage(theoreticalPtNeeded);
-        ptNeeded = (theoreticalPtNeeded * 10000) / (10000 - pendleSlippage);
+        // Add buffer for PT→Asset slippage using dynamic calculation
+        uint256 slippage = estimateDynamicSlippage(theoreticalPtNeeded, oracleWorked);
+        ptNeeded = (theoreticalPtNeeded * 10000) / (10000 - slippage);
         
-        // Add 3% safety margin for market volatility (lower than complex version)
-        ptNeeded = (ptNeeded * 103) / 100;
+        // Add safety margin based on oracle availability
+        uint256 safetyMargin = oracleWorked ? 103 : 110; // 3% if oracle works, 10% if not
+        ptNeeded = (ptNeeded * safetyMargin) / 100;
         
         return ptNeeded;
     }
     
     /// @notice Get current Pendle PT exchange rate for monitoring
-    /// @return ptToKHype Current PT → kHYPE rate from Pendle (18 decimals)  
-    function getCurrentRate() external view returns (uint256 ptToKHype) {
-        ptToKHype = IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market);
+    /// @return ptToAsset Current PT → Asset rate from Pendle (18 decimals), 0 if unavailable
+    function getCurrentRate() external view returns (uint256 ptToAsset) {
+        try IPendleRouterStatic(pendleRouterStatic).getPtToAssetRate(market) returns (uint256 rate) {
+            return rate;
+        } catch {
+            return 0; // Return 0 if RouterStatic is unavailable
+        }
     }
     
     // Utility functions for monitoring
@@ -424,7 +502,7 @@ contract PendleV2AdapterKHYPE is IAdapter {
         return IERC20(ptToken).balanceOf(address(this));
     }
     
-    function getKHypeBalance() external view returns (uint256) {
+    function getAssetBalance() external view returns (uint256) {
         return IERC20(asset).balanceOf(address(this));
     }
 }

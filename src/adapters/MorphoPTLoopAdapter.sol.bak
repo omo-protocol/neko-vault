@@ -1,0 +1,710 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (c) 2025 Morpho Association
+pragma solidity 0.8.28;
+
+import {IMorpho, MarketParams, Position, Id} from "../../lib/morpho-blue/src/interfaces/IMorpho.sol";
+import {MorphoBalancesLib} from "../../lib/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
+import {MarketParamsLib} from "../../lib/morpho-blue/src/libraries/MarketParamsLib.sol";
+import {MorphoLib} from "../../lib/morpho-blue/src/libraries/MorphoLib.sol";
+import {IVaultV2} from "../interfaces/IVaultV2.sol";
+import {IAdapter} from "../interfaces/IAdapter.sol";
+import {IERC20} from "../interfaces/IERC20.sol";
+import {IMorphoPTLoopAdapter} from "./interfaces/IMorphoPTLoopAdapter.sol";
+import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
+import {MathLib} from "../libraries/MathLib.sol";
+
+/// @notice Pendle Router interface for PT conversions
+interface IPendleRouter {
+    struct ApproxParams {
+        uint256 guessMin;
+        uint256 guessMax;
+        uint256 guessOffchain;
+        uint256 maxIteration;
+        uint256 eps;
+    }
+    
+    struct SwapData {
+        uint8 swapType;
+        address extRouter;
+        bytes extCalldata;
+        bool needScale;
+    }
+    
+    struct TokenInput {
+        address tokenIn;
+        uint256 netTokenIn;
+        address tokenMintSy;
+        address pendleSwap;
+        SwapData swapData;
+    }
+
+    struct TokenOutput {
+        address tokenOut;
+        uint256 minTokenOut;
+        address tokenRedeemSy;
+        address pendleSwap;
+        SwapData swapData;
+    }
+
+    struct ComplexLimitOrderData {
+        address limitRouter;
+        uint256 epsSkipMarket;
+        FillOrderParams[] normalFills;
+        FillOrderParams[] flashFills;
+        bytes optData;
+    }
+
+    struct FillOrderParams {
+        OrderInfo order;
+        bytes signature;
+        uint256 makingAmount;
+    }
+
+    struct OrderInfo {
+        uint256 salt;
+        uint256 expiry;
+        uint256 nonce;
+        uint8 orderType;
+        address token;
+        address YT;
+        address maker;
+        address receiver;
+        uint256 makingAmount;
+        uint256 lnImpliedRate;
+        uint256 failSafeRate;
+        bytes permit;
+    }
+    
+    function swapExactTokenForPt(
+        address receiver,
+        address market,
+        uint256 minPtOut,
+        ApproxParams calldata guessPtOut,
+        TokenInput calldata input,
+        ComplexLimitOrderData calldata limit
+    ) external returns (uint256 netPtOut, uint256 netSyFee);
+
+    function swapExactPtForToken(
+        address receiver,
+        address market,
+        uint256 exactPtIn,
+        TokenOutput calldata output,
+        ComplexLimitOrderData calldata limit
+    ) external returns (uint256 netTokenOut, uint256 netSyFee);
+}
+
+/// @title MorphoPTLoopAdapter  
+/// @notice Adapter implementing leveraged PT (Principal Token) loop strategy on Felix vanilla markets
+/// @dev Uses kHYPE-PT as collateral to borrow kHYPE, converting to more PT for leverage
+contract MorphoPTLoopAdapter is IMorphoPTLoopAdapter, IAdapter {
+    using MarketParamsLib for MarketParams;
+    using MathLib for uint256;
+
+    /* CONSTANTS */
+    
+    uint256 internal constant WAD = 1e18;
+    uint256 internal constant MAX_ITERATIONS = 10; // Maximum loop iterations for safety
+    
+    /* IMMUTABLES */
+
+    address public immutable factory;
+    address public immutable parentVault;
+    address public immutable asset; // Vault asset (kHYPE)
+    address public immutable morpho; // Felix vanilla Morpho contract
+    address public immutable ptToken; // kHYPE-PT token
+    bytes32 public immutable adapterId;
+    
+    /* STORAGE */
+
+    address public pendleRouter;
+    address public skimRecipient;
+    MarketParams public loopMarketParams; // The kHYPE-PT market for looping
+    StrategyParams public strategyParams;
+    
+    /* MODIFIERS */
+    
+    modifier onlyVault() {
+        if (msg.sender != parentVault) revert NotAuthorized();
+        _;
+    }
+    
+    modifier onlyOwner() {
+        if (msg.sender != IVaultV2(parentVault).owner()) revert NotAuthorized();
+        _;
+    }
+    
+    modifier onlySkimRecipient() {
+        if (msg.sender != skimRecipient) revert NotAuthorized();
+        _;
+    }
+
+    /* CONSTRUCTOR */
+
+    constructor(
+        address _parentVault,
+        address _morpho, 
+        address _pendleRouter,
+        address _ptToken,
+        MarketParams memory _loopMarketParams
+    ) {
+        factory = msg.sender;
+        parentVault = _parentVault;
+        morpho = _morpho;
+        pendleRouter = _pendleRouter;
+        ptToken = _ptToken;
+        loopMarketParams = _loopMarketParams;
+        asset = IVaultV2(_parentVault).asset();
+        adapterId = keccak256(abi.encode("pt-loop", address(this)));
+        
+        // Validate market configuration
+        if (_loopMarketParams.loanToken != asset) revert LoanAssetMismatch();
+        if (_loopMarketParams.collateralToken != _ptToken) revert CollateralAssetMismatch();
+        
+        // Set default strategy parameters
+        strategyParams = StrategyParams({
+            maxLeverage: 300, // 3x maximum leverage  
+            targetHealthFactor: 150, // 1.5x target health factor
+            minHealthFactor: 110, // 1.1x minimum before emergency deleverage
+            maxSlippage: 200 // 2% maximum slippage
+        });
+        
+        // Approve tokens for interactions
+        SafeERC20Lib.safeApprove(asset, _morpho, type(uint256).max);
+        SafeERC20Lib.safeApprove(_ptToken, _morpho, type(uint256).max);
+        SafeERC20Lib.safeApprove(asset, _pendleRouter, type(uint256).max);
+        SafeERC20Lib.safeApprove(_ptToken, _pendleRouter, type(uint256).max);
+        SafeERC20Lib.safeApprove(asset, _parentVault, type(uint256).max);
+    }
+
+    /* ADAPTER INTERFACE IMPLEMENTATION */
+
+    /// @notice Allocate assets to leveraged PT position
+    function allocate(bytes memory data, uint256 assets, bytes4, address) external onlyVault returns (bytes32[] memory, int256) {
+        uint256 targetLeverage = 0; // Auto-calculate optimal leverage
+        if (data.length > 0) {
+            targetLeverage = abi.decode(data, (uint256));
+        }
+        
+        uint256 oldNetValue = _getNetPositionValue();
+        increasePosition(assets, targetLeverage);
+        uint256 newNetValue = _getNetPositionValue();
+        
+        return (_getIds(), int256(newNetValue) - int256(oldNetValue));
+    }
+
+    /// @notice Deallocate assets from leveraged PT position
+    function deallocate(bytes memory, uint256 assets, bytes4, address) external onlyVault returns (bytes32[] memory, int256) {
+        uint256 oldNetValue = _getNetPositionValue();
+        decreasePosition(assets);
+        uint256 newNetValue = _getNetPositionValue();
+        
+        return (_getIds(), int256(newNetValue) - int256(oldNetValue));
+    }
+
+    /// @notice Get total real assets value of the position
+    function realAssets() external view returns (uint256) {
+        return _getNetPositionValue();
+    }
+
+    /// @notice Get adapter IDs for allocation tracking
+    function ids(address) external view returns (bytes32[] memory) {
+        return _getIds();
+    }
+
+    /* STRATEGY FUNCTIONS */
+
+    /// @notice Increase leveraged position by adding assets and looping
+    function increasePosition(uint256 additionalAssets, uint256 targetLeverage) public onlyVault {
+        if (additionalAssets == 0) return;
+        
+        // Calculate optimal leverage if not specified
+        if (targetLeverage == 0) {
+            targetLeverage = _calculateOptimalLeverage();
+        }
+        
+        if (targetLeverage > strategyParams.maxLeverage) revert MaxLeverageExceeded();
+        
+        // Execute leveraged loop
+        uint256 initialCollateral = _convertToCollateral(additionalAssets);
+        uint256 totalCollateralDeployed = _executeLeverageLoop(initialCollateral, targetLeverage);
+        
+        uint256 healthFactor = getHealthFactor();
+        if (healthFactor < strategyParams.minHealthFactor) revert HealthFactorTooLow();
+        
+        emit PositionIncreased(
+            loopMarketParams.id().unwrap(),
+            totalCollateralDeployed,
+            _getBorrowedAssets(),
+            healthFactor
+        );
+    }
+
+    /// @notice Decrease position by repaying debt and withdrawing collateral
+    function decreasePosition(uint256 assetsToWithdraw) public onlyVault {
+        if (assetsToWithdraw == 0) return;
+        
+        // Calculate how much collateral and debt to unwind
+        (uint256 collateralToWithdraw, uint256 debtToRepay) = _calculateUnwindAmounts(assetsToWithdraw);
+        
+        // Execute deleverage loop
+        _executeDeleverageLoop(collateralToWithdraw, debtToRepay);
+        
+        uint256 healthFactor = getHealthFactor();
+        emit PositionDecreased(
+            loopMarketParams.id().unwrap(),
+            collateralToWithdraw,
+            debtToRepay,
+            healthFactor
+        );
+    }
+
+    /// @notice Rebalance position to maintain target health factor
+    function rebalance() external {
+        uint256 currentHealthFactor = getHealthFactor();
+        uint256 targetHealthFactor = strategyParams.targetHealthFactor;
+        
+        if (!needsRebalancing()) return;
+        
+        uint256 oldHealthFactor = currentHealthFactor;
+        
+        if (currentHealthFactor < targetHealthFactor) {
+            // Health factor too low - reduce leverage
+            _reducePositionToTargetHealth();
+        } else if (currentHealthFactor > targetHealthFactor * 120 / 100) {
+            // Health factor too high - increase leverage if beneficial
+            _increasePositionToTargetHealth();
+        }
+        
+        uint256 newHealthFactor = getHealthFactor();
+        emit Rebalanced(loopMarketParams.id().unwrap(), oldHealthFactor, newHealthFactor);
+    }
+
+    /// @notice Emergency deleverage when approaching liquidation
+    function emergencyDeleverage() external {
+        uint256 healthFactor = getHealthFactor();
+        if (healthFactor >= strategyParams.minHealthFactor) return;
+        
+        // Close entire position in emergency
+        (uint256 collateralWithdrawn, uint256 debtRepaid) = _closePosition();
+        
+        emit EmergencyDeleveraged(
+            loopMarketParams.id().unwrap(),
+            collateralWithdrawn,
+            debtRepaid
+        );
+    }
+
+    /// @notice Fully close the leveraged position
+    function closePosition() external onlyVault {
+        _closePosition();
+    }
+
+    /* VIEW FUNCTIONS */
+
+    /// @notice Get current position information
+    function getPositionInfo() external view returns (PositionInfo memory) {
+        uint256 collateralAssets = _getCollateralAssets();
+        uint256 borrowedAssets = _getBorrowedAssets();
+        uint256 netValue = _getNetPositionValue();
+        uint256 healthFactor = getHealthFactor();
+        uint256 leverage = collateralAssets > 0 ? (collateralAssets * WAD) / (collateralAssets - borrowedAssets) : 0;
+        
+        return PositionInfo({
+            collateralAssets: collateralAssets,
+            borrowedAssets: borrowedAssets,
+            netValue: netValue,
+            healthFactor: healthFactor,
+            leverage: leverage
+        });
+    }
+
+    /// @notice Get current health factor
+    function getHealthFactor() public view returns (uint256) {
+        Position memory position = IMorpho(morpho).position(loopMarketParams.id(), address(this));
+        if (position.borrowShares == 0) return type(uint256).max; // No debt = infinite health
+        
+        uint256 collateralValue = _getCollateralValue();
+        uint256 borrowedValue = _getBorrowedValue();
+        uint256 maxBorrowable = collateralValue.mulDivDown(loopMarketParams.lltv, WAD);
+        
+        return borrowedValue > 0 ? (maxBorrowable * WAD) / borrowedValue : type(uint256).max;
+    }
+
+    /// @notice Get maximum borrowable amount based on current collateral
+    function getMaxBorrowable() external view returns (uint256) {
+        uint256 collateralValue = _getCollateralValue();
+        return collateralValue.mulDivDown(loopMarketParams.lltv, WAD);
+    }
+
+    /// @notice Get maximum collateral that can be withdrawn
+    function getMaxWithdrawable() external view returns (uint256) {
+        uint256 borrowedValue = _getBorrowedValue();
+        if (borrowedValue == 0) return _getCollateralAssets();
+        
+        uint256 minCollateralRequired = borrowedValue.mulDivUp(WAD, loopMarketParams.lltv);
+        uint256 currentCollateral = _getCollateralValue();
+        
+        return currentCollateral > minCollateralRequired 
+            ? currentCollateral - minCollateralRequired 
+            : 0;
+    }
+
+    /// @notice Check if position needs rebalancing
+    function needsRebalancing() public view returns (bool) {
+        uint256 healthFactor = getHealthFactor();
+        uint256 target = strategyParams.targetHealthFactor;
+        
+        // Rebalance if health factor is outside 10% range of target
+        return healthFactor < target * 90 / 100 || healthFactor > target * 120 / 100;
+    }
+
+    /* INTERNAL FUNCTIONS */
+
+    /// @notice Execute leverage loop to reach target leverage
+    function _executeLeverageLoop(uint256 initialCollateral, uint256 targetLeverage) internal returns (uint256 totalCollateralDeployed) {
+        uint256 collateralDeployed = initialCollateral;
+        uint256 iteration = 0;
+        
+        // Supply initial collateral
+        IMorpho(morpho).supplyCollateral(loopMarketParams, initialCollateral, address(this), hex"");
+        totalCollateralDeployed = initialCollateral;
+        
+        while (iteration < MAX_ITERATIONS) {
+            // Calculate how much we can borrow based on current collateral
+            uint256 maxBorrowable = getMaxBorrowable();
+            uint256 currentBorrowed = _getBorrowedAssets();
+            uint256 additionalBorrow = 0;
+            
+            // Calculate target additional borrow to reach desired leverage
+            uint256 currentNetAssets = totalCollateralDeployed - currentBorrowed;
+            uint256 targetTotalCollateral = (currentNetAssets * targetLeverage) / 100;
+            
+            if (targetTotalCollateral > totalCollateralDeployed) {
+                uint256 targetAdditionalCollateral = targetTotalCollateral - totalCollateralDeployed;
+                additionalBorrow = targetAdditionalCollateral;
+                
+                // Don't exceed borrowing capacity
+                if (currentBorrowed + additionalBorrow > maxBorrowable.mulDivDown(95, 100)) {
+                    additionalBorrow = maxBorrowable.mulDivDown(95, 100) - currentBorrowed;
+                }
+            }
+            
+            if (additionalBorrow < 1000) break; // Stop if borrowing tiny amounts
+            
+            // Borrow kHYPE
+            IMorpho(morpho).borrow(loopMarketParams, additionalBorrow, 0, address(this), address(this));
+            
+            // Convert borrowed kHYPE to PT
+            uint256 ptReceived = _convertToCollateral(additionalBorrow);
+            
+            // Supply PT as additional collateral
+            IMorpho(morpho).supplyCollateral(loopMarketParams, ptReceived, address(this), hex"");
+            
+            totalCollateralDeployed += ptReceived;
+            iteration++;
+        }
+        
+        return totalCollateralDeployed;
+    }
+
+    /// @notice Execute deleverage loop to unwind position
+    function _executeDeleverageLoop(uint256 targetCollateralToWithdraw, uint256 targetDebtToRepay) internal {
+        uint256 collateralWithdrawn = 0;
+        uint256 debtRepaid = 0;
+        uint256 iteration = 0;
+        
+        while (iteration < MAX_ITERATIONS && debtRepaid < targetDebtToRepay) {
+            uint256 remainingDebt = targetDebtToRepay - debtRepaid;
+            uint256 remainingCollateral = targetCollateralToWithdraw - collateralWithdrawn;
+            
+            // Calculate safe amount to withdraw maintaining health factor
+            uint256 maxSafeWithdraw = _calculateMaxSafeWithdraw();
+            uint256 withdrawThisIteration = MathLib.min(remainingCollateral, maxSafeWithdraw);
+            
+            if (withdrawThisIteration == 0) break;
+            
+            // Withdraw PT collateral
+            IMorpho(morpho).withdrawCollateral(loopMarketParams, withdrawThisIteration, address(this), address(this));
+            
+            // Convert PT to kHYPE
+            uint256 kHypeReceived = _convertFromCollateral(withdrawThisIteration);
+            
+            // Repay debt
+            uint256 repayThisIteration = MathLib.min(remainingDebt, kHypeReceived);
+            if (repayThisIteration > 0) {
+                IMorpho(morpho).repay(loopMarketParams, repayThisIteration, 0, address(this), hex"");
+            }
+            
+            collateralWithdrawn += withdrawThisIteration;
+            debtRepaid += repayThisIteration;
+            iteration++;
+        }
+    }
+
+    /// @notice Close entire position
+    function _closePosition() internal returns (uint256 collateralWithdrawn, uint256 debtRepaid) {
+        uint256 totalCollateral = _getCollateralAssets();
+        uint256 totalDebt = _getBorrowedAssets();
+        
+        if (totalCollateral == 0 && totalDebt == 0) return (0, 0);
+        
+        // Execute full deleverage
+        _executeDeleverageLoop(totalCollateral, totalDebt);
+        
+        return (totalCollateral, totalDebt);
+    }
+
+    /// @notice Convert vault asset (kHYPE) to collateral (kHYPE-PT)
+    function _convertToCollateral(uint256 assetAmount) internal returns (uint256 ptReceived) {
+        if (assetAmount == 0) return 0;
+        
+        // Create empty limit order data
+        IPendleRouter.ComplexLimitOrderData memory limit = IPendleRouter.ComplexLimitOrderData({
+            limitRouter: address(0),
+            epsSkipMarket: 0,
+            normalFills: new IPendleRouter.FillOrderParams[](0),
+            flashFills: new IPendleRouter.FillOrderParams[](0),
+            optData: ""
+        });
+        
+        // Setup token input
+        IPendleRouter.TokenInput memory input = IPendleRouter.TokenInput({
+            tokenIn: asset,
+            netTokenIn: assetAmount,
+            tokenMintSy: asset,
+            pendleSwap: address(0),
+            swapData: IPendleRouter.SwapData({
+                swapType: 0,
+                extRouter: address(0),
+                extCalldata: "",
+                needScale: false
+            })
+        });
+        
+        // Setup approximation parameters
+        IPendleRouter.ApproxParams memory approx = IPendleRouter.ApproxParams({
+            guessMin: assetAmount.mulDivDown(90, 100),
+            guessMax: assetAmount.mulDivUp(110, 100),
+            guessOffchain: assetAmount,
+            maxIteration: 30,
+            eps: 1e13
+        });
+        
+        uint256 minPtOut = assetAmount.mulDivDown(WAD - strategyParams.maxSlippage, WAD);
+        
+        // Execute swap: kHYPE -> kHYPE-PT
+        (uint256 netPtOut,) = IPendleRouter(pendleRouter).swapExactTokenForPt(
+            address(this),
+            address(0), // Market address - may need to be set correctly
+            minPtOut,
+            approx,
+            input,
+            limit
+        );
+        
+        return netPtOut;
+    }
+
+    /// @notice Convert collateral (kHYPE-PT) to vault asset (kHYPE)
+    function _convertFromCollateral(uint256 ptAmount) internal returns (uint256 assetReceived) {
+        if (ptAmount == 0) return 0;
+        
+        // Create empty limit order data
+        IPendleRouter.ComplexLimitOrderData memory limit = IPendleRouter.ComplexLimitOrderData({
+            limitRouter: address(0),
+            epsSkipMarket: 0,
+            normalFills: new IPendleRouter.FillOrderParams[](0),
+            flashFills: new IPendleRouter.FillOrderParams[](0),
+            optData: ""
+        });
+        
+        // Setup token output
+        IPendleRouter.TokenOutput memory output = IPendleRouter.TokenOutput({
+            tokenOut: asset,
+            minTokenOut: ptAmount.mulDivDown(WAD - strategyParams.maxSlippage, WAD),
+            tokenRedeemSy: asset,
+            pendleSwap: address(0),
+            swapData: IPendleRouter.SwapData({
+                swapType: 0,
+                extRouter: address(0),
+                extCalldata: "",
+                needScale: false
+            })
+        });
+        
+        // Execute swap: kHYPE-PT -> kHYPE
+        (uint256 netTokenOut,) = IPendleRouter(pendleRouter).swapExactPtForToken(
+            address(this),
+            address(0), // Market address - may need to be set correctly
+            ptAmount,
+            output,
+            limit
+        );
+        
+        return netTokenOut;
+    }
+
+    /// @notice Get net position value in vault asset terms
+    function _getNetPositionValue() internal view returns (uint256) {
+        uint256 collateralValue = _getCollateralValue();
+        uint256 borrowedValue = _getBorrowedValue();
+        
+        return collateralValue > borrowedValue ? collateralValue - borrowedValue : 0;
+    }
+
+    /// @notice Get collateral assets amount
+    function _getCollateralAssets() internal view returns (uint256) {
+        Position memory position = IMorpho(morpho).position(loopMarketParams.id(), address(this));
+        return MorphoBalancesLib.expectedSupplyAssets(IMorpho(morpho), loopMarketParams, address(this));
+    }
+
+    /// @notice Get borrowed assets amount  
+    function _getBorrowedAssets() internal view returns (uint256) {
+        return MorphoBalancesLib.expectedBorrowAssets(IMorpho(morpho), loopMarketParams, address(this));
+    }
+
+    /// @notice Get collateral value in loan token terms
+    function _getCollateralValue() internal view returns (uint256) {
+        uint256 collateralAssets = _getCollateralAssets();
+        // For now, assume 1:1 pricing - would need oracle integration for accurate pricing
+        return collateralAssets;
+    }
+
+    /// @notice Get borrowed value in loan token terms
+    function _getBorrowedValue() internal view returns (uint256) {
+        return _getBorrowedAssets();
+    }
+
+    /// @notice Calculate optimal leverage based on current market conditions
+    function _calculateOptimalLeverage() internal view returns (uint256) {
+        // Simple heuristic - use 70% of max leverage
+        return strategyParams.maxLeverage.mulDivDown(70, 100);
+    }
+
+    /// @notice Calculate amounts to unwind for desired withdrawal
+    function _calculateUnwindAmounts(uint256 assetsToWithdraw) internal view returns (uint256 collateralToWithdraw, uint256 debtToRepay) {
+        uint256 totalCollateral = _getCollateralAssets();
+        uint256 totalDebt = _getBorrowedAssets();
+        uint256 netValue = _getNetPositionValue();
+        
+        if (netValue == 0) return (0, 0);
+        
+        // Calculate proportional unwind
+        uint256 unwindRatio = assetsToWithdraw.mulDivUp(WAD, netValue);
+        
+        collateralToWithdraw = totalCollateral.mulDivUp(unwindRatio, WAD);
+        debtToRepay = totalDebt.mulDivUp(unwindRatio, WAD);
+    }
+
+    /// @notice Calculate maximum safe collateral withdrawal
+    function _calculateMaxSafeWithdraw() internal view returns (uint256) {
+        uint256 borrowedValue = _getBorrowedValue();
+        if (borrowedValue == 0) return _getCollateralAssets();
+        
+        uint256 targetHealthFactor = strategyParams.targetHealthFactor;
+        uint256 minCollateralRequired = borrowedValue.mulDivUp(WAD * targetHealthFactor, loopMarketParams.lltv * 100);
+        uint256 currentCollateral = _getCollateralValue();
+        
+        return currentCollateral > minCollateralRequired 
+            ? currentCollateral - minCollateralRequired 
+            : 0;
+    }
+
+    /// @notice Reduce position to target health factor
+    function _reducePositionToTargetHealth() internal {
+        // Implementation would calculate and execute position reduction
+        // This is a placeholder for the complex logic
+    }
+
+    /// @notice Increase position to target health factor  
+    function _increasePositionToTargetHealth() internal {
+        // Implementation would calculate and execute position increase
+        // This is a placeholder for the complex logic
+    }
+
+    /// @notice Get adapter IDs for tracking
+    function _getIds() internal view returns (bytes32[] memory) {
+        bytes32[] memory ids_ = new bytes32[](3);
+        ids_[0] = adapterId;
+        ids_[1] = keccak256(abi.encode("collateralToken", loopMarketParams.collateralToken));
+        ids_[2] = keccak256(abi.encode("pt-loop/marketParams", address(this), loopMarketParams));
+        return ids_;
+    }
+
+    /* ADMIN FUNCTIONS */
+
+    function setStrategyParams(StrategyParams calldata newParams) external onlyOwner {
+        if (newParams.maxLeverage == 0 || newParams.maxLeverage > 1000) revert InvalidStrategyParameters();
+        if (newParams.targetHealthFactor <= newParams.minHealthFactor) revert InvalidStrategyParameters();
+        if (newParams.minHealthFactor < 100) revert InvalidStrategyParameters();
+        
+        strategyParams = newParams;
+        emit StrategyParametersUpdated(newParams.maxLeverage, newParams.targetHealthFactor, newParams.minHealthFactor);
+    }
+
+    function setPendleRouter(address newPendleRouter) external onlyOwner {
+        address oldRouter = pendleRouter;
+        pendleRouter = newPendleRouter;
+        
+        // Update approvals
+        SafeERC20Lib.safeApprove(asset, newPendleRouter, type(uint256).max);
+        SafeERC20Lib.safeApprove(ptToken, newPendleRouter, type(uint256).max);
+        
+        emit SetPendleRouter(oldRouter, newPendleRouter);
+    }
+
+    function setSkimRecipient(address newSkimRecipient) external onlyOwner {
+        skimRecipient = newSkimRecipient;
+        emit SetSkimRecipient(newSkimRecipient);
+    }
+
+    function skim(address token) external onlySkimRecipient {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        SafeERC20Lib.safeTransfer(token, skimRecipient, balance);
+        emit Skim(token, balance);
+    }
+
+    /* VIEW GETTERS */
+
+    function calculateOptimalLoopIterations(uint256 assets, uint256 targetLeverage) external view returns (uint256) {
+        // Estimate iterations needed - simplified calculation
+        if (targetLeverage <= 100) return 0;
+        
+        uint256 leverageRatio = targetLeverage - 100; // Remove base 100%
+        uint256 lltv = loopMarketParams.lltv;
+        
+        // Each iteration can multiply position by approximately lltv
+        return (leverageRatio * WAD) / lltv;
+    }
+
+    function simulatePositionIncrease(uint256 additionalAssets) external view returns (uint256 newHealthFactor, uint256 newLeverage) {
+        // Simplified simulation - would need more complex logic for accurate results
+        uint256 currentNetValue = _getNetPositionValue();
+        uint256 projectedNetValue = currentNetValue + additionalAssets;
+        
+        // Estimate new leverage assuming optimal allocation
+        newLeverage = _calculateOptimalLeverage();
+        
+        // Estimate health factor based on target parameters
+        newHealthFactor = strategyParams.targetHealthFactor;
+        
+        return (newHealthFactor, newLeverage);
+    }
+
+    function simulatePositionDecrease(uint256 assetsToRemove) external view returns (uint256 newHealthFactor, uint256 newLeverage) {
+        // Simplified simulation - would need more complex logic for accurate results
+        uint256 currentNetValue = _getNetPositionValue();
+        uint256 projectedNetValue = currentNetValue > assetsToRemove ? currentNetValue - assetsToRemove : 0;
+        
+        if (projectedNetValue == 0) {
+            return (type(uint256).max, 100); // No leverage when no position
+        }
+        
+        // Estimate based on proportional reduction
+        uint256 currentLeverage = getPositionInfo().leverage;
+        newLeverage = currentLeverage; // Simplified - leverage ratio typically stays similar
+        newHealthFactor = getHealthFactor(); // Simplified - would improve slightly
+        
+        return (newHealthFactor, newLeverage);
+    }
+}
