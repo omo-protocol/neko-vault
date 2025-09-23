@@ -78,7 +78,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
 
         // Configure valuer
         vm.startPrank(vaultOwner);
-        valuer.configureSigner(signer1, true, 100);
+        valuer.initiateSignerChange(signer1, true, 100);
         valuer.setRequiredWeight(100);
         valuer.configureStrategy(STRATEGY_A, 0, 24 hours, 500, 95);
         valuer.configureStrategy(STRATEGY_B, 0, 24 hours, 500, 95);
@@ -122,11 +122,10 @@ contract UniversalEscrowSimpleE2ETest is Test {
         vault.increaseAbsoluteCap(strategyBCapData, 1000e18);
 
         // Set relative caps to 100% (WAD) to bypass relative cap checks
-        uint256 WAD = 1e18;
         bytes memory increaseRelCapAData = abi.encodeWithSelector(
             vault.increaseRelativeCap.selector,
             strategyACapData,
-            WAD // 100% relative cap for Strategy A
+            1e18 // 100% relative cap for Strategy A
         );
         vault.submit(increaseRelCapAData);
         vault.increaseRelativeCap(strategyACapData, WAD);
@@ -134,7 +133,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
         bytes memory increaseRelCapBData = abi.encodeWithSelector(
             vault.increaseRelativeCap.selector,
             strategyBCapData,
-            WAD // 100% relative cap for Strategy B
+            1e18 // 100% relative cap for Strategy B
         );
         vault.submit(increaseRelCapBData);
         vault.increaseRelativeCap(strategyBCapData, WAD);
@@ -191,12 +190,12 @@ contract UniversalEscrowSimpleE2ETest is Test {
         uint256 nonce = 1;
 
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signValue(STRATEGY_A, strategyValue, confidence, nonce, signer1Key);
+        signatures[0] = _signValue(STRATEGY_A, strategyValue, confidence, nonce, block.timestamp + 3600, signer1Key);
 
         vm.expectEmit(true, true, true, true, address(valuer));
         emit ValueUpdated(STRATEGY_A, strategyValue, confidence, block.timestamp, true);
 
-        valuer.updateValue(STRATEGY_A, strategyValue, confidence, nonce, signatures);
+        valuer.updateValue(STRATEGY_A, strategyValue, confidence, nonce, block.timestamp + 3600, signatures);
 
         assertEq(valuer.getValue(STRATEGY_A), strategyValue);
 
@@ -212,8 +211,8 @@ contract UniversalEscrowSimpleE2ETest is Test {
 
         // Step 5: Update second strategy valuation
         uint256 strategyBValue = 210e18;
-        signatures[0] = _signValue(STRATEGY_B, strategyBValue, confidence, 2, signer1Key);
-        valuer.updateValue(STRATEGY_B, strategyBValue, confidence, 2, signatures);
+        signatures[0] = _signValue(STRATEGY_B, strategyBValue, confidence, 2, block.timestamp + 3600, signer1Key);
+        valuer.updateValue(STRATEGY_B, strategyBValue, confidence, 2, block.timestamp + 3600, signatures);
 
         // Step 6: Deallocate from strategy A
         uint256 deallocateAmount = 300e18;
@@ -260,12 +259,12 @@ contract UniversalEscrowSimpleE2ETest is Test {
         confidences[1] = 97;
 
         uint256 nonce = 1;
-        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce));
+        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce, block.timestamp + 3600));
 
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _signBatchHash(batchHash, signer1Key);
 
-        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, signatures);
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, block.timestamp + 3600, signatures);
 
         assertEq(valuer.getValue(STRATEGY_A), 420e18);
         assertEq(valuer.getValue(STRATEGY_B), 315e18);
@@ -386,8 +385,8 @@ contract UniversalEscrowSimpleE2ETest is Test {
 
         // Set initial valuation
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signValue(STRATEGY_A, 420e18, 95, 1, signer1Key);
-        valuer.updateValue(STRATEGY_A, 420e18, 95, 1, signatures);
+        signatures[0] = _signValue(STRATEGY_A, 420e18, 95, 1, block.timestamp + 3600, signer1Key);
+        valuer.updateValue(STRATEGY_A, 420e18, 95, 1, block.timestamp + 3600, signatures);
 
         // Set fallback value
         vm.prank(vaultOwner);
@@ -407,6 +406,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
         uint256 value,
         uint256 confidence,
         uint256 nonce,
+        uint256 expiry,
         uint256 privateKey
     ) internal view returns (bytes memory) {
         bytes32 messageHash = keccak256(abi.encode(
@@ -414,6 +414,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
             value,
             confidence,
             nonce,
+            expiry,
             block.chainid,
             address(valuer)
         ));

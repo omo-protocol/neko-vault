@@ -71,6 +71,12 @@ interface IUniversalValuerOffchain {
 
     event EmergencyValueUpdate(bytes32 indexed strategyId, uint256 value);
 
+    event SignerRemovalInitiated(address indexed signer, uint256 executeTimestamp);
+
+    event SignerRemovalCancelled(address indexed signer);
+
+    event PriceChangeBoundsSet(bytes32 indexed strategyId, uint256 maxChangeBps);
+
     /* ERRORS */
 
     error NotAuthorized();
@@ -83,6 +89,13 @@ interface IUniversalValuerOffchain {
     error ArrayLengthMismatch();
     error EmergencyMode();
     error NotInEmergencyMode();
+    error SignatureExpired();
+    error SignatureExpiryTooFar();
+    error NoSignerRemovalPending();
+    error SignerRemovalTimelockNotExpired();
+    error InvalidWeight();
+    error InvalidPriceChangeBounds();
+    error PriceChangeExceedsBounds(uint256 changePercent, uint256 maxChange);
 
     /* FUNCTIONS */
 
@@ -91,12 +104,14 @@ interface IUniversalValuerOffchain {
     /// @param value The calculated value
     /// @param confidence Confidence score (0-100)
     /// @param nonce Unique nonce to prevent replay
+    /// @param expiry Signature expiry timestamp
     /// @param signatures Array of signatures from authorized signers
     function updateValue(
         bytes32 strategyId,
         uint256 value,
         uint256 confidence,
         uint256 nonce,
+        uint256 expiry,
         bytes[] calldata signatures
     ) external;
 
@@ -119,12 +134,14 @@ interface IUniversalValuerOffchain {
     /// @param values Array of values
     /// @param confidences Array of confidence scores
     /// @param nonce Shared nonce for the batch
+    /// @param expiry Signature expiry timestamp
     /// @param signatures Signatures authorizing the batch
     function batchUpdateValues(
         bytes32[] calldata strategyIds,
         uint256[] calldata values,
         uint256[] calldata confidences,
         uint256 nonce,
+        uint256 expiry,
         bytes[] calldata signatures
     ) external;
 

@@ -13,6 +13,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     uint256 private constant MAX_STALENESS = 24 hours;
     uint256 private constant MIN_UPDATE_INTERVAL = 5 minutes;
     uint256 private constant BASIS_POINTS = 10000;
+    uint256 private constant SIGNER_TIMELOCK = 24 hours; // 24-hour timelock for signer changes
+    uint256 private constant MAX_SIGNATURE_AGE = 1 hours; // 1-hour signature expiry
+    uint256 private constant MAX_PRICE_CHANGE_BPS = 5000; // 50% max price change per update
 
     /* IMMUTABLES */
 
@@ -31,6 +34,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     // Fallback values for emergency
     mapping(bytes32 => uint256) public fallbackValues;
     bool public emergencyMode;
+
+    // Signer rotation timelock
+    mapping(address => uint256) public signerChangeTimestamp;
+    mapping(address => bool) public pendingSignerRemoval;
+
+    // Price validation bounds
+    mapping(bytes32 => uint256) public maxPriceChangeBps; // Per-strategy max change
 
     /* MODIFIERS */
 
@@ -60,12 +70,17 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 value,
         uint256 confidence,
         uint256 nonce,
+        uint256 expiry,
         bytes[] calldata signatures
     ) external override notEmergency {
         ValueReport memory lastReport = latestReports[strategyId];
 
         // Validate nonce to prevent replay
         if (nonce <= lastReport.nonce) revert StaleNonce();
+
+        // Validate signature expiry
+        if (expiry < block.timestamp) revert SignatureExpired();
+        if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
         // Check minimum update interval (unless significant change)
         UpdateConfig memory config = updateConfigs[strategyId];
@@ -78,12 +93,16 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
         }
 
-        // Verify signatures
+        // Validate price bounds
+        _validatePriceBounds(strategyId, lastReport.value, value);
+
+        // Verify signatures with duplicate prevention
         uint256 totalWeight = _verifySignatures(
             strategyId,
             value,
             confidence,
             nonce,
+            expiry,
             signatures
         );
 
@@ -169,6 +188,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256[] calldata values,
         uint256[] calldata confidences,
         uint256 nonce,
+        uint256 expiry,
         bytes[] calldata signatures
     ) external override notEmergency {
         if (strategyIds.length != values.length ||
@@ -176,8 +196,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             revert ArrayLengthMismatch();
         }
 
+        // Validate signature expiry
+        if (expiry < block.timestamp) revert SignatureExpired();
+        if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
+
         // Verify signatures for batch
-        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce));
+        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry));
         uint256 totalWeight = _verifyBatchSignatures(batchHash, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
@@ -204,18 +228,53 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /* ADMIN FUNCTIONS */
 
-    /// @notice Configure a signer
-    function configureSigner(
+    /// @notice Initiate signer configuration change (step 1 of 2-step process)
+    function initiateSignerChange(
         address signer,
         bool authorized,
         uint256 weight
     ) external onlyOwner {
+        if (!authorized && signers[signer].authorized) {
+            // Removing an authorized signer requires timelock
+            signerChangeTimestamp[signer] = block.timestamp + SIGNER_TIMELOCK;
+            pendingSignerRemoval[signer] = true;
+            emit SignerRemovalInitiated(signer, signerChangeTimestamp[signer]);
+        } else {
+            // Adding or modifying signer can be immediate
+            signers[signer] = SignerConfig({
+                authorized: authorized,
+                weight: weight
+            });
+            emit SignerConfigured(signer, authorized, weight);
+        }
+    }
+
+    /// @notice Execute pending signer removal after timelock
+    function executeSignerRemoval(address signer) external onlyOwner {
+        if (!pendingSignerRemoval[signer]) revert NoSignerRemovalPending();
+        if (block.timestamp < signerChangeTimestamp[signer]) revert SignerRemovalTimelockNotExpired();
+
+        // Remove signer
         signers[signer] = SignerConfig({
-            authorized: authorized,
-            weight: weight
+            authorized: false,
+            weight: 0
         });
 
-        emit SignerConfigured(signer, authorized, weight);
+        // Clear timelock state
+        pendingSignerRemoval[signer] = false;
+        signerChangeTimestamp[signer] = 0;
+
+        emit SignerConfigured(signer, false, 0);
+    }
+
+    /// @notice Cancel pending signer removal
+    function cancelSignerRemoval(address signer) external onlyOwner {
+        if (!pendingSignerRemoval[signer]) revert NoSignerRemovalPending();
+
+        pendingSignerRemoval[signer] = false;
+        signerChangeTimestamp[signer] = 0;
+
+        emit SignerRemovalCancelled(signer);
     }
 
     /// @notice Configure update parameters for a strategy
@@ -238,8 +297,16 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @notice Set required weight for multi-sig
     function setRequiredWeight(uint256 weight) external onlyOwner {
+        if (weight == 0) revert InvalidWeight();
         requiredWeight = weight;
         emit RequiredWeightUpdated(weight);
+    }
+
+    /// @notice Set price change bounds for a strategy
+    function setPriceChangeBounds(bytes32 strategyId, uint256 maxChangeBps) external onlyOwner {
+        if (maxChangeBps > BASIS_POINTS) revert InvalidPriceChangeBounds();
+        maxPriceChangeBps[strategyId] = maxChangeBps;
+        emit PriceChangeBoundsSet(strategyId, maxChangeBps);
     }
 
     /// @notice Set fallback value for emergency
@@ -302,12 +369,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /* INTERNAL FUNCTIONS */
 
-    /// @dev Verify signatures and return total weight
+    /// @dev Verify signatures and return total weight with duplicate prevention
     function _verifySignatures(
         bytes32 strategyId,
         uint256 value,
         uint256 confidence,
         uint256 nonce,
+        uint256 expiry,
         bytes[] calldata signatures
     ) internal view returns (uint256 totalWeight) {
         bytes32 messageHash = keccak256(abi.encode(
@@ -315,6 +383,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             value,
             confidence,
             nonce,
+            expiry,
             block.chainid,
             address(this)
         ));
@@ -324,11 +393,28 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             messageHash
         ));
 
+        // Track used signers to prevent duplicates
+        address[] memory usedSigners = new address[](signatures.length);
+        uint256 usedCount = 0;
+
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = _recoverSigner(ethSignedHash, signatures[i]);
 
+            // Skip if signer already counted
+            bool alreadyUsed = false;
+            for (uint256 j = 0; j < usedCount; j++) {
+                if (usedSigners[j] == signer) {
+                    alreadyUsed = true;
+                    break;
+                }
+            }
+
+            if (alreadyUsed) continue;
+
             if (signers[signer].authorized) {
                 totalWeight += signers[signer].weight;
+                usedSigners[usedCount] = signer;
+                usedCount++;
             }
         }
 
@@ -345,11 +431,28 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             batchHash
         ));
 
+        // Track used signers to prevent duplicates
+        address[] memory usedSigners = new address[](signatures.length);
+        uint256 usedCount = 0;
+
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = _recoverSigner(ethSignedHash, signatures[i]);
 
+            // Skip if signer already counted
+            bool alreadyUsed = false;
+            for (uint256 j = 0; j < usedCount; j++) {
+                if (usedSigners[j] == signer) {
+                    alreadyUsed = true;
+                    break;
+                }
+            }
+
+            if (alreadyUsed) continue;
+
             if (signers[signer].authorized) {
                 totalWeight += signers[signer].weight;
+                usedSigners[usedCount] = signer;
+                usedCount++;
             }
         }
 
@@ -385,6 +488,21 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         uint256 diff = newValue > oldValue ? newValue - oldValue : oldValue - newValue;
         return (diff * BASIS_POINTS) / oldValue;
+    }
+
+    /// @dev Validate price bounds to prevent extreme movements
+    function _validatePriceBounds(bytes32 strategyId, uint256 oldValue, uint256 newValue) internal view {
+        if (oldValue == 0) return; // No bounds check for initial value
+
+        uint256 maxChange = maxPriceChangeBps[strategyId];
+        if (maxChange == 0) {
+            maxChange = MAX_PRICE_CHANGE_BPS; // Use default if not set
+        }
+
+        uint256 changePercent = _calculateChangePercent(oldValue, newValue);
+        if (changePercent > maxChange) {
+            revert PriceChangeExceedsBounds(changePercent, maxChange);
+        }
     }
 
     /// @dev Get active strategies for escrow (simplified)

@@ -51,7 +51,7 @@ contract UniversalEscrowAdapterFixedAuthTest is Test {
         // Setup signer for off-chain valuer
         signer = vm.addr(signerKey);
         vm.prank(owner);
-        offchainValuer.configureSigner(signer, true, 100);
+        offchainValuer.initiateSignerChange(signer, true, 100);
         vm.prank(owner);
         offchainValuer.setRequiredWeight(100);
 
@@ -445,7 +445,7 @@ contract UniversalEscrowAdapterFixedAuthTest is Test {
         uint256 nonce = 1;
 
         // Create signature - need to add the prefix since verifier adds it too
-        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce));
+        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce, block.timestamp + 3600));
         bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
 
@@ -453,7 +453,7 @@ contract UniversalEscrowAdapterFixedAuthTest is Test {
         signatures[0] = abi.encodePacked(r, s, v);
 
         // Update values
-        offchainValuer.batchUpdateValues(strategyIds, values, confidences, nonce, signatures);
+        offchainValuer.batchUpdateValues(strategyIds, values, confidences, nonce, block.timestamp + 3600, signatures);
 
         // Since offchain valuer is used, it should get total value
         // But we need to configure the escrow address properly

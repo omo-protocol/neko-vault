@@ -2,7 +2,7 @@
 
 ## UniversalEscrowAdapter, StrategyEscrow & UniversalValuerOffchain Contracts
 
-**Document Version**: 1.1
+**Document Version**: 1.2
 **Last Updated**: September 2025
 **Solidity Version**: 0.8.28
 **License**: GPL-2.0-or-later
@@ -565,10 +565,14 @@ escrow.updateWhitelist(
 - Nonce-based replay protection
 - Confidence thresholds
 
+**Security Improvements (IMPLEMENTED)**:
+- ✅ Implemented 24-hour timelock mechanism for signer removal
+- ✅ Added signature expiry validation (1-hour maximum age)
+- ✅ Implemented duplicate signature prevention in verification process
+
 **Additional Recommendations**:
-- Implement signer rotation mechanisms
-- Add time-based signature expiry
 - Monitor for unusual valuation patterns
+- Consider implementing signer key rotation schedule
 
 #### 7.1.3 Multicall Arbitrary Execution
 **Risk**: Whitelisted functions called with malicious parameters
@@ -623,7 +627,13 @@ escrow.updateWhitelist(
 - [ ] **Token Transfer Security**: Validate all fund movement paths
 - [ ] **Multicall Execution**: Test arbitrary call combinations
 
-#### 8.1.2 Priority 2 - Access Control
+#### 8.1.2 Priority 2 - Oracle Security
+- [x] **Signer Rotation Mechanisms**: ✅ Implemented 24-hour timelock for signer removal (FIXED)
+- [x] **Signature Expiry Timestamps**: ✅ Added expiry validation to prevent old signature reuse (FIXED)
+- [x] **Duplicate Signature Prevention**: ✅ Implemented duplicate signer detection in verification (FIXED)
+- [x] **On-chain Price Validation Bounds**: ✅ Added configurable price change limits per strategy (FIXED)
+
+#### 8.1.3 Priority 3 - Access Control
 - [ ] **Authorization Matrix**: Verify all function access controls
 - [ ] **Owner Privilege**: Assess centralization risks
 - [ ] **Emergency Permissions**: Validate pause/unpause mechanisms
@@ -755,3 +765,45 @@ The following Priority 1 - Fund Safety issues identified in this audit document 
    - **Mathematical Safety**: Added unchecked blocks with manual validation
 
 All fixes maintain backward compatibility and include comprehensive test coverage validating both positive and negative scenarios.
+
+### Priority 2 - Oracle Security Issues Resolved ✅
+
+The following oracle security improvements have been successfully implemented:
+
+4. **Signer Rotation Mechanisms** (Section 7.1.2)
+   - **Issue**: No secure mechanism for removing compromised signers
+   - **Fix**: Implemented 2-step signer removal process:
+     - `initiateSignerChange()` starts 24-hour timelock for removals
+     - `executeSignerRemoval()` can only execute after timelock expires
+     - `cancelSignerRemoval()` allows canceling pending removals
+   - **Files Modified**: `UniversalValuerOffchain.sol`, `IUniversalValuerOffchain.sol`
+   - **Security Impact**: Prevents immediate removal of signers, allows time for detection of malicious activity
+
+5. **Signature Expiry Timestamps** (Section 4.2.1)
+   - **Issue**: Signatures had no expiry time, allowing potential replay with old signatures
+   - **Fix**: Added `expiry` parameter to all signature verification functions:
+     - Maximum signature age of 1 hour (`MAX_SIGNATURE_AGE`)
+     - Validation prevents both expired and future-dated signatures
+     - Updated message hash to include expiry in cryptographic binding
+   - **Files Modified**: `UniversalValuerOffchain.sol`, `IUniversalValuerOffchain.sol`
+   - **Security Impact**: Prevents use of stale signatures, reduces replay attack window
+
+6. **Duplicate Signature Prevention** (Section 4.2.2)
+   - **Issue**: Same signer could contribute multiple signatures to increase weight
+   - **Fix**: Implemented duplicate detection in signature verification:
+     - Tracks used signers during verification process
+     - Skips duplicate signatures from same signer
+     - Applies to both single and batch update functions
+   - **Files Modified**: `UniversalValuerOffchain.sol`
+   - **Security Impact**: Prevents signature stuffing attacks, ensures accurate weight calculation
+
+7. **On-chain Price Validation Bounds** (Section 7.1.1)
+   - **Issue**: No validation of extreme price movements that could indicate manipulation
+   - **Fix**: Added configurable price change validation:
+     - `setPriceChangeBounds()` allows per-strategy maximum change limits
+     - Default 50% maximum price change per update (`MAX_PRICE_CHANGE_BPS`)
+     - `_validatePriceBounds()` function checks changes before accepting updates
+   - **Files Modified**: `UniversalValuerOffchain.sol`, `IUniversalValuerOffchain.sol`
+   - **Security Impact**: Prevents flash-loan and oracle manipulation attacks through extreme price swings
+
+All oracle security improvements include proper error handling, event emission, and maintain compatibility with existing interfaces.

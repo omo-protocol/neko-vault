@@ -85,7 +85,7 @@ contract DeployUniversalValuerOffchain is Script {
         console.log("Configuring signers...");
 
         for (uint256 i = 0; i < config.signers.length; i++) {
-            valuer.configureSigner(
+            valuer.initiateSignerChange(
                 config.signers[i],
                 true,
                 config.signerWeights[i]
@@ -206,7 +206,7 @@ contract DeployUniversalValuerOffchain is Script {
         console.log("   - Set fallback values: valuer.setFallbackValue(strategyId, value)");
 
         console.log("\n5. Multi-sig setup (if applicable):");
-        console.log("   - Add additional signers: valuer.configureSigner(signer, true, weight)");
+        console.log("   - Add additional signers: valuer.initiateSignerChange(signer, true, weight)");
         console.log("   - Update required weight: valuer.setRequiredWeight(totalWeight)");
     }
 
@@ -222,7 +222,7 @@ contract DeployUniversalValuerOffchain is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         UniversalValuerOffchain existingValuer = UniversalValuerOffchain(valuerAddress);
-        existingValuer.configureSigner(signer, true, weight);
+        existingValuer.initiateSignerChange(signer, true, weight);
 
         console.log("Added signer:", signer, "with weight:", weight);
 
