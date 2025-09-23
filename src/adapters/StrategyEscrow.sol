@@ -19,10 +19,12 @@ contract StrategyEscrow is IStrategyEscrow {
 
     /* IMMUTABLES */
 
-    address public immutable adapter;
     address public immutable owner;
 
     /* STORAGE */
+
+    address public adapter;
+    bool public adapterLocked;
 
     mapping(address => mapping(bytes4 => WhitelistEntry)) public whitelist;
     mapping(bytes32 => address) public strategyAgents;
@@ -40,7 +42,7 @@ contract StrategyEscrow is IStrategyEscrow {
     /* MODIFIERS */
 
     modifier onlyAdapter() {
-        if (msg.sender != adapter) revert NotAuthorized();
+        if (msg.sender != adapter || !adapterLocked) revert NotAuthorized();
         _;
     }
 
@@ -50,7 +52,8 @@ contract StrategyEscrow is IStrategyEscrow {
     }
 
     modifier onlyAgent(bytes32 strategyId) {
-        if (msg.sender != strategyAgents[strategyId] && msg.sender != adapter) {
+        if (msg.sender != strategyAgents[strategyId] &&
+            (adapter == address(0) || msg.sender != adapter)) {
             revert NotAuthorized();
         }
         _;
@@ -76,11 +79,24 @@ contract StrategyEscrow is IStrategyEscrow {
     /* CONSTRUCTOR */
 
     constructor(address _adapter, address _owner) {
-        adapter = _adapter;
         owner = _owner;
+        // Adapter will be set post-deployment via setAdapter()
     }
 
     /* EXTERNAL FUNCTIONS */
+
+    /// @notice Set the adapter address (can only be called once)
+    /// @param _adapter The adapter contract address
+    /// @dev This solves the circular dependency between adapter and escrow
+    function setAdapter(address _adapter) external onlyOwner {
+        if (adapterLocked) revert AlreadyInitialized();
+        if (_adapter == address(0)) revert InvalidAdapter();
+
+        adapter = _adapter;
+        adapterLocked = true;
+
+        emit AdapterSet(_adapter);
+    }
 
     /// @inheritdoc IStrategyEscrow
     function executeMulticall(

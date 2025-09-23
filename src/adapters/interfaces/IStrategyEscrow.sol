@@ -31,6 +31,8 @@ interface IStrategyEscrow {
     error AlreadyPaused();
     error NotPaused();
     error InvalidRecipient();
+    error AlreadyInitialized();
+    error InvalidAdapter();
 
     /* EVENTS */
 
@@ -43,6 +45,7 @@ interface IStrategyEscrow {
     event MulticallPaused(address indexed pauser, uint256 timestamp);
     event MulticallUnpaused(address indexed unpauser, uint256 timestamp);
     event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+    event AdapterSet(address indexed adapter);
 
     /* FUNCTIONS */
 
