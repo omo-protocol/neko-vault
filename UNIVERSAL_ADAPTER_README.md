@@ -71,8 +71,9 @@ function deallocate(bytes memory data, uint256 assets, bytes4, address)
 // Get total value across all strategies
 function realAssets() returns (uint256)
 
-// Emergency recovery with penalty
-function forceRecovery()
+// Emergency recovery with 2-step timelock (24 hours)
+function initiateEmergencyRecovery()  // Step 1: Start timelock
+function executeEmergencyRecovery()   // Step 2: Execute after 24 hours
 ```
 
 **Data Format for Allocation/Deallocation**:
@@ -398,7 +399,9 @@ vault.redeem(shares, user, user);
 
 2. **Adapter Level**
    - Strategy pausing capability
-   - Emergency recovery with penalty
+   - **2-Step Emergency Recovery**: 24-hour timelock for fund safety
+   - **Access Control**: Configurable emergency withdrawal recipient
+   - **Safe Math**: Overflow/underflow protection in penalty calculations
    - Allocation tracking & limits
    - Only accepts calls from vault
 
@@ -411,14 +414,23 @@ vault.redeem(shares, user, user);
    - Reentrancy protection
 
 4. **Valuation Level (Off-Chain)**
-   - **Cryptographic Security**: ECDSA signature verification
-   - **Multi-Sig Support**: Configurable signer weights
+   - **Cryptographic Security**: ECDSA signature verification with expiry
+   - **Multi-Sig Support**: Configurable weights with timelock rotation
+   - **Enhanced Security**:
+     - **Signer Rotation**: 24-hour timelock for removing signers
+     - **Signature Expiry**: 1-hour max validity period
+     - **Duplicate Prevention**: Tracks used signers per update
+     - **Price Bounds**: Configurable max change (default 50%)
    - **Replay Protection**: Nonce-based deduplication
-   - **Staleness Protection**: Automatic value expiry
-   - **Confidence Thresholds**: Minimum confidence requirements
-   - **Emergency Overrides**: Owner can force updates
+   - **Staleness Protection**: Automatic value expiry (24 hours max)
+   - **Confidence Thresholds**: Minimum 95% confidence required
+   - **Emergency Overrides**: Owner can force updates in emergency mode
    - **Fallback Values**: Backup values if oracle fails
    - **Audit Efficiency**: Simple on-chain logic reduces audit surface
+   - **Signer Rotation**: 24-hour timelock for removing authorized signers
+   - **Signature Expiry**: Max 1-hour validity to prevent replay attacks
+   - **Duplicate Prevention**: Built-in protection against duplicate signatures
+   - **Price Validation**: On-chain bounds checking (default 50% max change)
 
 ### Emergency Procedures
 
@@ -434,11 +446,16 @@ escrow.pauseMulticall(); // Guardian or owner
 // Blocks all strategy executions for 72 hours max
 ```
 
-**3. Force Recovery**:
+**3. Force Recovery (2-Step Process)**:
 ```solidity
-adapter.forceRecovery();
-// Emergency withdrawal with 0.5% penalty
-// Funds sent to treasury
+// Step 1: Initiate recovery (owner only)
+adapter.initiateEmergencyRecovery();
+// Wait 24 hours...
+
+// Step 2: Execute recovery after timelock
+adapter.executeEmergencyRecovery();
+// 0.5% penalty applied
+// Funds sent to configured recipient
 ```
 
 **4. Force Deallocate**:
@@ -457,7 +474,7 @@ test/
 ├── unit/
 │   ├── UniversalEscrowAdapterFixedAuth.t.sol     # Adapter unit tests (30/30 passing)
 │   ├── StrategyEscrowComprehensiveFinal.t.sol    # Escrow security tests (36/36 passing)
-│   └── UniversalValuerOffchainFixed.t.sol        # Off-chain valuation tests (32/32 passing)
+│   └── UniversalValuerOffchainFixed.t.sol        # Off-chain valuation tests (52/52 passing, 96.55% coverage)
 │
 └── integration/
     └── UniversalEscrowSimpleE2E.t.sol            # End-to-end integration tests (6/6 passing)
@@ -548,10 +565,15 @@ function testEmergencyPauseAndRecovery() {
 // Deploy off-chain valuer
 UniversalValuerOffchain valuer = new UniversalValuerOffchain(owner, asset);
 
-// Configure signers (multi-sig setup)
-valuer.configureSigner(signer1, true, 1);  // Weight 1
-valuer.configureSigner(signer2, true, 1);  // Weight 1
-valuer.setRequiredWeight(2);               // Require both signatures
+// Configure signers (multi-sig setup with timelock)
+valuer.initiateSignerChange(signer1, true, 1);  // Add signer1 with weight 1
+valuer.initiateSignerChange(signer2, true, 1);  // Add signer2 with weight 1
+valuer.setRequiredWeight(2);                     // Require both signatures
+
+// To remove a signer (24-hour timelock required)
+valuer.initiateSignerChange(signer1, false, 0);  // Start removal timelock
+// Wait 24 hours...
+valuer.executeSignerRemoval(signer1);            // Complete removal
 
 // Configure PT-kHYPE strategy
 valuer.configureStrategy(

@@ -30,7 +30,7 @@ The following adapters are currently available:
   This adapter allocates to a fixed Morpho Vault v1 (v1.0 and v1.1), under the constraints of the [caps](#caps).
   Note that using this adapter with vaults other than Morpho Vaults V1 has not been audited.
 - [Universal Escrow Adapter](./src/adapters/UniversalEscrowAdapter.sol).
-  Universal adapter that bridges vaults to multiple strategies via StrategyEscrow, enabling allocation to any protocol with custom strategy logic. Features emergency recovery, strategy pausing, and off-chain valuation integration.
+  Universal adapter that bridges vaults to multiple strategies via StrategyEscrow, enabling allocation to any protocol with custom strategy logic. Features 2-step emergency recovery with 24-hour timelock, strategy pausing, configurable withdrawal recipient, and enhanced off-chain valuation integration with oracle security.
 - Morpho Market V2 Adapter. WIP
 
 ### Caps
@@ -58,13 +58,20 @@ The Universal Escrow System provides a flexible architecture for complex multi-p
 **StrategyEscrow** (`src/adapters/StrategyEscrow.sol`): Secure escrow contract that executes strategy-specific operations via multicall:
 - **Daily Limits**: Enforces daily spending limits with automatic time-based resets
 - **Whitelisting**: Strategy-specific target whitelisting for secure external calls
-- **Emergency Controls**: Pause functionality and emergency withdrawal mechanisms
+- **Emergency Controls**: 2-step recovery with 24-hour timelock, pause functionality
 - **Access Control**: Adapter-based authorization with reentrancy protection
+- **Safe Math**: Overflow/underflow protection in penalty calculations
 
 **UniversalValuerOffchain** (`src/valuers/UniversalValuerOffchain.sol`): Off-chain oracle system for accurate strategy valuation:
-- **Signature Verification**: Cryptographic validation with weighted multi-signature support
-- **Hybrid Updates**: Push/pull model with confidence scoring and staleness protection
-- **Security Features**: Replay attack prevention, emergency fallback values, and nonce validation
+- **Signature Verification**: ECDSA validation with weighted multi-signature support and 1-hour expiry
+- **Hybrid Updates**: Push/pull model with 95% confidence scoring requirement
+- **Enhanced Security Features**:
+  - **Signer Rotation**: 24-hour timelock for removing authorized signers
+  - **Signature Expiry**: Maximum 1-hour validity to prevent replay attacks
+  - **Duplicate Prevention**: Built-in protection against signature reuse
+  - **Price Validation**: On-chain bounds checking with 50% default max change
+  - **Replay Protection**: Nonce-based validation system
+  - **Emergency Mode**: Owner-controlled fallback mechanism
 
 This system enables vaults to allocate to complex strategies (e.g., PT-kHYPE loops, vNeko volatility farming) while maintaining security through off-chain computation and on-chain verification.
 
@@ -222,7 +229,7 @@ The project maintains comprehensive test coverage exceeding 90% for all core com
 
 - **UniversalEscrowAdapter**: 97.62% coverage (30/30 tests passing)
 - **StrategyEscrow**: 100% coverage (36/36 tests passing)
-- **UniversalValuerOffchain**: 95.8% coverage (32/32 tests passing)
+- **UniversalValuerOffchain**: 96.55% coverage (52/52 tests passing)
 - **End-to-End Integration**: 6/6 tests passing
 
 ### Test Documentation
