@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import {IUniversalValuer} from "../adapters/interfaces/IUniversalValuer.sol";
+import {IStrategyEscrow} from "../adapters/interfaces/IStrategyEscrow.sol";
+import {IERC20} from "../interfaces/IERC20.sol";
+import {IVNekoValuer} from "./interfaces/IVNekoValuer.sol";
+import {IPTLoopValuer} from "./interfaces/IPTLoopValuer.sol";
+
+/// @title UniversalValuer
+/// @notice Calculates total value across all strategies with caching support
+/// @dev Extensible valuation system supporting multiple strategy types
+contract UniversalValuer is IUniversalValuer {
+    /* IMMUTABLES */
+
+    address public immutable owner;
+    address public immutable asset; // Base asset for valuations
+
+    /* STORAGE */
+
+    mapping(bytes32 => StrategyValuer) internal _strategyValuers;
+    address public baseValuer; // Handles simple strategies
+
+    /* MODIFIERS */
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotAuthorized();
+        _;
+    }
+
+    /* CONSTRUCTOR */
+
+    constructor(address _owner, address _asset) {
+        owner = _owner;
+        asset = _asset;
+    }
+
+    /* EXTERNAL FUNCTIONS */
+
+    /// @inheritdoc IUniversalValuer
+    function getTotalValue(address escrow) external view override returns (uint256 totalValue) {
+        // Get all active strategies from escrow
+        bytes32[] memory strategies = IStrategyEscrow(escrow).getActiveStrategies();
+
+        for (uint256 i = 0; i < strategies.length; i++) {
+            bytes32 strategyId = strategies[i];
+
+            // Check cache first
+            if (_isCacheValid(strategyId)) {
+                totalValue += _strategyValuers[strategyId].cachedValue;
+                continue;
+            }
+
+            // Get fresh value
+            uint256 strategyValue = _getStrategyValue(escrow, strategyId);
+            totalValue += strategyValue;
+        }
+
+        // Add idle assets in escrow
+        totalValue += _getIdleAssets(escrow);
+
+        return totalValue;
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function getStrategyValue(
+        address escrow,
+        bytes32 strategyId
+    ) external view override returns (uint256) {
+        // Check cache
+        if (_isCacheValid(strategyId)) {
+            return _strategyValuers[strategyId].cachedValue;
+        }
+
+        return _getStrategyValue(escrow, strategyId);
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function registerStrategyValuer(
+        bytes32 strategyId,
+        address valuer,
+        bool useCache,
+        uint256 cacheTime
+    ) external override onlyOwner {
+        // Preserve existing cache if updating
+        StrategyValuer storage sv = _strategyValuers[strategyId];
+        uint256 existingCachedValue = sv.cachedValue;
+        uint256 existingLastUpdate = sv.lastUpdate;
+
+        _strategyValuers[strategyId] = StrategyValuer({
+            implementation: valuer,
+            useCache: useCache,
+            cacheTime: cacheTime,
+            cachedValue: existingCachedValue, // Preserve cache
+            lastUpdate: existingLastUpdate    // Preserve cache timestamp
+        });
+
+        emit ValuerRegistered(strategyId, valuer, useCache, cacheTime);
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function strategyValuers(bytes32 strategyId) external view override returns (StrategyValuer memory) {
+        return _strategyValuers[strategyId];
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function updateCache(bytes32 strategyId, uint256 value) external override {
+        StrategyValuer storage valuer = _strategyValuers[strategyId];
+
+        // Only authorized updaters can update cache
+        // This could be the valuer implementation or keeper
+        if (msg.sender != valuer.implementation && msg.sender != owner) {
+            revert NotAuthorized();
+        }
+
+        valuer.cachedValue = value;
+        valuer.lastUpdate = block.timestamp;
+
+        emit CacheUpdated(strategyId, value);
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function setBaseValuer(address _baseValuer) external override onlyOwner {
+        baseValuer = _baseValuer;
+        emit BaseValuerSet(_baseValuer);
+    }
+
+    /// @inheritdoc IUniversalValuer
+    function isCacheValid(bytes32 strategyId) external view override returns (bool) {
+        return _isCacheValid(strategyId);
+    }
+
+    /* INTERNAL FUNCTIONS */
+
+    /// @dev Get fresh strategy value by calling strategy-specific valuer
+    function _getStrategyValue(
+        address escrow,
+        bytes32 strategyId
+    ) internal view returns (uint256) {
+        StrategyValuer memory valuer = _strategyValuers[strategyId];
+
+        if (valuer.implementation == address(0)) {
+            // Fallback to base valuer if no specific valuer registered
+            if (baseValuer == address(0)) revert ValuerNotSet();
+            return IBaseValuer(baseValuer).getValue(escrow, strategyId);
+        }
+
+        // Call strategy-specific valuer
+        // Different interfaces for different strategy types
+        if (strategyId == keccak256("VNEKO_VF")) {
+            return IVNekoValuer(valuer.implementation).getVolatilityFarmingValue(escrow);
+        } else if (strategyId == keccak256("VNEKO_LENDING")) {
+            return IVNekoValuer(valuer.implementation).getLendingPositionValue(escrow);
+        } else if (strategyId == keccak256("VNEKO_MM")) {
+            return IVNekoValuer(valuer.implementation).getMarketMakingValue(escrow);
+        } else if (strategyId == keccak256("PT_KHYPE_LOOP")) {
+            return IPTLoopValuer(valuer.implementation).getPTLoopValue(escrow);
+        } else {
+            // Generic valuer interface
+            return IStrategyValuer(valuer.implementation).getValue(escrow, strategyId);
+        }
+    }
+
+    /// @dev Check if cache is still valid
+    function _isCacheValid(bytes32 strategyId) internal view returns (bool) {
+        StrategyValuer memory valuer = _strategyValuers[strategyId];
+
+        if (!valuer.useCache) return false;
+        if (valuer.lastUpdate == 0) return false;
+
+        return block.timestamp <= valuer.lastUpdate + valuer.cacheTime;
+    }
+
+    /// @dev Get idle assets in escrow (not deployed in strategies)
+    function _getIdleAssets(address escrow) internal view returns (uint256) {
+        return IERC20(asset).balanceOf(escrow);
+    }
+}
+
+/* INTERFACES FOR STRATEGY VALUERS */
+
+interface IBaseValuer {
+    function getValue(address escrow, bytes32 strategyId) external view returns (uint256);
+}
+
+interface IStrategyValuer {
+    function getValue(address escrow, bytes32 strategyId) external view returns (uint256);
+}
+
+// Note: IVNekoValuer and IPTLoopValuer interfaces are defined in their respective files

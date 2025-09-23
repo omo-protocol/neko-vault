@@ -17,3 +17,8 @@ docs/
 .certora_internal/
 /broadcast
 /.claude
+*.md
+
+!comprehensive-test-documentation.md
+!security-audit-reference.md
+!UNIVERSAL_ADAPTER_README.md

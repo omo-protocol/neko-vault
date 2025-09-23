@@ -1,0 +1,51 @@
+{
+  "rpc_url": "https://rpc.hyperliquid.xyz/evm",
+  "private_key": "YOUR_KEEPER_PRIVATE_KEY",
+  "valuer_address": "0x0000000000000000000000000000000000000000",
+  "valuer_abi": [],
+
+  "contracts": {
+    "felix": "0x0000000000000000000000000000000000000000",
+    "pendle_market": "0x0000000000000000000000000000000000000000",
+    "pt_oracle": "0x9a9Fa8338dd5E5B2188006f1Cd2Ef26d921650C2",
+    "khype": "0x0000000000000000000000000000000000000000",
+    "vneko": "0x0000000000000000000000000000000000000000",
+    "morpho": "0x0000000000000000000000000000000000000000"
+  },
+
+  "abis": {
+    "felix": [],
+    "pendle_market": [],
+    "pt_oracle": [],
+    "khype": [],
+    "vneko": [],
+    "morpho": []
+  },
+
+  "strategies": [
+    {
+      "id": "70656e646c652d76322d6b687970652d6c6f6f70",
+      "name": "PT_KHYPE_LOOP",
+      "min_update_interval": 300,
+      "max_staleness": 3600,
+      "push_threshold": 500,
+      "min_confidence": 90
+    },
+    {
+      "id": "766e656b6f2d766f6c6174696c6974792d6661726d",
+      "name": "VNEKO_VF",
+      "min_update_interval": 600,
+      "max_staleness": 7200,
+      "push_threshold": 300,
+      "min_confidence": 85
+    }
+  ],
+
+  "keeper_settings": {
+    "update_check_interval": 60,
+    "request_check_interval": 10,
+    "threshold_check_interval": 30,
+    "batch_size": 10,
+    "gas_price_multiplier": 1.2
+  }
+}

@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+/// @title IUniversalValuerOffchain
+/// @notice Interface for off-chain valuation system with signed oracle reports
+interface IUniversalValuerOffchain {
+    /* STRUCTS */
+
+    struct ValueReport {
+        uint256 value;        // Strategy value in base asset
+        uint256 timestamp;    // When value was calculated
+        uint256 confidence;   // Confidence score (0-100)
+        uint256 nonce;        // Prevent replay attacks
+        bool isPush;          // True if pushed, false if pulled
+        address lastUpdater;  // Who submitted the update
+    }
+
+    struct SignerConfig {
+        bool authorized;      // Is signer authorized
+        uint256 weight;       // Weight for multi-sig (e.g., 1 for single, 2 for important)
+    }
+
+    struct UpdateConfig {
+        uint256 minUpdateInterval;  // Minimum time between updates
+        uint256 maxStaleness;       // Maximum age before stale
+        uint256 pushThreshold;      // % change to trigger push (in basis points)
+        uint256 minConfidence;      // Minimum acceptable confidence
+    }
+
+    enum UpdateReason {
+        STALENESS,      // Value is too old
+        THRESHOLD,      // Change exceeded threshold
+        ON_DEMAND,      // Manual request
+        EMERGENCY       // Emergency update
+    }
+
+    /* EVENTS */
+
+    event ValueUpdated(
+        bytes32 indexed strategyId,
+        uint256 value,
+        uint256 confidence,
+        uint256 timestamp,
+        bool isPush
+    );
+
+    event UpdateRequested(
+        bytes32 indexed strategyId,
+        address requester,
+        UpdateReason reason
+    );
+
+    event SignerConfigured(
+        address indexed signer,
+        bool authorized,
+        uint256 weight
+    );
+
+    event StrategyConfigured(
+        bytes32 indexed strategyId,
+        uint256 minUpdateInterval,
+        uint256 maxStaleness,
+        uint256 pushThreshold
+    );
+
+    event RequiredWeightUpdated(uint256 newWeight);
+
+    event FallbackValueSet(bytes32 indexed strategyId, uint256 value);
+
+    event EmergencyModeToggled(bool enabled);
+
+    event EmergencyValueUpdate(bytes32 indexed strategyId, uint256 value);
+
+    /* ERRORS */
+
+    error NotAuthorized();
+    error StaleNonce();
+    error UpdateTooFrequent();
+    error InsufficientSignatures();
+    error ValueTooStale();
+    error LowConfidence();
+    error InvalidSignature();
+    error ArrayLengthMismatch();
+    error EmergencyMode();
+    error NotInEmergencyMode();
+
+    /* FUNCTIONS */
+
+    /// @notice Update a strategy value with signatures
+    /// @param strategyId The strategy identifier
+    /// @param value The calculated value
+    /// @param confidence Confidence score (0-100)
+    /// @param nonce Unique nonce to prevent replay
+    /// @param signatures Array of signatures from authorized signers
+    function updateValue(
+        bytes32 strategyId,
+        uint256 value,
+        uint256 confidence,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external;
+
+    /// @notice Request an update for a strategy (pull model)
+    /// @param strategyId The strategy to update
+    function requestUpdate(bytes32 strategyId) external;
+
+    /// @notice Get the latest value for a strategy
+    /// @param strategyId The strategy identifier
+    /// @return The latest value
+    function getValue(bytes32 strategyId) external view returns (uint256);
+
+    /// @notice Get total value across all strategies for an escrow
+    /// @param escrow The escrow address
+    /// @return totalValue The sum of all strategy values
+    function getTotalValue(address escrow) external view returns (uint256 totalValue);
+
+    /// @notice Batch update multiple strategy values
+    /// @param strategyIds Array of strategy identifiers
+    /// @param values Array of values
+    /// @param confidences Array of confidence scores
+    /// @param nonce Shared nonce for the batch
+    /// @param signatures Signatures authorizing the batch
+    function batchUpdateValues(
+        bytes32[] calldata strategyIds,
+        uint256[] calldata values,
+        uint256[] calldata confidences,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external;
+
+    /// @notice Check if a strategy needs updating
+    /// @param strategyId The strategy to check
+    /// @return True if update is needed
+    function needsUpdate(bytes32 strategyId) external view returns (bool);
+
+    /// @notice Get detailed report for a strategy
+    /// @param strategyId The strategy identifier
+    /// @return The full value report
+    function getReport(bytes32 strategyId) external view returns (ValueReport memory);
+}

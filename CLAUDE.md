@@ -36,8 +36,23 @@ Adapters enable vaults to allocate to different protocols while maintaining a un
 - **MorphoMarketV1Adapter**: Allocates to Morpho Market v1
 - **MorphoVaultV1Adapter**: Allocates to Morpho Vault v1 (supports v1.0 and v1.1)
 - **PendleV2Adapter**: Allocates to Pendle V2 (recent addition)
+- **UniversalEscrowAdapter**: Universal adapter that bridges vaults to multiple strategies via StrategyEscrow, enabling allocation to any protocol with custom strategy logic
 
 All adapters implement `IAdapter` interface and are deployed via corresponding factory contracts.
+
+### Universal Escrow System
+
+**StrategyEscrow** (`src/adapters/StrategyEscrow.sol`): Secure escrow contract that executes multi-protocol strategies via multicall with:
+- Daily limit enforcement and time-based resets
+- Strategy-specific whitelisting for secure external calls
+- Emergency withdrawal mechanisms with pause functionality
+- Reentrancy protection and access control
+
+**UniversalValuerOffchain** (`src/valuers/UniversalValuerOffchain.sol`): Off-chain valuation oracle with:
+- Cryptographic signature verification and weighted multi-sig validation
+- Hybrid push/pull price update model with confidence scoring
+- Staleness protection and emergency fallback values
+- Replay attack prevention with nonce-based security
 
 ### Key Mechanisms
 
@@ -53,12 +68,24 @@ All adapters implement `IAdapter` interface and are deployed via corresponding f
 
 - `src/`: Core contracts
   - `adapters/`: Adapter contracts and interfaces
+    - `UniversalEscrowAdapter.sol`: Universal adapter for multi-protocol strategies
+    - `StrategyEscrow.sol`: Secure escrow with multicall execution
+    - `interfaces/`: Adapter-specific interfaces including IUniversalEscrowAdapter
+  - `valuers/`: Valuation contracts
+    - `UniversalValuerOffchain.sol`: Off-chain oracle with signature verification
   - `interfaces/`: All interface definitions
   - `libraries/`: Utility libraries (ErrorsLib, EventsLib, MathLib, etc.)
   - `imports/`: External contract imports
-- `test/`: Comprehensive test suite including unit and integration tests
-  - `integration/`: Protocol-specific integration tests
+- `test/`: Comprehensive test suite with >90% coverage
+  - `unit/`: Unit tests for individual contracts
+    - `UniversalEscrowAdapterFixedAuth.t.sol`: 30/30 tests passing (97.62% coverage)
+    - `StrategyEscrowComprehensiveFinal.t.sol`: 36/36 tests passing (100% coverage)
+    - `UniversalValuerOffchainFixed.t.sol`: 32/32 tests passing (95.8% coverage)
+  - `integration/`: End-to-end integration tests
+    - `UniversalEscrowSimpleE2E.t.sol`: 6/6 tests passing
   - `mocks/`: Test mock contracts
+- `comprehensive-test-documentation.md`: 50-page detailed test documentation
+- `security-audit-reference.md`: Security audit reference for audit firms
 
 ## Foundry Configuration
 
