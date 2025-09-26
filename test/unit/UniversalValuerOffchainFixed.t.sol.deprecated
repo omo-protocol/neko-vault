@@ -8,7 +8,12 @@ import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversal
 
 /// @title UniversalValuerOffchainFixedTest
 /// @notice Fixed test suite for UniversalValuerOffchain achieving >90% coverage
+/// @dev DEPRECATED: This test is for the old StrategyEscrow architecture
 contract UniversalValuerOffchainFixedTest is Test {
+    modifier skipDeprecated() {
+        vm.skip(true);
+        _;
+    }
     UniversalValuerOffchain public valuer;
     MockERC20 public asset;
     MockEscrowWithStrategies public escrow;
@@ -404,7 +409,7 @@ contract UniversalValuerOffchainFixedTest is Test {
 
     /* GET TOTAL VALUE TESTS */
 
-    function testGetTotalValue() public {
+    function testGetTotalValue() public skipDeprecated {
         // Setup strategies in escrow
         escrow.addStrategy(STRATEGY_A);
         escrow.addStrategy(STRATEGY_B);

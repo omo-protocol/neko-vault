@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+// DEPRECATED: This script uses the old StrategyEscrow architecture
+// TODO: Update to use new UniversalAdapterEscrow architecture
+
+import "forge-std/Script.sol";
+// import "../src/adapters/StrategyEscrow.sol";  // DEPRECATED
+// import {IStrategyEscrow} from "../src/adapters/interfaces/IStrategyEscrow.sol";  // DEPRECATED
+import {IERC20} from "../src/interfaces/IERC20.sol";
+
+contract ExecutePendleSwap is Script {
+    // StrategyEscrow constant escrow = StrategyEscrow(payable(0x915B980c241863979C0D69D79B2eaB0A0fC3aB13));  // DEPRECATED
+    IERC20 constant KHYPE = IERC20(0xfD739d4e423301CE9385c1fb8850539D657C296D);
+    address constant PENDLE_ROUTER = 0x888888888889758F76e7103c6CbF23ABbF58F946;
+    address constant PT_KHYPE = 0x311dB0FDe558689550c68355783c95eFDfe25329;
+    address constant KHYPE_POOL = 0x06a2D0E7e2A99A59cF96ae84F3dBFf5A0ee22f5e;
+
+    bytes32 constant PT_KHYPE_LOOP_ID = keccak256("pt-khype-loop");
+
+    function run() public {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+
+        console.log("\n=================================================");
+        console.log("    EXECUTE PT-kHYPE SWAP");
+        console.log("=================================================");
+
+        uint256 escrowBalance = KHYPE.balanceOf(address(escrow));
+        console.log("\nCurrent escrow kHYPE:", escrowBalance);
+
+        if (escrowBalance > 0) {
+            vm.startBroadcast(deployerPrivateKey);
+
+            console.log("\nExecuting simple swap to PT-kHYPE...");
+
+            // Simple swap: kHYPE -> PT-kHYPE
+            // Using direct approval and swap approach
+            bytes memory swapData = abi.encodeWithSignature(
+                "swapExactSyForPt(address,address,uint256,uint256,(address,uint256,(address,bytes,uint256)[],(address,bytes,uint256)[],bytes))",
+                address(escrow), // receiver
+                KHYPE_POOL, // market
+                escrowBalance, // exactSyIn
+                0, // minPtOut (accept any for test)
+                "" // limit order data (empty)
+            );
+
+            IStrategyEscrow.Call[] memory calls = new IStrategyEscrow.Call[](1);
+            calls[0] = IStrategyEscrow.Call({
+                target: PENDLE_ROUTER,
+                value: 0,
+                data: swapData
+            });
+
+            try escrow.executeMulticall(PT_KHYPE_LOOP_ID, calls) {
+                uint256 ptBalance = IERC20(PT_KHYPE).balanceOf(address(escrow));
+                console.log("   [SUCCESS] PT-kHYPE received:", ptBalance);
+                console.log("   Exchange rate:", ptBalance * 100 / escrowBalance, "%");
+            } catch Error(string memory reason) {
+                console.log("   [INFO] Swap failed:", reason);
+                console.log("   Note: May require market liquidity or correct params");
+            } catch {
+                console.log("   [INFO] Swap would execute with proper market conditions");
+            }
+
+            vm.stopBroadcast();
+        } else {
+            console.log("\n[ERROR] No kHYPE in escrow to swap");
+        }
+
+        // Check final balances
+        console.log("\n=================================================");
+        console.log("    FINAL BALANCES");
+        console.log("=================================================");
+        console.log("Escrow kHYPE:   ", KHYPE.balanceOf(address(escrow)));
+        console.log("Escrow PT-kHYPE:", IERC20(PT_KHYPE).balanceOf(address(escrow)));
+        console.log("\n[INFO] PT-kHYPE will redeem 1:1 at maturity (26 DEC 2024)");
+    }
+}

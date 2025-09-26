@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import {Test} from "forge-std/Test.sol";
+import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
+import {UniversalAdapterEscrowFactory} from "../../src/adapters/UniversalAdapterEscrowFactory.sol";
+import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockVaultV2} from "../mocks/MockVaultV2.sol";
+import {MockValuer} from "../mocks/MockValuer.sol";
+import {MockTarget} from "../mocks/MockTarget.sol";
+
+contract UniversalAdapterEscrowTest is Test {
+    UniversalAdapterEscrow adapter;
+    UniversalAdapterEscrowFactory factory;
+    MockVaultV2 vault;
+    MockERC20 asset;
+    MockERC20 rewardToken;
+    MockValuer valuer;
+    MockTarget target;
+
+    address owner = address(0x1);
+    address agent = address(0x2);
+    address attacker = address(0x3);
+    address recipient = address(0x4);
+
+    bytes32 constant STRATEGY_1 = keccak256("STRATEGY_1");
+    bytes32 constant STRATEGY_2 = keccak256("STRATEGY_2");
+
+    event StrategySet(bytes32 indexed strategyId, address indexed agent, uint256 dailyLimit);
+    event StrategyExecuted(bytes32 indexed strategyId, address indexed executor);
+    event WhitelistUpdated(address indexed target, bytes4 indexed selector, bool allowed, uint256 limit);
+    event TokenSwept(address indexed token, address indexed recipient, uint256 amount);
+    event PauseStatusChanged(bool paused);
+    event AllocationUpdated(bytes32 indexed strategyId, uint256 newAmount, int256 change);
+    event StrategyRemoved(bytes32 indexed strategyId);
+
+    function setUp() public {
+        // Deploy mocks
+        asset = new MockERC20("USDC", "USDC", 6);
+        rewardToken = new MockERC20("REWARD", "RWD", 18);
+        valuer = new MockValuer();
+        target = new MockTarget();
+
+        // Deploy vault mock
+        vault = new MockVaultV2(address(asset), owner);
+
+        // Deploy factory
+        factory = new UniversalAdapterEscrowFactory();
+
+        // Deploy adapter via factory
+        adapter = UniversalAdapterEscrow(
+            payable(factory.deployAdapter(
+                address(vault),
+                address(valuer),
+                false, // use onchain valuer
+                keccak256("test-salt")
+            ))
+        );
+
+        // Setup initial state
+        vm.startPrank(owner);
+        vault.addAdapter(address(adapter));
+        vm.stopPrank();
+
+        // Mint assets to vault
+        asset.mint(address(vault), 1000000e6);
+
+        // Label addresses for better test output
+        vm.label(address(adapter), "Adapter");
+        vm.label(address(vault), "Vault");
+        vm.label(address(asset), "Asset");
+        vm.label(owner, "Owner");
+        vm.label(agent, "Agent");
+        vm.label(attacker, "Attacker");
+    }
+
+    /* DEPLOYMENT TESTS */
+
+    function testDeployment() public view {
+        assertEq(adapter.parentVault(), address(vault));
+        assertEq(adapter.asset(), address(asset));
+        assertEq(adapter.valuer(), address(valuer));
+        assertEq(adapter.useOffchainValuer(), false);
+        assertEq(adapter.owner(), owner);
+        assertEq(adapter.paused(), false);
+    }
+
+    function testFactoryTracking() public view {
+        address[] memory vaultAdapters = factory.getVaultAdapters(address(vault));
+        assertEq(vaultAdapters.length, 1);
+        assertEq(vaultAdapters[0], address(adapter));
+        assertTrue(factory.isAdapter(address(adapter)));
+    }
+
+    /* ACCESS CONTROL TESTS */
+
+    function testOnlyOwnerCanSetStrategy() public {
+        vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
+        vm.prank(attacker);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+    }
+
+    function testOnlyVaultCanAllocate() public {
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
+        vm.prank(attacker);
+        adapter.allocate(data, 100e6, bytes4(0), address(0));
+    }
+
+    function testOnlyStrategyAgentCanExecute() public {
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0);
+
+        vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
+        vm.prank(attacker);
+        adapter.executeStrategy(STRATEGY_1, calls);
+
+        // Agent should succeed
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls);
+
+        // Owner can also execute
+        vm.prank(owner);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    /* STRATEGY MANAGEMENT TESTS */
+
+    function testSetStrategy() public {
+        vm.prank(owner);
+        vm.expectEmit(true, true, false, true);
+        emit StrategySet(STRATEGY_1, agent, 1000e6);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        IUniversalAdapterEscrow.StrategyConfig memory config = adapter.getStrategy(STRATEGY_1);
+        assertEq(config.agent, agent);
+        assertEq(config.dailyLimit, 1000e6);
+        assertTrue(config.active);
+    }
+
+    function testRemoveStrategy() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        vm.expectEmit(true, false, false, false);
+        emit StrategyRemoved(STRATEGY_1);
+        adapter.removeStrategy(STRATEGY_1);
+        vm.stopPrank();
+
+        IUniversalAdapterEscrow.StrategyConfig memory config = adapter.getStrategy(STRATEGY_1);
+        assertFalse(config.active);
+    }
+
+    function testCannotRemoveStrategyWithAllocation() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        vm.stopPrank();
+
+        // Allocate funds
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(data, 100e6, bytes4(0), address(0));
+
+        // Try to remove - should fail
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidStrategy.selector);
+        adapter.removeStrategy(STRATEGY_1);
+    }
+
+    /* ALLOCATION TESTS */
+
+    function testAllocate() public {
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+
+        // Transfer assets first
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+
+        vm.expectEmit(true, false, false, true);
+        emit AllocationUpdated(STRATEGY_1, 100e6, int256(100e6));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.allocate(data, 100e6, bytes4(0), address(0));
+
+        assertEq(ids.length, 1);
+        assertEq(ids[0], STRATEGY_1);
+        assertEq(change, int256(100e6));
+        assertEq(adapter.getAllocation(STRATEGY_1), 100e6);
+
+        bytes32[] memory active = adapter.getActiveStrategies();
+        assertEq(active.length, 1);
+        assertEq(active[0], STRATEGY_1);
+    }
+
+    function testAllocateInactiveStrategyReverts() public {
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.StrategyNotActive.selector);
+        adapter.allocate(data, 100e6, bytes4(0), address(0));
+    }
+
+    function testDeallocate() public {
+        // Setup: allocate first
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Deallocate
+        bytes memory deallocData = abi.encode(STRATEGY_1, 50e6, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.expectEmit(true, false, false, true);
+        emit AllocationUpdated(STRATEGY_1, 50e6, -int256(50e6));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 50e6, bytes4(0), address(0));
+
+        assertEq(ids.length, 1);
+        assertEq(ids[0], STRATEGY_1);
+        assertEq(change, -int256(50e6));
+        assertEq(adapter.getAllocation(STRATEGY_1), 50e6);
+    }
+
+    function testDeallocateAll() public {
+        // Setup: allocate first
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Deallocate all (amount = 0 means all)
+        bytes memory deallocData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 0, bytes4(0), address(0));
+
+        assertEq(change, -int256(100e6));
+        assertEq(adapter.getAllocation(STRATEGY_1), 0);
+
+        // Strategy should be removed from active list
+        bytes32[] memory active = adapter.getActiveStrategies();
+        assertEq(active.length, 0);
+    }
+
+    /* WHITELIST TESTS */
+
+    function testUpdateWhitelist() public {
+        bytes4 selector = bytes4(keccak256("transfer(address,uint256)"));
+
+        vm.prank(owner);
+        vm.expectEmit(true, true, false, true);
+        emit WhitelistUpdated(address(target), selector, true, 100e6);
+        adapter.updateWhitelist(address(target), selector, true, 100e6);
+
+        IUniversalAdapterEscrow.WhitelistConfig memory config = adapter.getWhitelist(address(target), selector);
+        assertTrue(config.allowed);
+        assertEq(config.limit, 100e6);
+    }
+
+    /* MULTICALL EXECUTION TESTS */
+
+    function testExecuteStrategyWithWhitelist() public {
+        // Setup strategy and whitelist
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.updateWhitelist(address(target), bytes4(keccak256("doSomething()")), true, 0);
+        vm.stopPrank();
+
+        // Create call
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(target),
+            data: abi.encodeWithSignature("doSomething()"),
+            value: 0
+        });
+
+        // Execute
+        vm.prank(agent);
+        vm.expectEmit(true, true, false, false);
+        emit StrategyExecuted(STRATEGY_1, agent);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    function testExecuteNotWhitelistedReverts() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        vm.stopPrank();
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(target),
+            data: abi.encodeWithSignature("doSomething()"),
+            value: 0
+        });
+
+        vm.prank(agent);
+        vm.expectRevert(IUniversalAdapterEscrow.FunctionNotWhitelisted.selector);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    function testDailyLimitEnforcement() public {
+        // Setup with low daily limit
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // 10 USDC daily limit
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 100e6);
+        vm.stopPrank();
+
+        // Fund adapter
+        asset.mint(address(adapter), 100e6);
+
+        // First transfer - within limit
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 5e6),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls);
+
+        // Second transfer - exceeds daily limit
+        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 6e6);
+
+        vm.prank(agent);
+        vm.expectRevert(IUniversalAdapterEscrow.DailyLimitExceeded.selector);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    function testDailyLimitReset() public {
+        // Setup
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 10e6);
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 100e6);
+        vm.stopPrank();
+
+        asset.mint(address(adapter), 100e6);
+
+        // Use up daily limit
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 10e6),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls);
+
+        // Fast forward 1 day
+        vm.warp(block.timestamp + 1 days);
+
+        // Should work again
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    /* PAUSE TESTS */
+
+    function testPause() public {
+        vm.prank(owner);
+        vm.expectEmit(false, false, false, true);
+        emit PauseStatusChanged(true);
+        adapter.setPaused(true);
+
+        assertTrue(adapter.paused());
+    }
+
+    function testPausedBlocksAllocate() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.setPaused(true);
+        vm.stopPrank();
+
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.ContractPaused.selector);
+        adapter.allocate(data, 100e6, bytes4(0), address(0));
+    }
+
+    function testPausedBlocksExecute() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.setPaused(true);
+        vm.stopPrank();
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0);
+
+        vm.prank(agent);
+        vm.expectRevert(IUniversalAdapterEscrow.ContractPaused.selector);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    /* SWEEP TESTS */
+
+    function testSweep() public {
+        // Send reward tokens to adapter
+        rewardToken.mint(address(adapter), 1000e18);
+
+        vm.prank(owner);
+        vm.expectEmit(true, true, false, true);
+        emit TokenSwept(address(rewardToken), recipient, 1000e18);
+        adapter.sweep(address(rewardToken), recipient);
+
+        assertEq(rewardToken.balanceOf(recipient), 1000e18);
+        assertEq(rewardToken.balanceOf(address(adapter)), 0);
+    }
+
+    function testCannotSweepPrimaryAsset() public {
+        asset.mint(address(adapter), 100e6);
+
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.CannotSweepAsset.selector);
+        adapter.sweep(address(asset), recipient);
+    }
+
+    /* PRE-CONFIGURED STRATEGY TESTS */
+
+    function testExecutePreConfigured() public {
+        // Setup pre-configured strategy
+        vm.startPrank(owner);
+        adapter.updateWhitelist(address(target), bytes4(keccak256("doSomething()")), true, 0);
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(target),
+            data: abi.encodeWithSignature("doSomething()"),
+            value: 0
+        });
+
+        bytes memory preConfigData = abi.encode(calls);
+        adapter.setStrategy(STRATEGY_1, agent, preConfigData, 1000e6);
+        vm.stopPrank();
+
+        // Execute pre-configured
+        vm.prank(agent);
+        adapter.executePreConfigured(STRATEGY_1);
+    }
+
+    /* OWNERSHIP TESTS */
+
+    function testTransferOwnership() public {
+        address newOwner = address(0x5);
+
+        vm.prank(owner);
+        adapter.transferOwnership(newOwner);
+
+        assertEq(adapter.owner(), newOwner);
+    }
+
+    function testTransferOwnershipZeroReverts() public {
+        vm.prank(owner);
+        vm.expectRevert("Invalid owner");
+        adapter.transferOwnership(address(0));
+    }
+
+    /* REAL ASSETS TESTS */
+
+    function testRealAssets() public {
+        valuer.setValue(address(adapter), 5000e6);
+        assertEq(adapter.realAssets(), 5000e6);
+    }
+
+    /* RECEIVE ETH TEST */
+
+    function testReceiveETH() public {
+        vm.deal(address(this), 1 ether);
+        (bool success,) = address(adapter).call{value: 1 ether}("");
+        assertTrue(success);
+        assertEq(address(adapter).balance, 1 ether);
+    }
+}

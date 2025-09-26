@@ -1,455 +1,428 @@
 #!/usr/bin/env python3
 """
-Off-chain Valuation Keeper Service
-Calculates strategy values off-chain and submits signed reports to UniversalValuerOffchain
+OffchainValuationKeeper - Off-chain service for strategy valuation
+
+Refined to:
+- Compute strategy value in WRAPPER UNITS (wrapper shares), consistent with UniversalValuerOffchain
+- Create correct EIP-191 signatures matching on-chain validation
+- Submit updateValue with monotonically increasing nonce and TTL expiry
+- Support modes:
+  * underlying_balance: read underlying (rebasing) balance at escrow and convert to wrapper shares
+  * pt_khype_loop: example stub that converts a computed underlying net to wrapper shares
+
+Important:
+- The on-chain valuer adds idle wrapper balance itself (IERC20(asset).balanceOf(escrow)) in getTotalValue.
+  Do NOT include idle wrapper balance in the off-chain reported value to avoid double-counting.
+- strategyId is computed as keccak256(text_id), matching the docs.
 """
 
-import asyncio
 import json
-import logging
+import os
+import sys
 import time
+import logging
 from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
+from web3 import Web3
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from web3 import Web3
-from web3.contract import Contract
+
+try:
+    # Required for proper abi.encode() matching Solidity encoding
+    from eth_abi import encode as abi_encode
+except Exception as e:
+    raise RuntimeError("eth-abi must be installed: pip install eth-abi") from e
+
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=os.environ.get("KEEPER_LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("OffchainValuationKeeper")
 
 
-class UpdateReason(Enum):
-    """Reasons for updating a strategy value"""
-    STALENESS = "staleness"
-    THRESHOLD = "threshold"
-    ON_DEMAND = "on_demand"
-    SCHEDULED = "scheduled"
+# Minimal ABIs
+ERC20_ABI = [
+    {"name": "decimals", "inputs": [], "outputs": [{"type": "uint8"}], "stateMutability": "view", "type": "function"},
+    {"name": "balanceOf", "inputs": [{"name": "account", "type": "address"}],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+]
+
+WRAPPER_ABI = [
+    {"name": "convertToShares", "inputs": [{"name": "assets", "type": "uint256"}],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"name": "convertToAssets", "inputs": [{"name": "shares", "type": "uint256"}],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+]
+
+VALUER_ABI = [
+    {"name": "getReport", "inputs": [{"name": "strategyId", "type": "bytes32"}], "outputs": [{
+        "components": [
+            {"name": "value", "type": "uint256"},
+            {"name": "timestamp", "type": "uint256"},
+            {"name": "confidence", "type": "uint256"},
+            {"name": "nonce", "type": "uint256"},
+            {"name": "isPush", "type": "bool"},
+            {"name": "lastUpdater", "type": "address"},
+        ],
+        "type": "tuple"
+    }], "stateMutability": "view", "type": "function"},
+    {"name": "updateValue", "inputs": [
+        {"name": "strategyId", "type": "bytes32"},
+        {"name": "value", "type": "uint256"},
+        {"name": "confidence", "type": "uint256"},
+        {"name": "nonce", "type": "uint256"},
+        {"name": "expiry", "type": "uint256"},
+        {"name": "signatures", "type": "bytes[]"}
+    ], "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"name": "requiredWeight", "inputs": [], "outputs": [{"type": "uint256"}], "stateMutability": "view",
+     "type": "function"},
+    {"name": "owner", "inputs": [], "outputs": [{"type": "address"}], "stateMutability": "view", "type": "function"},
+    {"name": "asset", "inputs": [], "outputs": [{"type": "address"}], "stateMutability": "view", "type": "function"},
+]
 
 
 @dataclass
 class StrategyConfig:
-    """Configuration for a strategy"""
-    strategy_id: bytes
-    min_update_interval: int  # seconds
-    max_staleness: int  # seconds
-    push_threshold: int  # basis points
-    min_confidence: int  # 0-100
-
-
-@dataclass
-class ValueReport:
-    """Value report for a strategy"""
-    value: int
-    confidence: int
-    timestamp: int
-    nonce: int
-
-
-class StrategyValuer:
-    """Base class for strategy-specific valuers"""
-
-    async def calculate_value(self, escrow_address: str, strategy_id: bytes) -> Tuple[int, int]:
-        """
-        Calculate strategy value and confidence
-        Returns: (value, confidence)
-        """
-        raise NotImplementedError
-
-
-class PTKHYPELoopValuer(StrategyValuer):
-    """Valuer for PT-kHYPE loop strategy"""
-
-    def __init__(self, web3: Web3, contracts: Dict[str, Contract]):
-        self.w3 = web3
-        self.felix = contracts['felix']
-        self.pendle_market = contracts['pendle_market']
-        self.pt_oracle = contracts['pt_oracle']
-        self.khype = contracts['khype']
-
-    async def calculate_value(self, escrow_address: str, strategy_id: bytes) -> Tuple[int, int]:
-        """Calculate PT-kHYPE loop position value"""
-        try:
-            # Get Felix position
-            collateral = self.felix.functions.collateral(escrow_address).call()
-            debt = self.felix.functions.debt(escrow_address).call()
-
-            # Get PT price from oracle
-            pt_price = await self._get_pt_price()
-
-            # Calculate net value
-            collateral_value = collateral * pt_price // 10**18
-            net_value = collateral_value - debt
-
-            # Calculate confidence based on data freshness
-            confidence = await self._calculate_confidence()
-
-            logger.info(f"PT-kHYPE Loop Value: {net_value}, Confidence: {confidence}%")
-            return net_value, confidence
-
-        except Exception as e:
-            logger.error(f"Error calculating PT-kHYPE value: {e}")
-            return 0, 0
-
-    async def _get_pt_price(self) -> int:
-        """Get PT price from Pendle oracle"""
-        # Call oracle for PT price
-        price = self.pt_oracle.functions.getPtPrice().call()
-        return price
-
-    async def _calculate_confidence(self) -> int:
-        """Calculate confidence score based on data quality"""
-        # Check oracle freshness
-        oracle_updated = self.pt_oracle.functions.lastUpdate().call()
-        staleness = int(time.time()) - oracle_updated
-
-        if staleness < 300:  # < 5 minutes
-            return 100
-        elif staleness < 900:  # < 15 minutes
-            return 95
-        elif staleness < 3600:  # < 1 hour
-            return 90
-        else:
-            return 80
-
-
-class VNekoValuer(StrategyValuer):
-    """Valuer for vNeko strategies"""
-
-    def __init__(self, web3: Web3, contracts: Dict[str, Contract]):
-        self.w3 = web3
-        self.vneko = contracts['vneko']
-        self.morpho = contracts['morpho']
-
-    async def calculate_value(self, escrow_address: str, strategy_id: bytes) -> Tuple[int, int]:
-        """Calculate vNeko position value"""
-        # Implementation for vNeko valuation
-        # This would include LP positions, lending positions, etc.
-        return 0, 100  # Placeholder
+    id_text: str                 # e.g., "PT_KHYPE_LOOP"
+    mode: str                    # "underlying_balance" | "pt_khype_loop"
+    escrow: str                  # escrow address (checksum)
+    underlying: str              # rebasing token (e.g., stETH), checksum
+    confidence: int = 95         # confidence to attach to the update
+    # Optional per-mode extras (dict bag of values)
+    extras: Dict[str, Any] = None
 
 
 class OffchainValuationKeeper:
-    """Main keeper service for off-chain valuation"""
+    def __init__(self, config_path: str):
+        """Initialize the keeper with configuration"""
+        with open(config_path, 'r') as f:
+            self.config = json.load(f)
 
-    def __init__(
-        self,
-        web3: Web3,
-        valuer_contract: Contract,
-        private_key: str,
-        configs: List[StrategyConfig]
-    ):
-        self.w3 = web3
-        self.valuer_contract = valuer_contract
-        self.account = Account.from_key(private_key)
-        self.configs = {c.strategy_id: c for c in configs}
-        self.last_updates: Dict[bytes, ValueReport] = {}
-        self.nonces: Dict[bytes, int] = {}
+        rpc_url = self.config['rpc_url']
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not self.w3.is_connected():
+            raise RuntimeError(f"Failed to connect to RPC at {rpc_url}")
 
-        # Initialize strategy valuers
-        self.valuers: Dict[bytes, StrategyValuer] = {}
+        # Load signer account (env override > config)
+        pk = os.environ.get("KEEPER_PRIVATE_KEY") or self.config.get('signer_private_key') or self.config.get('private_key')
+        if not pk:
+            raise RuntimeError("Missing keeper private key (env KEEPER_PRIVATE_KEY or config.signer_private_key)")
+        self.account = Account.from_key(pk)
+        logger.info(f"Keeper signer: {self.account.address}")
 
-    def add_valuer(self, strategy_id: bytes, valuer: StrategyValuer):
-        """Add a strategy-specific valuer"""
-        self.valuers[strategy_id] = valuer
+        # Load contracts
+        self.valuer_address = Web3.to_checksum_address(self.config['valuer_address'])
+        self.valuer = self.w3.eth.contract(address=self.valuer_address, abi=VALUER_ABI)
 
-    async def run(self):
-        """Main keeper loop"""
-        logger.info("Starting off-chain valuation keeper...")
+        # Wrapper used for unit conversion into SHARES (the vault's asset)
+        self.wrapper_address = Web3.to_checksum_address(
+            self.config.get('wrapper_address') or self.valuer.functions.asset().call()
+        )
+        self.wrapper = self.w3.eth.contract(address=self.wrapper_address, abi=WRAPPER_ABI)
+        logger.info(f"Valuer: {self.valuer_address}, Wrapper (asset): {self.wrapper_address}")
 
-        # Start background tasks
-        tasks = [
-            asyncio.create_task(self._monitor_update_requests()),
-            asyncio.create_task(self._scheduled_updates()),
-            asyncio.create_task(self._monitor_threshold_changes()),
-        ]
+        # Chain id for signing
+        self.chain_id = self.config.get("chain_id", self.w3.eth.chain_id)
 
-        await asyncio.gather(*tasks)
+        # Keeper settings
+        ks = self.config.get('keeper_settings', {})
+        self.update_check_interval = int(ks.get('update_check_interval', 60))
+        self.ttl_seconds = int(ks.get('ttl', 300))  # expiry TTL; must be <= MAX_SIGNATURE_AGE (1h) on-chain
+        self.gas_limit = int(ks.get('gas_limit', 350_000))
+        self.max_fee_gwei = float(ks.get('max_fee_gwei', 20.0))
+        self.max_priority_gwei = float(ks.get('max_priority_gwei', 2.0))
 
-    async def _monitor_update_requests(self):
-        """Monitor on-chain update requests (pull model)"""
-        while True:
-            try:
-                # Get latest block
-                latest_block = self.w3.eth.block_number
+        # Strategies
+        self.strategies: List[StrategyConfig] = []
+        for s in self.config.get('strategies', []):
+            # Support both old and new config formats
+            escrow_addr = s.get('escrow_address') or s.get('escrow')
+            underlying_addr = s.get('underlying_address') or s.get('underlying')
 
-                # Check for UpdateRequested events
-                events = self.valuer_contract.events.UpdateRequested().get_logs(
-                    fromBlock=latest_block - 10,
-                    toBlock=latest_block
+            # Determine mode
+            mode = s.get('mode', 'underlying_balance')
+
+            # If holdings array is present, use holdings mode
+            if 'holdings' in s:
+                mode = 'holdings'
+                extras = {'holdings': s['holdings']}
+                # Add other extras if present
+                if 'extras' in s:
+                    extras.update(s['extras'])
+            else:
+                extras = s.get('extras', {})
+
+            self.strategies.append(
+                StrategyConfig(
+                    id_text=s['id'],
+                    mode=mode,
+                    escrow=Web3.to_checksum_address(escrow_addr) if escrow_addr else '',
+                    underlying=Web3.to_checksum_address(underlying_addr) if underlying_addr else '',
+                    confidence=int(s.get('confidence') or s.get('min_confidence', 95)),
+                    extras=extras
                 )
-
-                for event in events:
-                    strategy_id = event['args']['strategyId']
-                    requester = event['args']['requester']
-                    reason = event['args']['reason']
-
-                    logger.info(f"Update requested for {strategy_id.hex()} by {requester}")
-                    await self._update_strategy_value(strategy_id, UpdateReason.ON_DEMAND)
-
-            except Exception as e:
-                logger.error(f"Error monitoring update requests: {e}")
-
-            await asyncio.sleep(10)  # Check every 10 seconds
-
-    async def _scheduled_updates(self):
-        """Perform scheduled updates based on staleness"""
-        while True:
-            try:
-                for strategy_id, config in self.configs.items():
-                    last_update = self.last_updates.get(strategy_id)
-
-                    # Check if update needed
-                    if last_update:
-                        staleness = int(time.time()) - last_update.timestamp
-                        if staleness > config.max_staleness:
-                            await self._update_strategy_value(strategy_id, UpdateReason.STALENESS)
-                    else:
-                        # No previous update, do initial
-                        await self._update_strategy_value(strategy_id, UpdateReason.SCHEDULED)
-
-            except Exception as e:
-                logger.error(f"Error in scheduled updates: {e}")
-
-            await asyncio.sleep(60)  # Check every minute
-
-    async def _monitor_threshold_changes(self):
-        """Monitor for significant value changes (push model)"""
-        while True:
-            try:
-                for strategy_id, config in self.configs.items():
-                    if strategy_id not in self.valuers:
-                        continue
-
-                    # Calculate current value
-                    escrow = await self._get_escrow_for_strategy(strategy_id)
-                    value, confidence = await self.valuers[strategy_id].calculate_value(
-                        escrow,
-                        strategy_id
-                    )
-
-                    # Check if change exceeds threshold
-                    last_update = self.last_updates.get(strategy_id)
-                    if last_update:
-                        change_percent = self._calculate_change_percent(
-                            last_update.value,
-                            value
-                        )
-
-                        if change_percent >= config.push_threshold:
-                            logger.info(f"Threshold exceeded for {strategy_id.hex()}: {change_percent} bps")
-                            await self._push_value_update(
-                                strategy_id,
-                                value,
-                                confidence,
-                                UpdateReason.THRESHOLD
-                            )
-
-            except Exception as e:
-                logger.error(f"Error monitoring thresholds: {e}")
-
-            await asyncio.sleep(30)  # Check every 30 seconds
-
-    async def _update_strategy_value(self, strategy_id: bytes, reason: UpdateReason):
-        """Update a specific strategy value"""
-        try:
-            if strategy_id not in self.valuers:
-                logger.warning(f"No valuer for strategy {strategy_id.hex()}")
-                return
-
-            # Get escrow address
-            escrow = await self._get_escrow_for_strategy(strategy_id)
-
-            # Calculate value
-            value, confidence = await self.valuers[strategy_id].calculate_value(
-                escrow,
-                strategy_id
             )
 
-            # Push update
-            await self._push_value_update(strategy_id, value, confidence, reason)
+        # Caches
+        self._erc20_cache: Dict[str, Tuple[Any, int]] = {}
 
-        except Exception as e:
-            logger.error(f"Error updating strategy {strategy_id.hex()}: {e}")
-
-    async def _push_value_update(
-        self,
-        strategy_id: bytes,
-        value: int,
-        confidence: int,
-        reason: UpdateReason
-    ):
-        """Push value update to chain"""
+    def _erc20(self, addr: str):
+        cs = Web3.to_checksum_address(addr)
+        if cs in self._erc20_cache:
+            return self._erc20_cache[cs]
+        c = self.w3.eth.contract(address=cs, abi=ERC20_ABI)
         try:
-            # Get nonce
-            nonce = self.nonces.get(strategy_id, 0) + 1
+            dec = int(c.functions.decimals().call())
+        except Exception:
+            dec = 18
+        self._erc20_cache[cs] = (c, dec)
+        return self._erc20_cache[cs]
 
-            # Create signature
-            signature = self._sign_value(strategy_id, value, confidence, nonce)
+    @staticmethod
+    def to_strategy_id(text_id: str) -> bytes:
+        """Compute bytes32 strategyId = keccak256(text_id)"""
+        return Web3.keccak(text=text_id)
 
-            # Build transaction
-            tx = self.valuer_contract.functions.updateValue(
-                strategy_id,
-                value,
-                confidence,
-                nonce,
-                [signature]
-            ).build_transaction({
-                'from': self.account.address,
-                'nonce': self.w3.eth.get_transaction_count(self.account.address),
-                'gas': 200000,
-                'gasPrice': self.w3.eth.gas_price
-            })
+    def _convert_underlying_to_wrapper_shares(self, underlying_amount: int) -> int:
+        """Convert underlying units (rebasing token) to wrapper shares using on-chain convertToShares."""
+        if underlying_amount <= 0:
+            return 0
+        try:
+            shares = self.wrapper.functions.convertToShares(int(underlying_amount)).call()
+            return int(shares)
+        except Exception as e:
+            raise RuntimeError(f"convertToShares failed: {e}")
 
-            # Sign and send transaction
-            signed_tx = self.account.sign_transaction(tx)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    def _read_underlying_balance(self, token: str, holder: str) -> int:
+        """Read ERC20 balanceOf(holder) for token."""
+        erc, _ = self._erc20(token)
+        try:
+            return int(erc.functions.balanceOf(holder).call())
+        except Exception as e:
+            raise RuntimeError(f"balanceOf({token}, {holder}) failed: {e}")
 
-            logger.info(f"Value update sent for {strategy_id.hex()}: {value} (tx: {tx_hash.hex()})")
+    # ------------- Valuation modes -------------
 
-            # Update local state
-            self.last_updates[strategy_id] = ValueReport(
-                value=value,
-                confidence=confidence,
-                timestamp=int(time.time()),
-                nonce=nonce
+    def value_underlying_balance_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'underlying_balance'
+        - Read escrow's balance of the underlying (rebasing) token
+        - Convert to wrapper shares via convertToShares
+        """
+        underlying_bal = self._read_underlying_balance(s.underlying, s.escrow)
+        shares = self._convert_underlying_to_wrapper_shares(underlying_bal)
+        logger.debug(f"[{s.id_text}] underlying_balance: underlying={underlying_bal}, shares={shares}")
+        return shares
+
+    def value_pt_khype_loop_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'pt_khype_loop'
+        - Get PT balance from escrow
+        - Get PT price from Pendle oracle
+        - Calculate collateral value in underlying
+        - Get debt from Felix lending (if applicable)
+        - Compute net underlying value
+        - Convert to wrapper shares
+        """
+        try:
+            extras = s.extras or {}
+            pt_address = extras.get('pt_khype_address')
+            felix_lending = extras.get('felix_lending')
+            pendle_router = extras.get('pendle_router')
+
+            # Get PT balance held by escrow
+            pt_balance = 0
+            if pt_address:
+                pt_token, _ = self._erc20(pt_address)
+                pt_balance = int(pt_token.functions.balanceOf(s.escrow).call())
+
+            # Get PT price (simplified - in production, query Pendle oracle)
+            # For now, assume PT trades at 0.95 of underlying
+            pt_price_ratio = int(0.95 * 10**18)
+
+            # Calculate collateral value in underlying
+            collateral_value_underlying = (pt_balance * pt_price_ratio) // 10**18
+
+            # Get debt from Felix (if address provided and not zero)
+            debt_underlying = 0
+            if felix_lending and felix_lending != "0x0000000000000000000000000000000000000000":
+                # In production, query Felix lending contract for debt position
+                # For now, assume no debt
+                pass
+
+            # Calculate net value
+            net_underlying = collateral_value_underlying - debt_underlying
+            if net_underlying < 0:
+                net_underlying = 0
+
+            # Convert to wrapper shares
+            shares = self._convert_underlying_to_wrapper_shares(net_underlying)
+
+            logger.debug(
+                f"[{s.id_text}] pt_khype_loop: "
+                f"pt_balance={pt_balance}, "
+                f"collateral={collateral_value_underlying}, "
+                f"debt={debt_underlying}, "
+                f"net_underlying={net_underlying}, "
+                f"shares={shares}"
             )
-            self.nonces[strategy_id] = nonce
+            return shares
 
         except Exception as e:
-            logger.error(f"Error pushing value update: {e}")
+            logger.error(f"Error in pt_khype_loop valuation: {e}")
+            return 0
 
-    def _sign_value(
-        self,
-        strategy_id: bytes,
-        value: int,
-        confidence: int,
-        nonce: int
-    ) -> bytes:
-        """Sign a value report"""
-        # Encode message
-        message = Web3.solidity_keccak(
-            ['bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'address'],
-            [strategy_id, value, confidence, nonce, self.w3.eth.chain_id, self.valuer_contract.address]
+    def value_holdings_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'holdings'
+        - Sum up all holdings with their signs (+1 for assets, -1 for liabilities)
+        - Supports multiple token types (erc20, pt, etc.)
+        - Convert total underlying to wrapper shares
+        """
+        try:
+            holdings = s.extras.get('holdings', []) if s.extras else []
+            total_underlying = 0
+
+            for holding in holdings:
+                holding_type = holding.get('type', 'erc20')
+                token_addr = holding.get('token')
+                sign = holding.get('sign', 1)
+
+                if not token_addr:
+                    continue
+
+                # Get token balance
+                token, _ = self._erc20(token_addr)
+                balance = int(token.functions.balanceOf(s.escrow).call())
+
+                # Apply sign (1 for assets, -1 for liabilities)
+                total_underlying += sign * balance
+
+                logger.debug(f"[{s.id_text}] holding: token={token_addr}, balance={balance}, sign={sign}")
+
+            # Ensure non-negative
+            if total_underlying < 0:
+                total_underlying = 0
+
+            # Convert to wrapper shares
+            shares = self._convert_underlying_to_wrapper_shares(total_underlying)
+            logger.debug(f"[{s.id_text}] holdings total: underlying={total_underlying}, shares={shares}")
+            return shares
+
+        except Exception as e:
+            logger.error(f"Error in holdings valuation: {e}")
+            return 0
+
+    def value_strategy_in_shares(self, s: StrategyConfig) -> int:
+        mode = s.mode.lower()
+        if mode == "underlying_balance":
+            return self.value_underlying_balance_mode(s)
+        elif mode == "pt_khype_loop":
+            return self.value_pt_khype_loop_mode(s)
+        elif mode == "holdings":
+            return self.value_holdings_mode(s)
+        else:
+            raise RuntimeError(f"Unsupported strategy mode: {s.mode}")
+
+    # ------------- Signing and submitting -------------
+
+    def _next_nonce(self, strategy_id: bytes) -> int:
+        """Fetch report and return nonce+1."""
+        try:
+            report = self.valuer.functions.getReport(strategy_id).call()
+            # report struct: (value, timestamp, confidence, nonce, isPush, lastUpdater)
+            return int(report[3]) + 1
+        except Exception as e:
+            logger.warning(f"getReport failed for {strategy_id.hex()}: {e}, using nonce=1")
+            return 1
+
+    def _sign_update(self, strategy_id: bytes, value: int, confidence: int, nonce: int, expiry: int) -> bytes:
+        """
+        Match UniversalValuerOffchain._verifySignatures:
+        keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, chainid, valuerAddress))
+        Then EIP-191 prefix and sign.
+        """
+        payload = abi_encode(
+            ['bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'address'],
+            [strategy_id, value, confidence, nonce, expiry, int(self.chain_id), self.valuer_address]
         )
+        hashed = Web3.keccak(payload)
+        msg = encode_defunct(primitive=hashed)
+        signed = Account.sign_message(msg, private_key=self.account.key)
+        return signed.signature  # bytes
 
-        # Sign message
-        signed_message = self.account.sign_message(encode_defunct(message))
+    def _build_tx_params(self) -> Dict[str, Any]:
+        """Build EIP-1559 gas params with sane defaults."""
+        max_fee = self.w3.to_wei(self.max_fee_gwei, "gwei")
+        max_prio = self.w3.to_wei(self.max_priority_gwei, "gwei")
+        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        return {
+            "chainId": self.chain_id,
+            "from": self.account.address,
+            "nonce": nonce,
+            "gas": self.gas_limit,
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": max_prio,
+        }
 
-        # Return signature bytes
-        return signed_message.signature
-
-    async def _get_escrow_for_strategy(self, strategy_id: bytes) -> str:
-        """Get escrow address for a strategy"""
-        # This would interface with the adapter/escrow contracts
-        # For now, return a placeholder
-        return "0x0000000000000000000000000000000000000000"
-
-    def _calculate_change_percent(self, old_value: int, new_value: int) -> int:
-        """Calculate percentage change in basis points"""
-        if old_value == 0:
-            return 10000 if new_value > 0 else 0
-
-        diff = abs(new_value - old_value)
-        return (diff * 10000) // old_value
-
-    async def batch_update(self, updates: List[Tuple[bytes, int, int]]):
-        """Batch update multiple strategies"""
+    def push_strategy_value(self, s: StrategyConfig) -> Optional[str]:
+        """Compute value in shares, sign, and submit updateValue."""
         try:
-            strategy_ids = []
-            values = []
-            confidences = []
+            strategy_id = self.to_strategy_id(s.id_text)
+            value_shares = self.value_strategy_in_shares(s)
 
-            for strategy_id, value, confidence in updates:
-                strategy_ids.append(strategy_id)
-                values.append(value)
-                confidences.append(confidence)
+            # Confidence
+            conf = int(s.confidence)
 
-            # Get shared nonce
-            nonce = int(time.time())
+            # Nonce and expiry (TTL)
+            nonce = self._next_nonce(strategy_id)
+            expiry = int(time.time()) + self.ttl_seconds
 
-            # Create batch signature
-            batch_hash = Web3.solidity_keccak(
-                ['bytes32[]', 'uint256[]', 'uint256[]', 'uint256'],
-                [strategy_ids, values, confidences, nonce]
-            )
-
-            signature = self.account.sign_message(encode_defunct(batch_hash)).signature
-
-            # Send batch update
-            tx = self.valuer_contract.functions.batchUpdateValues(
-                strategy_ids,
-                values,
-                confidences,
-                nonce,
-                [signature]
-            ).build_transaction({
-                'from': self.account.address,
-                'nonce': self.w3.eth.get_transaction_count(self.account.address),
-                'gas': 500000,
-                'gasPrice': self.w3.eth.gas_price
-            })
-
-            signed_tx = self.account.sign_transaction(tx)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-
-            logger.info(f"Batch update sent for {len(updates)} strategies (tx: {tx_hash.hex()})")
-
+            sig = self._sign_update(strategy_id, value_shares, conf, nonce, expiry)
+            tx_params = self._build_tx_params()
+            func = self.valuer.functions.updateValue(strategy_id, value_shares, conf, nonce, expiry, [sig])
+            tx = func.build_transaction(tx_params)
+            signed = self.account.sign_transaction(tx)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+            h = tx_hash.hex()
+            logger.info(f"Submitted updateValue: id={s.id_text}, shares={value_shares}, nonce={nonce}, conf={conf}, tx={h}")
+            return h
         except Exception as e:
-            logger.error(f"Error in batch update: {e}")
+            logger.error(f"push_strategy_value failed for {s.id_text}: {e}", exc_info=True)
+            return None
+
+    # ------------- Run loops -------------
+
+    def run_once(self):
+        for s in self.strategies:
+            self.push_strategy_value(s)
+
+    def run_forever(self):
+        logger.info("Starting OffchainValuationKeeper loop...")
+        while True:
+            start = time.time()
+            try:
+                self.run_once()
+            except Exception as e:
+                logger.error(f"run_once error: {e}", exc_info=True)
+            # Sleep the remainder of the interval
+            elapsed = time.time() - start
+            sleep_s = max(1.0, self.update_check_interval - elapsed)
+            time.sleep(sleep_s)
 
 
-async def main():
-    """Main entry point"""
-    # Load configuration
-    with open('keeper_config.json', 'r') as f:
-        config = json.load(f)
-
-    # Connect to network
-    w3 = Web3(Web3.HTTPProvider(config['rpc_url']))
-
-    # Load contracts
-    valuer_contract = w3.eth.contract(
-        address=config['valuer_address'],
-        abi=config['valuer_abi']
-    )
-
-    # Load other contracts (Felix, Pendle, etc.)
-    contracts = {}
-    for name, addr in config['contracts'].items():
-        contracts[name] = w3.eth.contract(
-            address=addr,
-            abi=config['abis'][name]
-        )
-
-    # Create strategy configs
-    configs = []
-    for strategy in config['strategies']:
-        configs.append(StrategyConfig(
-            strategy_id=bytes.fromhex(strategy['id']),
-            min_update_interval=strategy['min_update_interval'],
-            max_staleness=strategy['max_staleness'],
-            push_threshold=strategy['push_threshold'],
-            min_confidence=strategy['min_confidence']
-        ))
-
-    # Create keeper
-    keeper = OffchainValuationKeeper(
-        w3,
-        valuer_contract,
-        config['private_key'],
-        configs
-    )
-
-    # Add strategy valuers
-    pt_loop_id = bytes.fromhex(config['strategies'][0]['id'])
-    keeper.add_valuer(pt_loop_id, PTKHYPELoopValuer(w3, contracts))
-
-    # Run keeper
-    await keeper.run()
+def main():
+    config_path = sys.argv[1] if len(sys.argv) > 1 else 'keeper_config.json'
+    keeper = OffchainValuationKeeper(config_path)
+    mode = keeper.config.get("mode", "loop").lower()
+    if mode == "once":
+        keeper.run_once()
+    else:
+        keeper.run_forever()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

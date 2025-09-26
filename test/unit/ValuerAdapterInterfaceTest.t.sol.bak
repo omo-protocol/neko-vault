@@ -1,0 +1,127 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import "forge-std/Test.sol";
+import "../../src/valuers/UniversalValuerOffchain.sol";
+import "../../src/adapters/UniversalAdapterEscrow.sol";
+import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+
+/**
+ * @title ValuerAdapterInterfaceTest
+ * @notice Simple test to verify UniversalValuerOffchain can call IUniversalAdapterEscrow interface
+ */
+contract ValuerAdapterInterfaceTest is Test {
+    function test_InterfaceIntegrationCompiles() public pure {
+        // This test verifies that the UniversalValuerOffchain can use IUniversalAdapterEscrow
+        // The fact that this compiles confirms the interface integration is correct
+        assertTrue(true, "Interface integration compiles successfully");
+    }
+
+    function test_GetActiveStrategiesSignature() public {
+        // Create a mock adapter that implements IUniversalAdapterEscrow
+        MockAdapter mockAdapter = new MockAdapter();
+
+        // Verify the function exists and can be called
+        bytes32[] memory strategies = mockAdapter.getActiveStrategies();
+        assertEq(strategies.length, 1, "Mock adapter returns one strategy");
+        assertEq(strategies[0], keccak256("mock-strategy"), "Returns expected strategy ID");
+    }
+
+    function test_ValuerCanCallAdapter() public {
+        // Setup
+        address owner = address(0x1);
+        MockERC20 asset = new MockERC20("Test", "TEST", 18);
+        UniversalValuerOffchain valuer = new UniversalValuerOffchain(owner, address(asset));
+
+        // Create mock adapter
+        MockAdapter mockAdapter = new MockAdapter();
+
+        // This verifies the valuer's getTotalValue can call the adapter
+        // The function will try to call getActiveStrategies on the adapter
+        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
+
+        // Should return 0 since no value reports
+        assertEq(totalValue, 0, "Total value is 0 without reports");
+    }
+}
+
+/**
+ * @notice Simple mock adapter that implements the required interface
+ */
+contract MockAdapter is IUniversalAdapterEscrow {
+    function getActiveStrategies() external pure override returns (bytes32[] memory) {
+        bytes32[] memory strategies = new bytes32[](1);
+        strategies[0] = keccak256("mock-strategy");
+        return strategies;
+    }
+
+    // Minimal implementations of other required functions
+    function allocate(uint256) external pure override returns (bytes32[] memory, uint256[] memory) {
+        revert("Not implemented");
+    }
+
+    function deallocate(bytes calldata, uint256) external pure override returns (uint256) {
+        revert("Not implemented");
+    }
+
+    function isActive() external pure override returns (bool) {
+        return true;
+    }
+
+    function asset() external pure override returns (address) {
+        return address(0);
+    }
+
+    function valuer() external pure override returns (address) {
+        return address(0);
+    }
+
+    function setStrategy(bytes32, address, bytes calldata, uint256) external pure override {
+        revert("Not implemented");
+    }
+
+    function removeStrategy(bytes32) external pure override {
+        revert("Not implemented");
+    }
+
+    function updateWhitelist(address, bytes4, bool, uint256) external pure override {
+        revert("Not implemented");
+    }
+
+    function executeStrategy(bytes32, Call[] calldata) external pure override {
+        revert("Not implemented");
+    }
+
+    function executePreConfigured(bytes32) external pure override {
+        revert("Not implemented");
+    }
+
+    function sweep(address, address) external pure override {
+        revert("Not implemented");
+    }
+
+    function setPaused(bool) external pure override {
+        revert("Not implemented");
+    }
+
+    function getStrategy(bytes32) external pure override returns (StrategyConfig memory) {
+        revert("Not implemented");
+    }
+
+    function getWhitelist(address, bytes4) external pure override returns (WhitelistConfig memory) {
+        revert("Not implemented");
+    }
+
+    function getAllocation(bytes32) external pure override returns (uint256) {
+        return 0;
+    }
+
+    function isPaused() external pure override returns (bool) {
+        return false;
+    }
+
+    function parentVault() external pure override returns (address) {
+        return address(0);
+    }
+}

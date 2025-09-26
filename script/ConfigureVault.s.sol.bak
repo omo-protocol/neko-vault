@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import "forge-std/Script.sol";
+import "../src/VaultV2.sol";
+import "../src/adapters/UniversalAdapterEscrow.sol";
+
+contract ConfigureVault is Script {
+    // Deployed contracts
+    VaultV2 constant vault = VaultV2(0x2e70187B896a46631B0e2bcec7DBDd7231491970);
+    UniversalAdapterEscrow constant adapter = UniversalAdapterEscrow(payable(0xBf109785fc9B50866f39A3fdeaDc67fc06b7663E));
+
+    function run() public {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Step 1: Submit timelock for addAdapter
+        console.log("\n=== Submitting Timelock ===");
+        try vault.submitTimelock(bytes4(keccak256("addAdapter(address)")), abi.encode(address(adapter))) {
+            console.log("Timelock submitted for addAdapter");
+            console.log("Wait for timelock period before executing...");
+        } catch {
+            console.log("Timelock might already be submitted or not required");
+        }
+
+        // Step 2: Try to execute if timelock has passed
+        try vault.addAdapter(address(adapter)) {
+            console.log("Adapter added successfully!");
+        } catch {
+            console.log("Cannot add adapter yet - timelock not ready or already added");
+        }
+
+        // Step 3: Set allocator role for deployer
+        try vault.setIsAllocator(deployer, true) {
+            console.log("Allocator role set for deployer");
+        } catch {
+            console.log("Cannot set allocator or already set");
+        }
+
+        // Check current state
+        console.log("\n=== Current State ===");
+        console.log("Vault:", address(vault));
+        console.log("Adapter:", address(adapter));
+        console.log("Vault Owner:", vault.owner());
+
+        // Check if adapter is already added
+        try vault.isAdapter(address(adapter)) returns (bool isAdded) {
+            console.log("Adapter added to vault:", isAdded);
+        } catch {}
+
+        // Check allocator status
+        try vault.isAllocator(deployer) returns (bool isAllocator) {
+            console.log("Deployer is allocator:", isAllocator);
+        } catch {}
+
+        vm.stopBroadcast();
+    }
+
+    // Function to just submit the timelock
+    function submitTimelock() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        vault.submitTimelock(bytes4(keccak256("addAdapter(address)")), abi.encode(address(adapter)));
+        console.log("Timelock submitted for addAdapter");
+        console.log("Adapter address:", address(adapter));
+
+        vm.stopBroadcast();
+    }
+
+    // Function to execute after timelock passes
+    function executeTimelock() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        vault.addAdapter(address(adapter));
+        console.log("Adapter added successfully!");
+
+        vault.setIsAllocator(deployer, true);
+        console.log("Allocator role set");
+
+        vm.stopBroadcast();
+    }
+}

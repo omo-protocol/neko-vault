@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {IUniversalValuerOffchain} from "../adapters/interfaces/IUniversalValuerOffchain.sol";
+import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 
 /// @title UniversalValuerOffchain
@@ -505,10 +506,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
     }
 
-    /// @dev Get active strategies for escrow (simplified)
-    function _getActiveStrategies(address) internal pure returns (bytes32[] memory) {
-        // In production, would interface with StrategyEscrow
-        // For now, return empty array
-        return new bytes32[](0);
+    /// @dev Get active strategies for escrow
+    function _getActiveStrategies(address escrow) internal view returns (bytes32[] memory) {
+        // Query UniversalAdapterEscrow for active strategies
+        try IUniversalAdapterEscrow(escrow).getActiveStrategies() returns (bytes32[] memory ids) {
+            return ids;
+        } catch {
+            // Return empty array if the call fails (e.g., not a UniversalAdapterEscrow)
+            return new bytes32[](0);
+        }
     }
 }

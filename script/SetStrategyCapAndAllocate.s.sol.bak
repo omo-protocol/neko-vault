@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import "forge-std/Script.sol";
+import "../src/VaultV2.sol";
+import "../src/adapters/UniversalAdapterEscrow.sol";
+import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {IERC20} from "../src/interfaces/IERC20.sol";
+
+contract SetStrategyCapAndAllocate is Script {
+    VaultV2 constant vault = VaultV2(0x2e70187B896a46631B0e2bcec7DBDd7231491970);
+    UniversalAdapterEscrow constant adapter = UniversalAdapterEscrow(payable(0xBf109785fc9B50866f39A3fdeaDc67fc06b7663E));
+
+    IERC20 constant KHYPE = IERC20(0xfD739d4e423301CE9385c1fb8850539D657C296D);
+
+    bytes32 constant PT_KHYPE_LOOP_ID = keccak256("pt-khype-loop");
+    bytes32 constant PT_KHYPE_ALLOCATION_ID = keccak256("pt-khype-allocation");
+
+    uint256 constant TEST_AMOUNT = 0.01e18; // 0.01 KHYPE
+    uint256 constant CAP_AMOUNT = 1000e18; // 1000 KHYPE cap
+
+    function run() public {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        console.log("\n=== Setting Cap and Allocating ===");
+        console.log("Deployer:", deployer);
+        console.log("Vault:", address(vault));
+        console.log("Adapter:", address(adapter));
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Step 1: Increase absolute cap for the strategy
+        console.log("\n>>> Setting absolute cap...");
+        try vault.increaseAbsoluteCap(PT_KHYPE_ALLOCATION_ID, CAP_AMOUNT) {
+            console.log("   [OK] Absolute cap set to:", CAP_AMOUNT);
+        } catch Error(string memory reason) {
+            console.log("   [FAIL] Cannot set cap:", reason);
+        } catch {
+            console.log("   [INFO] Cap may already be set or requires timelock");
+        }
+
+        // Step 2: Check current balances
+        uint256 vaultKhype = KHYPE.balanceOf(address(vault));
+        uint256 userShares = vault.balanceOf(deployer);
+        console.log("\n>>> Current State:");
+        console.log("   Vault KHYPE balance:", vaultKhype);
+        console.log("   User shares:", userShares);
+
+        // Step 3: Deposit if needed
+        if (userShares == 0 && vaultKhype == 0) {
+            console.log("\n>>> Depositing KHYPE...");
+            uint256 userKhype = KHYPE.balanceOf(deployer);
+            require(userKhype >= TEST_AMOUNT, "Insufficient KHYPE");
+
+            KHYPE.approve(address(vault), TEST_AMOUNT);
+            uint256 shares = vault.deposit(TEST_AMOUNT, deployer);
+            console.log("   Deposited:", TEST_AMOUNT);
+            console.log("   Received shares:", shares);
+
+            vaultKhype = TEST_AMOUNT;
+        }
+
+        // Step 4: Allocate to strategy
+        if (vaultKhype > 0) {
+            console.log("\n>>> Allocating to PT-KHYPE strategy...");
+
+            uint256 allocationAmount = vaultKhype; // Allocate all vault balance
+
+            // Prepare allocation data
+            bytes memory allocData = abi.encode(
+                PT_KHYPE_LOOP_ID,
+                allocationAmount,
+                false, // Don't execute immediately
+                new IUniversalAdapterEscrow.Call[](0)
+            );
+
+            try vault.allocate(address(adapter), allocData, allocationAmount) {
+                console.log("   [OK] Allocated:", allocationAmount);
+
+                uint256 newAllocation = adapter.getAllocation(PT_KHYPE_LOOP_ID);
+                console.log("   Strategy allocation:", newAllocation);
+            } catch Error(string memory reason) {
+                console.log("   [FAIL] Allocation failed:", reason);
+            } catch {
+                console.log("   [FAIL] Allocation failed");
+            }
+        }
+
+        vm.stopBroadcast();
+
+        // Final state
+        console.log("\n>>> Final State:");
+        console.log("   Vault total assets:", vault.totalAssets());
+        console.log("   Adapter KHYPE balance:", KHYPE.balanceOf(address(adapter)));
+        console.log("   Strategy allocation:", adapter.getAllocation(PT_KHYPE_LOOP_ID));
+    }
+}

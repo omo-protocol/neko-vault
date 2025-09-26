@@ -1,0 +1,575 @@
+Warning: optimizer settings and `viaIR` have been disabled for accurate coverage reports.
+If you encounter "stack too deep" errors, consider using `--ir-minimum` which enables `viaIR` with minimum optimization resolving most of the errors
+Compiling 286 files with Solc 0.8.28
+Compiling 15 files with Solc 0.8.19
+Compiling 42 files with Solc 0.8.26
+Compiling 42 files with Solc 0.8.21
+Solc 0.8.19 finished in 2.44s
+Solc 0.8.26 finished in 2.96s
+Solc 0.8.21 finished in 4.65s
+Solc 0.8.28 finished in 10.11s
+Compiler run successful with warnings:
+Warning (2519): This declaration shadows an existing declaration.
+  --> script/FixRelativeCapDirect.s.sol:68:13:
+   |
+68 |             bytes memory packedId = abi.encodePacked(STRATEGY_ID);
+   |             ^^^^^^^^^^^^^^^^^^^^^
+Note: The shadowed declaration is here:
+  --> script/FixRelativeCapDirect.s.sol:88:9:
+   |
+88 |         bytes32 packedId = keccak256(abi.encodePacked(STRATEGY_ID));
+   |         ^^^^^^^^^^^^^^^^
+
+Warning (2519): This declaration shadows an existing declaration.
+  --> script/FreshDeployAndDemo.s.sol:25:5:
+   |
+25 |     uint256 constant WAD = 1e18;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Note: The shadowed declaration is here:
+ --> src/libraries/ConstantsLib.sol:5:1:
+  |
+5 | uint256 constant WAD = 1e18;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Warning (5667): Unused function parameter. Remove or comment out the variable name to silence this warning.
+   --> src/adapters/UniversalAdapterEscrow.sol:141:9:
+    |
+141 |         uint256 assets,
+    |         ^^^^^^^^^^^^^^
+
+Warning (2072): Unused local variable.
+  --> script/FixRelativeCapDirect.s.sol:24:9:
+   |
+24 |         address deployer = vm.addr(deployerPrivateKey);
+   |         ^^^^^^^^^^^^^^^^
+
+Warning (2072): Unused local variable.
+   --> test/unit/UniversalAdapterEscrow.t.sol:259:10:
+    |
+259 |         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 0, bytes4(0), address(0));
+    |          ^^^^^^^^^^^^^^^^^^^^
+
+Warning (2018): Function state mutability can be restricted to pure
+   --> script/ExecutePTKHYPEStrategy.s.sol:125:5:
+    |
+125 |     function executePendleSwap() internal {
+    |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Warning (2018): Function state mutability can be restricted to view
+   --> test/integration/PTKHYPELoopStrategyE2E.t.sol:204:5:
+    |
+204 |     function testStrategyConfiguration() public {
+    |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Warning (2018): Function state mutability can be restricted to view
+   --> test/integration/PTKHYPELoopStrategyE2E.t.sol:213:5:
+    |
+213 |     function testWhitelistConfiguration() public {
+    |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Warning (2018): Function state mutability can be restricted to view
+   --> test/unit/UniversalValuerOffchainComprehensive.t.sol:526:5:
+    |
+526 |     function testIsAuthorizedSigner() public {
+    |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Warning (2018): Function state mutability can be restricted to pure
+   --> test/unit/UniversalValuerOffchainComprehensive.t.sol:593:5:
+    |
+593 |     function _signBatch(
+    |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Warning (2018): Function state mutability can be restricted to pure
+  --> test/unit/ValuerAdapterCompilationTest.t.sol:38:5:
+   |
+38 |     function test_AdapterHasGetActiveStrategies() public {
+   |     ^ (Relevant source part starts here and spans across multiple lines).
+
+Analysing contracts...
+Running tests...
+
+Ran 11 tests for test/AccruingFunctionsTest.sol:AccruingFunctionsTest
+[PASS] testAllocateAccruesInterest() (gas: 100492)
+[PASS] testDepositAccruesInterest() (gas: 87333)
+[PASS] testForceDeallocateAccruesInterest() (gas: 136681)
+[PASS] testMintAccruesInterest() (gas: 87880)
+[PASS] testRedeemAccruesInterest() (gas: 84468)
+[PASS] testSetManagementFeeAccruesInterest() (gas: 87504)
+[PASS] testSetManagementFeeRecipientAccruesInterest() (gas: 87244)
+[PASS] testSetMaxRateAccruesInterest() (gas: 54275)
+[PASS] testSetPerformanceFeeAccruesInterest() (gas: 88963)
+[PASS] testSetPerformanceFeeRecipientAccruesInterest() (gas: 88808)
+[PASS] testWithdrawAccruesInterest() (gas: 84795)
+Suite result: ok. 11 passed; 0 failed; 0 skipped; finished in 5.55ms (1.89ms CPU time)
+
+Ran 2 tests for test/integration/MorphoVaultV1_1IntegrationBadDebtTest.sol:MorphoVaultV1_1IntegrationBadDebtTest
+[PASS] testNoBadDebtThroughLiquidate() (gas: 760137)
+[PASS] testNoBadDebtThroughSubmitMarketRemoval() (gas: 441400)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 8.01ms (3.19ms CPU time)
+
+Ran 4 tests for test/MathTest.sol:MathTest
+[PASS] testMin(uint256,uint256) (runs: 2048, μ: 3847, ~: 3852)
+[PASS] testMulDivDown(uint256,uint256,uint256) (runs: 2048, μ: 9589, ~: 9197)
+[PASS] testMulDivUp(uint256,uint256,uint256) (runs: 2048, μ: 10543, ~: 10144)
+[PASS] testZeroFloorSub(uint256,uint256) (runs: 2048, μ: 3909, ~: 4007)
+Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 227.38ms (226.99ms CPU time)
+
+Ran 3 tests for test/MulticallTest.sol:MulticallTest
+[PASS] testMulticall(address,address) (runs: 2048, μ: 31931, ~: 31957)
+[PASS] testMulticallEmpty() (gas: 9367)
+[PASS] testMulticallFailing(address) (runs: 2048, μ: 16111, ~: 16113)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 296.14ms (294.14ms CPU time)
+
+Ran 11 tests for test/integration/PTKHYPELoopStrategyE2E.t.sol:PTKHYPELoopStrategyE2ETest
+[PASS] testAllocateWithImmediateExecution() (gas: 456449)
+[PASS] testAllocationWithoutDeposit() (gas: 52672)
+[PASS] testCannotSweepPrimaryAsset() (gas: 65327)
+[PASS] testDailyLimitEnforcement() (gas: 531392)
+[PASS] testExecuteStrategyUnauthorized() (gas: 27896)
+[PASS] testFullE2EFlow() (gas: 530952)
+[PASS] testMultipleStrategies() (gas: 524994)
+[PASS] testPauseStrategy() (gas: 115201)
+[PASS] testStrategyConfiguration() (gas: 29761)
+[PASS] testSweepRewards() (gas: 721797)
+[PASS] testWhitelistConfiguration() (gas: 17770)
+Suite result: ok. 11 passed; 0 failed; 0 skipped; finished in 4.63ms (2.94ms CPU time)
+
+Ran 1 test for test/PackingTest.sol:PackingTest
+[PASS] testTotalAssetsAndLastUpdateSlot() (gas: 4819)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 315.13µs (17.83µs CPU time)
+
+Ran 13 tests for test/GatingTest.sol:GatingTest
+[PASS] testCanReceiveAssetsPassthrough(bool,bool) (runs: 2048, μ: 148895, ~: 280119)
+[PASS] testCanReceiveSharesPassthrough(bool,bool) (runs: 2048, μ: 148838, ~: 280068)
+[PASS] testCanReceiveSharesTransfer() (gas: 284454)
+[PASS] testCanReceiveSharesTransferFrom() (gas: 284913)
+[PASS] testCanSendAssetsPassthrough(bool,bool) (runs: 2048, μ: 148859, ~: 280087)
+[PASS] testCanSendSharesPassthrough(bool,bool) (runs: 2048, μ: 148818, ~: 280051)
+[PASS] testCanSendSharesTransfer() (gas: 283588)
+[PASS] testCanSendSharesTransferFrom() (gas: 284082)
+[PASS] testCannotReceiveAssets() (gas: 307676)
+[PASS] testCannotReceiveShares() (gas: 306332)
+[PASS] testCannotSendAssets() (gas: 307212)
+[PASS] testCannotSendShares() (gas: 306834)
+[PASS] testNoGate() (gas: 166299)
+Suite result: ok. 13 passed; 0 failed; 0 skipped; finished in 1.18s (1.18s CPU time)
+
+Ran 1 test for test/FactoryTest.sol:FactoryTest
+[PASS] testCreateVaultV2(address,address,bytes32) (runs: 2048, μ: 7473894, ~: 7474021)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 1.22s (1.22s CPU time)
+
+Ran 1 test for test/GettersTest.sol:GettersTest
+[PASS] testDomainSeparator(uint64) (runs: 2048, μ: 11021, ~: 11021)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 74.01ms (71.83ms CPU time)
+
+Ran 6 tests for test/ExchangeRateTest.sol:ExchangeRateTest
+[PASS] testDecimals() (gas: 14477)
+[PASS] testExchangeRateDeposit(uint256) (runs: 2048, μ: 85106, ~: 84820)
+[PASS] testExchangeRateMint(uint256) (runs: 2048, μ: 85712, ~: 85363)
+[PASS] testExchangeRateRedeem(uint256) (runs: 2048, μ: 82460, ~: 82066)
+[PASS] testExchangeRateWithdraw(uint256) (runs: 2048, μ: 81149, ~: 80675)
+[PASS] testVirtualShares() (gas: 14764)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 1.58s (1.57s CPU time)
+
+Ran 2 tests for test/ForceDeallocateTest.sol:ForceDeallocateTest
+[PASS] testForceDeallocate(uint256,uint256,uint256) (runs: 2048, μ: 523843, ~: 526013)
+[PASS] testForceDeallocateWithBlockedVault() (gas: 589633)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 2.04s (2.04s CPU time)
+
+Ran 2 tests for test/integration/MorphoVaultV1IntegrationBadDebtTest.sol:MorphoVaultV1IntegrationBadDebtTest
+[PASS] testBadDebtThroughLiquidate() (gas: 761168)
+[PASS] testBadDebtThroughSubmitMarketRemoval() (gas: 492676)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 6.99ms (2.89ms CPU time)
+
+Ran 5 tests for test/GateExampleTest.sol:GateExampleTest
+[PASS] testAdapterWithWhitelistedInitiator(address,bool) (runs: 2048, μ: 285517, ~: 275587)
+[PASS] testBundlerAdapterOperations(address,bool,address) (runs: 2048, μ: 34680, ~: 24808)
+[PASS] testConstructor() (gas: 13226)
+[PASS] testOwnerOperations(address,address) (runs: 2048, μ: 24279, ~: 24279)
+[PASS] testWhitelistOperations(address,bool,address) (runs: 2048, μ: 45775, ~: 37388)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 829.10ms (826.64ms CPU time)
+
+Ran 4 tests for test/LiquidityAdapterTest.sol:LiquidityAdapterTest
+[PASS] testLiquidityAdapterDeposit(bytes,uint256) (runs: 2048, μ: 450346, ~: 433007)
+[PASS] testLiquidityAdapterMint(bytes,uint256) (runs: 2048, μ: 450792, ~: 433453)
+[PASS] testLiquidityAdapterRedeem(bytes,uint256) (runs: 2048, μ: 509750, ~: 486848)
+[PASS] testLiquidityAdapterWithdraw(bytes,uint256) (runs: 2048, μ: 512584, ~: 489669)
+Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 4.95s (4.95s CPU time)
+
+Ran 7 tests for test/integration/MorphoMarketV1IntegrationAllocationTest.sol:MorphoMarketV1IntegrationAllocationTest
+[PASS] testAllocateLessThanIdleToMarket1(uint256) (runs: 2048, μ: 265075, ~: 264828)
+[PASS] testAllocateLessThanIdleToMarket2(uint256) (runs: 2048, μ: 457246, ~: 458774)
+[PASS] testAllocateMoreThanIdle(uint256) (runs: 2048, μ: 99743, ~: 99850)
+[PASS] testAllocateNoDuplicateMarket() (gas: 901132)
+[PASS] testDeallocateLessThanAllocated(uint256) (runs: 2048, μ: 187337, ~: 187021)
+[PASS] testDeallocateMoreThanAllocated(uint256) (runs: 2048, μ: 57087, ~: 57189)
+[PASS] testDeallocateNoLiquidity(uint256) (runs: 2048, μ: 445885, ~: 443647)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 7.11s (7.11s CPU time)
+
+Ran 1 test for test/integration/MorphoMarketV1IntegrationBadDebtTest.sol:MorphoMarketV1IntegrationBadDebtTest
+[PASS] testBadDebt() (gas: 724464)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 7.63ms (2.80ms CPU time)
+
+Ran 3 tests for test/integration/MorphoVaultV1_1IntegrationDepositTest.sol:MorphoVaultV1_1IntegrationDepositTest
+[PASS] testDepositLiquidityAdapterCanFail(uint256) (runs: 2048, μ: 1383173, ~: 1327447)
+[PASS] testDepositLiquidityAdapterSuccess(uint256) (runs: 2048, μ: 661544, ~: 663737)
+[PASS] testDepositNoLiquidityAdapter(uint256) (runs: 2048, μ: 221542, ~: 221719)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 7.94s (7.93s CPU time)
+
+Ran 6 tests for test/RealizeLossTest.sol:RealizeLossTest
+[PASS] testAllocationLossAllocate(uint256,uint256) (runs: 2048, μ: 403029, ~: 403776)
+[PASS] testAllocationLossDeallocate(uint256,uint256) (runs: 2048, μ: 424425, ~: 425729)
+[PASS] testAllocationLossForceDeallocate(uint256,uint256) (runs: 2048, μ: 453553, ~: 454857)
+[PASS] testLossThenTouch(uint256,uint256) (runs: 2048, μ: 484275, ~: 484193)
+[PASS] testRealizeLoss(uint256,uint256) (runs: 2048, μ: 532523, ~: 532441)
+[PASS] testTouchThenLoss(uint256,uint256) (runs: 2048, μ: 493083, ~: 493001)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 7.70s (7.70s CPU time)
+
+Ran 1 test for test/integration/MorphoVaultV1IntegrationDonationTest.sol:MorphoVaultV1IntegrationDonationTest
+[PASS] testSharesDonationResistanceIfNoAllocation(uint256,uint256,uint256) (runs: 2048, μ: 796452, ~: 798110)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 3.81s (3.81s CPU time)
+
+Ran 1 test for test/integration/MorphoVaultV1IntegrationInterestTest.sol:MorphoVaultV1IntegrationInterestTest
+[PASS] testAccrueInterest(uint256,uint256) (runs: 2048, μ: 2966527, ~: 2968356)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 8.09s (8.08s CPU time)
+
+Ran 3 tests for test/SafeERC20LibTest.sol:SafeERC20LibTest
+[PASS] testSafeApprove(address,uint256) (runs: 2048, μ: 82831, ~: 83133)
+[PASS] testSafeTransfer(address,uint256) (runs: 2048, μ: 82468, ~: 82770)
+[PASS] testSafeTransferFrom(address,address,uint256) (runs: 2048, μ: 110046, ~: 110338)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 949.29ms (949.14ms CPU time)
+
+Ran 2 tests for test/integration/MorphoMarketV1IntegrationIkrTest.sol:MorphoMarketV1IntegrationIkrTest
+[PASS] testCantWithdraw(uint256) (runs: 2048, μ: 878966, ~: 878437)
+[PASS] testInKindRedemption(uint256) (runs: 2048, μ: 1340585, ~: 1339707)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 9.57s (9.57s CPU time)
+
+Ran 2 tests for test/integration/MorphoMarketV1IntegrationDepositTest.sol:MorphoMarketV1IntegrationDepositTest
+[PASS] testDepositLiquidityAdapterSuccess(uint256) (runs: 2048, μ: 706882, ~: 709633)
+[PASS] testDepositNoLiquidityAdapter(uint256) (runs: 2048, μ: 236850, ~: 236942)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 2.62s (2.62s CPU time)
+
+Ran 27 tests for test/unit/UniversalAdapterEscrow.t.sol:UniversalAdapterEscrowTest
+[PASS] testAllocate() (gas: 245859)
+[PASS] testAllocateInactiveStrategyReverts() (gas: 22536)
+[PASS] testCannotRemoveStrategyWithAllocation() (gas: 237897)
+[PASS] testCannotSweepPrimaryAsset() (gas: 52293)
+[PASS] testDailyLimitEnforcement() (gas: 270314)
+[PASS] testDailyLimitReset() (gas: 276474)
+[PASS] testDeallocate() (gas: 253054)
+[PASS] testDeallocateAll() (gas: 213834)
+[PASS] testDeployment() (gas: 29026)
+[PASS] testExecuteNotWhitelistedReverts() (gas: 132941)
+[PASS] testExecutePreConfigured() (gas: 364018)
+[PASS] testExecuteStrategyWithWhitelist() (gas: 184536)
+[PASS] testFactoryTracking() (gas: 24825)
+[PASS] testOnlyOwnerCanSetStrategy() (gas: 120531)
+[PASS] testOnlyStrategyAgentCanExecute() (gas: 132553)
+[PASS] testOnlyVaultCanAllocate() (gas: 122233)
+[PASS] testPause() (gas: 21234)
+[PASS] testPausedBlocksAllocate() (gas: 128390)
+[PASS] testPausedBlocksExecute() (gas: 123179)
+[PASS] testRealAssets() (gas: 39368)
+[PASS] testReceiveETH() (gas: 16751)
+[PASS] testRemoveStrategy() (gas: 99407)
+[PASS] testSetStrategy() (gas: 123499)
+[PASS] testSweep() (gas: 87814)
+[PASS] testTransferOwnership() (gas: 18560)
+[PASS] testTransferOwnershipZeroReverts() (gas: 14312)
+[PASS] testUpdateWhitelist() (gas: 71240)
+Suite result: ok. 27 passed; 0 failed; 0 skipped; finished in 5.35ms (4.47ms CPU time)
+
+Ran 9 tests for test/integration/UniversalAdapterEscrowE2E.t.sol:UniversalAdapterEscrowE2E
+[PASS] testAllocateWithImmediateExecution() (gas: 439718)
+[PASS] testCompleteAllocationFlow() (gas: 440224)
+[PASS] testCompleteDeallocationFlow() (gas: 440179)
+[PASS] testEmergencyPauseScenario() (gas: 269860)
+[PASS] testFactoryAddressComputation() (gas: 3567565)
+[PASS] testMultiStrategyManagement() (gas: 509821)
+[PASS] testPreConfiguredStrategy() (gas: 808043)
+[PASS] testRealAssetsValuation() (gas: 39358)
+[PASS] testSweepRewards() (gas: 84669)
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 3.31ms (2.52ms CPU time)
+
+Ran 27 tests for test/unit/UniversalValuerOffchainComprehensive.t.sol:UniversalValuerOffchainComprehensive
+[PASS] testBatchUpdateValues() (gas: 394929)
+[PASS] testBatchUpdateValuesArrayMismatch() (gas: 17242)
+[FAIL: assertion failed] testCancelSignerRemoval() (gas: 62654)
+[PASS] testConfigureStrategy() (gas: 112698)
+[PASS] testEmergencyUpdate() (gas: 157915)
+[PASS] testEmergencyUpdateNotInEmergencyMode() (gas: 14476)
+[PASS] testExecuteSignerRemoval() (gas: 60624)
+[FAIL: assertion failed: 1600000000000000000000 != 1500000000000000000000] testGetTotalValue() (gas: 894036)
+[FAIL: StrategyNotActive()] testGetTotalValueLowConfidence() (gas: 683091)
+[FAIL: StrategyNotActive()] testGetTotalValueStaleReports() (gas: 683935)
+[PASS] testGetValue() (gas: 177855)
+[FAIL: log != expected log] testInitiateSignerChange() (gas: 60832)
+[PASS] testIsAuthorizedSigner() (gas: 33296)
+[PASS] testNeedsUpdate() (gas: 164839)
+[PASS] testOnlyOwnerFunctions() (gas: 20211)
+[PASS] testPriceChangeBoundsValidation() (gas: 226374)
+[PASS] testRequestUpdate() (gas: 164970)
+[PASS] testSetEmergencyMode() (gas: 220661)
+[PASS] testSetFallbackValue() (gas: 40157)
+[PASS] testSetPriceChangeBounds() (gas: 40338)
+[PASS] testSetRequiredWeight() (gas: 21699)
+[PASS] testUpdateValue() (gas: 171726)
+[PASS] testUpdateValueExpiredSignature() (gas: 30573)
+[PASS] testUpdateValueMinInterval() (gas: 198702)
+[PASS] testUpdateValueMultipleSigners() (gas: 222084)
+[PASS] testUpdateValueStaleNonce() (gas: 171189)
+[PASS] testUpdateValueTooFarExpiry() (gas: 30806)
+Suite result: FAILED. 22 passed; 5 failed; 0 skipped; finished in 8.32ms (6.12ms CPU time)
+
+Ran 5 tests for test/unit/UniversalValuerOffchainWithAdapter.t.sol:UniversalValuerOffchainWithAdapterTest
+[PASS] test_GetActiveStrategiesIntegration() (gas: 388308)
+[PASS] test_GetTotalValueCallsAdapter() (gas: 24307)
+[PASS] test_GetTotalValueWithIdleAssets() (gas: 72665)
+[PASS] test_GetTotalValueWithNonAdapter() (gas: 879485)
+[PASS] test_RemoveStrategyUpdatesActiveList() (gas: 452565)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 2.99ms (1.30ms CPU time)
+
+Ran 2 tests for test/unit/ValuerAdapterCompilationTest.t.sol:ValuerAdapterCompilationTest
+[PASS] test_AdapterHasGetActiveStrategies() (gas: 3650)
+[PASS] test_CompilationVerifiesInterfaceFix() (gas: 3672)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 67.38µs (16.50µs CPU time)
+
+Ran 1 test for test/integration/MorphoVaultV1_1IntegrationDonationTest.sol:MorphoVaultV1_1IntegrationDonationTest
+[PASS] testSharesDonationResistanceIfNoAllocation(uint256,uint256,uint256) (runs: 2048, μ: 801732, ~: 803396)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 3.60s (3.59s CPU time)
+
+Ran 1 test for test/integration/MorphoMarketV1IntegrationInterestTest.sol:MorphoMarketV1IntegrationInterestTest
+[PASS] testAccrueInterest(uint256,uint256) (runs: 2048, μ: 1281936, ~: 1282551)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 3.76s (3.76s CPU time)
+
+Ran 5 tests for test/integration/MorphoVaultV1IntegrationDepositTest.sol:MorphoVaultV1IntegrationDepositTest
+[PASS] testDepositLiquidityAdapterCanFail(uint256) (runs: 2048, μ: 1377294, ~: 1321895)
+[PASS] testDepositLiquidityAdapterSuccess(uint256) (runs: 2048, μ: 655773, ~: 658065)
+[PASS] testDepositNoLiquidityAdapter(uint256) (runs: 2048, μ: 219042, ~: 219257)
+[PASS] testDepositRoundingLoss(uint256,uint256) (runs: 2048, μ: 663829, ~: 664006)
+[PASS] testWithdrawRoundingLoss(uint256,uint256) (runs: 2048, μ: 768178, ~: 768297)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 14.71s (14.32s CPU time)
+
+Ran 8 tests for test/AccrueInterestTest.sol:AccrueInterestTest
+[PASS] testAccrueInterest(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 829076, ~: 834042)
+[PASS] testAccrueInterestDonationNoSkip(uint256,uint256) (runs: 2048, μ: 399141, ~: 400870)
+[PASS] testAccrueInterestDonationSkip(uint256,uint256,uint256) (runs: 2048, μ: 410124, ~: 411811)
+[PASS] testAccrueInterestFees(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 816434, ~: 822331)
+[PASS] testAccrueInterestMaxRate(uint256,uint256,uint256) (runs: 2048, μ: 518017, ~: 519503)
+[PASS] testAccrueInterestView(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 805506, ~: 807792)
+[PASS] testFirstTotalAssets(uint256,uint256,uint256) (runs: 2048, μ: 393937, ~: 394669)
+[PASS] testTotalAssets(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 782786, ~: 785072)
+Suite result: ok. 8 passed; 0 failed; 0 skipped; finished in 15.47s (12.30s CPU time)
+
+Ran 6 tests for test/integration/MorphoVaultV1IntegrationAllocationTest.sol:MorphoVaultV1IntegrationAllocationTest
+[PASS] testAllocateLessThanIdle(uint256) (runs: 2048, μ: 466202, ~: 466789)
+[PASS] testAllocateMoreThanIdle(uint256) (runs: 2048, μ: 219907, ~: 220106)
+[PASS] testAllocateMoreThanMorphoVaultV1Cap(uint256) (runs: 2048, μ: 435761, ~: 502062)
+[PASS] testDeallocateLessThanAllocated(uint256) (runs: 2048, μ: 390037, ~: 390781)
+[PASS] testDeallocateMoreThanAllocated(uint256) (runs: 2048, μ: 355242, ~: 355437)
+[PASS] testDeallocateNoLiquidity(uint256) (runs: 2048, μ: 701359, ~: 701403)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 15.76s (12.65s CPU time)
+
+Ran 10 tests for test/ViewFunctionsTest.sol:ViewFunctionsTest
+[PASS] testConvertToAssets(uint256,uint256,uint256) (runs: 2048, μ: 324284, ~: 325716)
+[PASS] testConvertToShares(uint256,uint256,uint256) (runs: 2048, μ: 324327, ~: 325759)
+[PASS] testMaxDeposit() (gas: 9434)
+[PASS] testMaxMint() (gas: 9499)
+[PASS] testMaxRedeem() (gas: 9497)
+[PASS] testMaxWithdraw() (gas: 9387)
+[PASS] testPreviewDeposit((uint256,uint256,uint256,uint256,uint256,uint256),uint256) (runs: 2048, μ: 412682, ~: 417680)
+[PASS] testPreviewMint((uint256,uint256,uint256,uint256,uint256,uint256),uint256) (runs: 2048, μ: 413179, ~: 418178)
+[PASS] testPreviewRedeem((uint256,uint256,uint256,uint256,uint256,uint256),uint256) (runs: 2048, μ: 412727, ~: 417725)
+[PASS] testPreviewWithdraw((uint256,uint256,uint256,uint256,uint256,uint256),uint256) (runs: 2048, μ: 413292, ~: 418292)
+Suite result: ok. 10 passed; 0 failed; 0 skipped; finished in 6.37s (7.15s CPU time)
+
+Ran 14 tests for test/MorphoVaultV1AdapterTest.sol:MorphoVaultV1AdapterTest
+[PASS] testAllocate(uint256) (runs: 2048, μ: 323149, ~: 323488)
+[PASS] testAllocateNotAuthorizedReverts(uint256) (runs: 2048, μ: 17241, ~: 16778)
+[PASS] testDeallocate(uint256,uint256) (runs: 2048, μ: 374957, ~: 376524)
+[PASS] testDeallocateNotAuthorizedReverts(uint256) (runs: 2048, μ: 17265, ~: 16802)
+[PASS] testDifferentAssetReverts(address) (runs: 2048, μ: 3329380, ~: 1805456)
+[PASS] testDonationResistance(uint256,uint256) (runs: 2048, μ: 2351609, ~: 2352170)
+[PASS] testFactoryAndParentVaultAndAssetSet() (gas: 20301)
+[PASS] testFactoryCreateAdapter() (gas: 3832278)
+[PASS] testIds() (gas: 15783)
+[PASS] testInterest(uint256,uint256) (runs: 2048, μ: 331334, ~: 331418)
+[PASS] testInvalidData(bytes) (runs: 2048, μ: 20552, ~: 20535)
+[PASS] testLoss(uint256,uint256) (runs: 2048, μ: 344750, ~: 344834)
+[PASS] testSetSkimRecipient(address,address) (runs: 2048, μ: 53929, ~: 53931)
+[PASS] testSkim(uint256) (runs: 2048, μ: 1050277, ~: 1049814)
+Suite result: ok. 14 passed; 0 failed; 0 skipped; finished in 17.30s (14.90s CPU time)
+
+Ran 5 tests for test/integration/MorphoMarketV1IntegrationWithdrawTest.sol:MorphoMarketV1IntegrationWithdrawTest
+[PASS] testWithdrawLessThanIdle(uint256) (runs: 2048, μ: 283600, ~: 283295)
+[PASS] testWithdrawLiquidityAdapterNoLiquidity(uint256) (runs: 2048, μ: 664763, ~: 663200)
+[PASS] testWithdrawMoreThanIdleNoLiquidityAdapter(uint256) (runs: 2048, μ: 119213, ~: 118695)
+[PASS] testWithdrawThanksToLiquidityAdapter(uint256) (runs: 2048, μ: 525815, ~: 525969)
+[PASS] testWithdrawTooMuchEvenWithLiquidityAdapter(uint256) (runs: 2048, μ: 306883, ~: 306988)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 5.61s (6.90s CPU time)
+
+Ran 43 tests for test/SettersTest.sol:SettersTest
+[PASS] testAddAdapterNoRegistry(address) (runs: 2048, μ: 124485, ~: 124470)
+[PASS] testAddAdapterRegistry(bool) (runs: 2048, μ: 153561, ~: 179048)
+[PASS] testConstructor() (gas: 23657)
+[PASS] testDecreaseAbsoluteCap(address,bytes,uint256,uint256) (runs: 2048, μ: 100008, ~: 99476)
+[PASS] testDecreaseRelativeCapSequence(address,bytes,uint256,uint256) (runs: 2048, μ: 99449, ~: 98823)
+[PASS] testDecreaseTimelock(address,bytes4,uint256,uint256) (runs: 2048, μ: 205963, ~: 205731)
+[PASS] testIncreaseAbsoluteCap(address,bytes,uint256) (runs: 2048, μ: 140733, ~: 141480)
+[PASS] testIncreaseAbsoluteCapOverflow(bytes,uint256) (runs: 2048, μ: 60990, ~: 61188)
+[PASS] testIncreaseRelativeCap(address,bytes,uint256,uint256) (runs: 2048, μ: 210797, ~: 210285)
+[PASS] testIncreaseTimelock(address,bytes4,uint256) (runs: 2048, μ: 170345, ~: 171192)
+[PASS] testPendingCount(bytes4,bytes4,bytes) (runs: 2048, μ: 104093, ~: 103944)
+[PASS] testPendingCountEventsBySubmitting(uint256,bool) (runs: 2048, μ: 261721, ~: 266520)
+[PASS] testPendingCountWithExecution(bytes4) (runs: 2048, μ: 172179, ~: 172176)
+[PASS] testRemoveAdapter(address) (runs: 2048, μ: 166184, ~: 166168)
+[PASS] testRevoke(bytes,address) (runs: 2048, μ: 81043, ~: 80555)
+[PASS] testSetCurator(address) (runs: 2048, μ: 28318, ~: 28318)
+[PASS] testSetForceDeallocatePenalty(address,uint256) (runs: 2048, μ: 239579, ~: 239214)
+[PASS] testSetIsAllocator(address) (runs: 2048, μ: 135922, ~: 135907)
+[PASS] testSetIsSentinel(address,bool) (runs: 2048, μ: 35388, ~: 35388)
+[PASS] testSetManagementFee(address,uint256) (runs: 2048, μ: 252983, ~: 253441)
+[PASS] testSetManagementFeeLastUpdateRefresh(uint256,uint48) (runs: 2048, μ: 157099, ~: 157629)
+[PASS] testSetManagementFeeRecipient(address,address) (runs: 2048, μ: 202098, ~: 202067)
+[PASS] testSetManagementFeeRecipientLastUpdateRefresh(address,uint48) (runs: 2048, μ: 92165, ~: 92228)
+[PASS] testSetMaxRate(uint256) (runs: 2048, μ: 44397, ~: 44916)
+[PASS] testSetMaxRateCantSetDirectly(address) (runs: 2048, μ: 12650, ~: 12650)
+[PASS] testSetMaxRateTooHigh(uint256) (runs: 2048, μ: 16847, ~: 16156)
+[PASS] testSetName(address,string) (runs: 2048, μ: 75169, ~: 52686)
+[PASS] testSetOwner(address) (runs: 2048, μ: 26213, ~: 26213)
+[PASS] testSetPerformanceFee(address,uint256) (runs: 2048, μ: 252114, ~: 251604)
+[PASS] testSetPerformanceFeeLastUpdateRefresh(uint256,uint48) (runs: 2048, μ: 158160, ~: 157745)
+[PASS] testSetPerformanceFeeRecipient(address,address) (runs: 2048, μ: 201638, ~: 201607)
+[PASS] testSetPerformanceFeeRecipientLastUpdateRefresh(address,uint48) (runs: 2048, μ: 93629, ~: 93738)
+[PASS] testSetReceiveAssetsGate(address) (runs: 2048, μ: 82879, ~: 82864)
+[PASS] testSetReceiveSharesGate(address) (runs: 2048, μ: 82965, ~: 82950)
+[PASS] testSetRegistry(bool) (runs: 2048, μ: 172610, ~: 182126)
+[PASS] testSetRegistryTimelocked(address) (runs: 2048, μ: 14948, ~: 14948)
+[PASS] testSetSendAssetsGate(address) (runs: 2048, μ: 83013, ~: 82998)
+[PASS] testSetSendSharesGate(address) (runs: 2048, μ: 79139, ~: 79124)
+[PASS] testSetSymbol(address,string) (runs: 2048, μ: 75030, ~: 52547)
+[PASS] testSubmitDecreaseTimelock(bytes4,uint256,uint256,address) (runs: 2048, μ: 132573, ~: 132312)
+[PASS] testSubmitNotDecreaseTimelock(bytes,address) (runs: 2048, μ: 84763, ~: 84378)
+[PASS] testTimelocked(uint256) (runs: 2048, μ: 155839, ~: 156305)
+[PASS] testsetLiquidityAdapterAndData(address,address,bytes) (runs: 2048, μ: 201627, ~: 191215)
+Suite result: ok. 43 passed; 0 failed; 0 skipped; finished in 9.49s (18.67s CPU time)
+
+Ran 6 tests for test/integration/MorphoVaultV1_1IntegrationAllocationTest.sol:MorphoVaultV1_1IntegrationAllocationTest
+[PASS] testAllocateLessThanIdle(uint256) (runs: 2048, μ: 471023, ~: 471632)
+[PASS] testAllocateMoreThanIdle(uint256) (runs: 2048, μ: 222036, ~: 222236)
+[PASS] testAllocateMoreThanMorphoVaultV1Cap(uint256) (runs: 2048, μ: 439186, ~: 506958)
+[PASS] testDeallocateLessThanAllocated(uint256) (runs: 2048, μ: 394882, ~: 395650)
+[PASS] testDeallocateMoreThanAllocated(uint256) (runs: 2048, μ: 359570, ~: 359766)
+[PASS] testDeallocateNoLiquidity(uint256) (runs: 2048, μ: 705684, ~: 705729)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 8.75s (11.44s CPU time)
+
+Ran 5 tests for test/integration/MorphoVaultV1_1IntegrationWithdrawTest.sol:MorphoVaultV1_1IntegrationWithdrawTest
+[PASS] testWithdrawLessThanIdle(uint256) (runs: 2048, μ: 339940, ~: 339629)
+[PASS] testWithdrawLiquidityAdapterNoLiquidity(uint256) (runs: 2048, μ: 788144, ~: 788188)
+[PASS] testWithdrawMoreThanIdleNoLiquidityAdapter(uint256) (runs: 2048, μ: 225135, ~: 224735)
+[PASS] testWithdrawThanksToLiquidityAdapter(uint256) (runs: 2048, μ: 545019, ~: 545421)
+[PASS] testWithdrawTooMuchEvenWithLiquidityAdapter(uint256) (runs: 2048, μ: 472269, ~: 472461)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 4.33s (9.39s CPU time)
+
+Ran 1 test for test/integration/MorphoVaultV1_1IntegrationInterestTest.sol:MorphoVaultV1_1IntegrationInterestTest
+[PASS] testAccrueInterest(uint256,uint256) (runs: 2048, μ: 2982626, ~: 2985048)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 6.26s (6.26s CPU time)
+
+Ran 5 tests for test/MainFunctionsTest.sol:MainFunctionsTest
+[PASS] testDeposit(uint256,address) (runs: 2048, μ: 279092, ~: 279106)
+[PASS] testMint(uint256,address) (runs: 2048, μ: 280123, ~: 280004)
+[PASS] testPostConstruction(address,address) (runs: 2048, μ: 7355772, ~: 7355831)
+[PASS] testRedeem(uint256,uint256,address,address,bool) (runs: 2048, μ: 176085, ~: 176673)
+[PASS] testWithdraw(uint256,uint256,address,address,bool) (runs: 2048, μ: 176008, ~: 176516)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 19.94s (5.89s CPU time)
+
+Ran 24 tests for test/ERC20Test.sol:ERC20Test
+[PASS] testApprove(address,uint256) (runs: 2048, μ: 39707, ~: 40038)
+[PASS] testCreateShares(uint256) (runs: 2048, μ: 135082, ~: 136007)
+[PASS] testCreateSharesZeroAddress(uint256) (runs: 2048, μ: 77345, ~: 77629)
+[PASS] testCreateTooManyAssetsReverts() (gas: 152243)
+[PASS] testCreateTooManySharesReverts() (gas: 155947)
+[PASS] testDeleteShares(uint256,uint256) (runs: 2048, μ: 171190, ~: 173516)
+[PASS] testDeleteSharesInsufficientBalanceReverts(address,uint256,uint256) (runs: 2048, μ: 151492, ~: 150536)
+[PASS] testDeleteSharesZeroAddress() (gas: 47363)
+[PASS] testInfiniteApproveTransferFrom(address,address,uint256,uint256) (runs: 2048, μ: 202417, ~: 204184)
+[PASS] testPermitBadDeadlineReverts((uint256,uint256,uint256),address,uint256,uint256) (runs: 2048, μ: 230979, ~: 230748)
+[PASS] testPermitBadNonceReverts((uint256,uint256,uint256),address,uint256,uint256) (runs: 2048, μ: 229894, ~: 229657)
+[PASS] testPermitBadOwnerReverts((uint256,uint256,uint256),address,uint256,address) (runs: 2048, μ: 229961, ~: 229688)
+[PASS] testPermitBadSpenderReverts((uint256,uint256,uint256),address,uint256,address) (runs: 2048, μ: 229941, ~: 229669)
+[PASS] testPermitOK((uint256,uint256,uint256),address,uint256) (runs: 2048, μ: 258816, ~: 258788)
+[PASS] testPermitPastDeadlineReverts((uint256,uint256,uint256),address,uint256) (runs: 2048, μ: 226102, ~: 226063)
+[PASS] testPermitReplayReverts((uint256,uint256,uint256),address,uint256) (runs: 2048, μ: 259273, ~: 259232)
+[PASS] testTransfer(address,uint256,uint256) (runs: 2048, μ: 171458, ~: 174678)
+[PASS] testTransferFrom(address,address,uint256,uint256,uint256) (runs: 2048, μ: 206832, ~: 210162)
+[PASS] testTransferFromInsufficientAllowanceReverts(address,address,uint256) (runs: 2048, μ: 167406, ~: 167139)
+[PASS] testTransferFromInsufficientBalanceReverts(address,address,uint256) (runs: 2048, μ: 148342, ~: 149321)
+[PASS] testTransferFromReceiverZeroAddress(address,uint256) (runs: 2048, μ: 161818, ~: 161939)
+[PASS] testTransferFromSenderZeroAddress(address) (runs: 2048, μ: 12008, ~: 12008)
+[PASS] testTransferInsufficientBalanceReverts(address,uint256) (runs: 2048, μ: 138283, ~: 138404)
+[PASS] testTransferZeroAddress(uint256) (runs: 2048, μ: 133851, ~: 134078)
+Suite result: ok. 24 passed; 0 failed; 0 skipped; finished in 19.94s (20.02s CPU time)
+
+Ran 16 tests for test/MorphoMarketV1AdapterTest.sol:MorphoMarketV1AdapterTest
+[PASS] testAllocate(uint256) (runs: 2048, μ: 564883, ~: 564248)
+[PASS] testAllocateDifferentAssetReverts(address,uint256) (runs: 2048, μ: 37874, ~: 37215)
+[PASS] testAllocateNotAuthorizedReverts(uint256) (runs: 2048, μ: 31252, ~: 30617)
+[PASS] testDeallocate(uint256,uint256) (runs: 2048, μ: 635892, ~: 636362)
+[PASS] testDeallocateAll(uint256) (runs: 2048, μ: 558992, ~: 558506)
+[PASS] testDeallocateDifferentAssetReverts(address,uint256) (runs: 2048, μ: 37960, ~: 37301)
+[PASS] testDeallocateNotAuthorizedReverts(uint256) (runs: 2048, μ: 31276, ~: 30641)
+[PASS] testDonationResistance(uint256,uint256) (runs: 2048, μ: 937141, ~: 940048)
+[PASS] testFactoryAndParentVaultAndMorphoSet() (gas: 20315)
+[PASS] testFactoryCreateMorphoMarketV1Adapter() (gas: 3412419)
+[PASS] testIds() (gas: 37608)
+[PASS] testInterest(uint256,uint256) (runs: 2048, μ: 539985, ~: 539868)
+[PASS] testLoss(uint256,uint256) (runs: 2048, μ: 538974, ~: 538857)
+[PASS] testOverwriteMarketTotalSupplyAssets(uint256) (runs: 2048, μ: 42316, ~: 41681)
+[PASS] testSetSkimRecipient(address,address) (runs: 2048, μ: 53933, ~: 53933)
+[PASS] testSkim(uint256) (runs: 2048, μ: 1045754, ~: 1045119)
+Suite result: ok. 16 passed; 0 failed; 0 skipped; finished in 19.82s (19.95s CPU time)
+
+Ran 3 tests for test/integration/MorphoVaultV1IntegrationIkrTest.sol:MorphoVaultV1IntegrationIkrTest
+[PASS] testCantWithdraw(uint256) (runs: 2048, μ: 982992, ~: 982468)
+[PASS] testRedeemSharesOfMarketV1(uint256) (runs: 2048, μ: 1384040, ~: 1383167)
+[PASS] testRedeemSharesOfMorphoVaultV1(uint256) (runs: 2048, μ: 1475179, ~: 1455048)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 12.02s (17.06s CPU time)
+
+Ran 10 tests for test/AllocateTest.sol:AllocateTest
+[PASS] testAllocate(bytes,uint256,uint256,address,uint256) (runs: 2048, μ: 1388123, ~: 1351685)
+[PASS] testAllocateRelativeCapCheckRoundsDown(bytes) (runs: 2048, μ: 527968, ~: 519782)
+[PASS] testAllocateTooMuchNegativeChange(uint256,uint256) (runs: 2048, μ: 495716, ~: 495671)
+[PASS] testAllocateWithInterest(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 566964, ~: 572088)
+[PASS] testAllocateZeroAbsoluteCap() (gas: 103076)
+[PASS] testDeallocate(bytes,uint256,uint256,address,uint256) (runs: 2048, μ: 855335, ~: 840556)
+[PASS] testDeallocateTooMuchNegativeChange(uint256,uint256) (runs: 2048, μ: 559871, ~: 559826)
+[PASS] testDeallocateWithInterest(uint256,uint256,uint256,uint256,uint256) (runs: 2048, μ: 578497, ~: 578400)
+[PASS] testDeallocateZeroAllocation() (gas: 68552)
+[PASS] testRelativeCapManipulationProtection(uint256) (runs: 2048, μ: 1679719, ~: 1678962)
+Suite result: ok. 10 passed; 0 failed; 0 skipped; finished in 20.61s (20.45s CPU time)
+
+Ran 5 tests for test/integration/MorphoVaultV1IntegrationWithdrawTest.sol:MorphoVaultV1IntegrationWithdrawTest
+[PASS] testWithdrawLessThanIdle(uint256) (runs: 2048, μ: 337680, ~: 337369)
+[PASS] testWithdrawLiquidityAdapterNoLiquidity(uint256) (runs: 2048, μ: 783689, ~: 783732)
+[PASS] testWithdrawMoreThanIdleNoLiquidityAdapter(uint256) (runs: 2048, μ: 222990, ~: 222605)
+[PASS] testWithdrawThanksToLiquidityAdapter(uint256) (runs: 2048, μ: 540020, ~: 540422)
+[PASS] testWithdrawTooMuchEvenWithLiquidityAdapter(uint256) (runs: 2048, μ: 467809, ~: 468002)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 16.52s (12.22s CPU time)
+
+Ran 3 tests for test/integration/MorphoVaultV1_1IntegrationIkrTest.sol:MorphoVaultV1_1IntegrationIkrTest
+[PASS] testCantWithdraw(uint256) (runs: 2048, μ: 986633, ~: 986109)
+[PASS] testRedeemSharesOfMorphoMarketV1(uint256) (runs: 2048, μ: 1389640, ~: 1388759)
+[PASS] testRedeemSharesOfMorphoVaultV1_1(uint256) (runs: 2048, μ: 1484087, ~: 1463605)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 9.06s (16.27s CPU time)
+
+Ran 47 test suites in 20.61s (289.56s CPU time): 328 tests passed, 5 failed, 0 skipped (333 total tests)
+
+Failing tests:
+Encountered 5 failing tests in test/unit/UniversalValuerOffchainComprehensive.t.sol:UniversalValuerOffchainComprehensive
+[FAIL: assertion failed] testCancelSignerRemoval() (gas: 62654)
+[FAIL: assertion failed: 1600000000000000000000 != 1500000000000000000000] testGetTotalValue() (gas: 894036)
+[FAIL: StrategyNotActive()] testGetTotalValueLowConfidence() (gas: 683091)
+[FAIL: StrategyNotActive()] testGetTotalValueStaleReports() (gas: 683935)
+[FAIL: log != expected log] testInitiateSignerChange() (gas: 60832)
+
+Encountered a total of 5 failing tests, 328 tests succeeded

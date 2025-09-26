@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import "forge-std/Test.sol";
-import "../../src/adapters/UniversalEscrowAdapter.sol";
-import "../../src/adapters/StrategyEscrow.sol";
+// import "../../src/adapters/UniversalEscrowAdapter.sol";  // DEPRECATED - Contract removed in refactor
+// import "../../src/adapters/StrategyEscrow.sol";  // DEPRECATED - Contract removed in refactor
 import "../../src/valuers/UniversalValuerOffchain.sol";
 import "../../src/interfaces/IERC20.sol";
 import "../../src/interfaces/IVaultV2.sol";

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
+// DEPRECATED: This script uses the old UniversalEscrowAdapter architecture
+// TODO: Update to use new UniversalAdapterEscrow architecture
+
 import "forge-std/Script.sol";
 import "../src/VaultV2.sol";
-import "../src/adapters/UniversalEscrowAdapter.sol";
-import "../src/adapters/StrategyEscrow.sol";  // Using updated StrategyEscrow
+// import "../src/adapters/UniversalEscrowAdapter.sol";  // DEPRECATED
+// import "../src/adapters/StrategyEscrow.sol";  // DEPRECATED
 import {IERC20} from "../src/interfaces/IERC20.sol";
-import {IStrategyEscrow} from "../src/adapters/interfaces/IStrategyEscrow.sol";
+// import {IStrategyEscrow} from "../src/adapters/interfaces/IStrategyEscrow.sol";  // DEPRECATED
 
 contract DeployWithoutFactory is Script {
     address constant KHYPE = 0xfD739d4e423301CE9385c1fb8850539D657C296D;

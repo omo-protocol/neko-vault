@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+// DEPRECATED: This script uses the old StrategyEscrow architecture
+// TODO: Update to use new UniversalAdapterEscrow architecture
+
+import "forge-std/Script.sol";
+// import "../src/adapters/StrategyEscrow.sol";  // DEPRECATED
+
+contract WhitelistPendleSwap is Script {
+    // StrategyEscrow constant escrow = StrategyEscrow(payable(0x915B980c241863979C0D69D79B2eaB0A0fC3aB13));  // DEPRECATED
+    address constant PENDLE_ROUTER = 0x888888888889758F76e7103c6CbF23ABbF58F946;
+
+    function run() public {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        console.log("\n=================================================");
+        console.log("    WHITELIST PENDLE SWAP FUNCTIONS");
+        console.log("=================================================");
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Whitelist key Pendle functions
+        bytes4 swapExactTokenForPt = bytes4(keccak256("swapExactTokenForPt(address,address,uint256,(uint256,uint256,uint256,uint256,uint256),(address,uint256,address,address,address,(uint8,address,bytes,bool)),(address,uint256,(address,bytes,uint256)[],((uint256,uint256,uint256,uint8,address,address,address,address,uint256,uint256,uint256,bytes),bytes,uint256)[],bytes))"));
+        bytes4 redeemPyToSy = bytes4(keccak256("redeemPyToSy(address,uint256,uint256)"));
+
+        console.log("\n1. Whitelisting swapExactTokenForPt...");
+        escrow.updateWhitelist(PENDLE_ROUTER, swapExactTokenForPt, true, 100 ether);
+        console.log("   [OK] Function whitelisted");
+
+        console.log("\n2. Whitelisting redeemPyToSy...");
+        escrow.updateWhitelist(PENDLE_ROUTER, redeemPyToSy, true, 100 ether);
+        console.log("   [OK] Function whitelisted");
+
+        // Also whitelist general router access if needed
+        console.log("\n3. Whitelisting general router access...");
+        escrow.updateWhitelist(PENDLE_ROUTER, bytes4(0), true, 100 ether);
+        console.log("   [OK] General access whitelisted");
+
+        vm.stopBroadcast();
+
+        console.log("\n=================================================");
+        console.log("    WHITELISTING COMPLETE!");
+        console.log("=================================================");
+    }
+}

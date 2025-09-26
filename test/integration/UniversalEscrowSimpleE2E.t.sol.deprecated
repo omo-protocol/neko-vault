@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import "forge-std/Test.sol";
-import "../../src/adapters/UniversalEscrowAdapter.sol";
-import "../../src/adapters/StrategyEscrow.sol";
+// import "../../src/adapters/UniversalEscrowAdapter.sol";  // DEPRECATED - Contract removed in refactor
+// import "../../src/adapters/StrategyEscrow.sol";  // DEPRECATED - Contract removed in refactor
 import "../../src/valuers/UniversalValuerOffchain.sol";
 import "../../src/VaultV2.sol";
 import "../../src/VaultV2Factory.sol";
@@ -11,8 +11,8 @@ import "../../src/interfaces/IERC20.sol";
 import "../../src/libraries/SafeERC20Lib.sol";
 
 /// @title UniversalEscrowSimpleE2ETest
-/// @notice Simplified end-to-end test for UniversalEscrowAdapter + StrategyEscrow + UniversalValuerOffchain
-/// @dev Tests the core functionality of these contracts working together
+/// @notice DEPRECATED: Tests for old UniversalEscrowAdapter + StrategyEscrow architecture
+/// @dev These tests are for the deprecated architecture. See UniversalAdapterEscrowE2E.t.sol for new architecture tests
 contract UniversalEscrowSimpleE2ETest is Test {
     using SafeERC20Lib for IERC20;
 
@@ -39,6 +39,11 @@ contract UniversalEscrowSimpleE2ETest is Test {
     event StrategyAllocated(bytes32 indexed strategyId, uint256 amount);
     event StrategyDeallocated(bytes32 indexed strategyId, uint256 amount);
     event ValueUpdated(bytes32 indexed strategyId, uint256 value, uint256 confidence, uint256 timestamp, bool isPush);
+
+    modifier skipDeprecated() {
+        vm.skip(true);
+        _;
+    }
 
     function setUp() public {
         // Deploy mock asset
@@ -160,7 +165,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test basic end-to-end flow
-    function testBasicE2EFlow() public {
+    function testBasicE2EFlow() public skipDeprecated {
         // Step 1: Deposit to vault
         uint256 depositAmount = 1000e18;
 
@@ -235,7 +240,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test batch valuation update
-    function testBatchValuation() public {
+    function testBatchValuation() public skipDeprecated {
         // Setup: Deposit and allocate
         vm.prank(depositor);
         vault.deposit(1000e18, depositor);
@@ -271,7 +276,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test strategy pause functionality
-    function testStrategyPause() public {
+    function testStrategyPause() public skipDeprecated {
         // Setup: Deposit and initial allocation
         vm.prank(depositor);
         vault.deposit(1000e18, depositor);
@@ -307,7 +312,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test escrow pause functionality
-    function testEscrowPause() public {
+    function testEscrowPause() public skipDeprecated {
         // Setup
         vm.prank(depositor);
         vault.deposit(1000e18, depositor);
@@ -340,7 +345,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test force recovery
-    function testForceRecovery() public {
+    function testForceRecovery() public skipDeprecated {
         // Setup: Deposit and allocate
         vm.prank(depositor);
         vault.deposit(1000e18, depositor);
@@ -375,7 +380,7 @@ contract UniversalEscrowSimpleE2ETest is Test {
     }
 
     /// @notice Test valuation with fallback
-    function testValuationFallback() public {
+    function testValuationFallback() public skipDeprecated {
         // Setup: Allocate and set initial valuation
         vm.prank(depositor);
         vault.deposit(1000e18, depositor);

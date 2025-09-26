@@ -1,0 +1,542 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.28;
+
+import "forge-std/Script.sol";
+import "../src/VaultV2.sol";
+import "../src/VaultV2Factory.sol";
+import "../src/adapters/UniversalAdapterEscrow.sol";
+import "../src/adapters/UniversalAdapterEscrowFactory.sol";
+import "../src/valuers/UniversalValuerOffchain.sol";
+import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {IERC20} from "../src/interfaces/IERC20.sol";
+import {IAdapter} from "../src/interfaces/IAdapter.sol";
+
+/**
+ * @title PTKHYPELoopStrategyE2E
+ * @notice End-to-end test script for PT-KHYPE loop strategy using UniversalAdapterEscrow
+ * @dev Tests the complete flow: deploy -> configure -> deposit -> allocate -> execute -> deallocate -> withdraw
+ */
+contract PTKHYPELoopStrategyE2E is Script {
+    // ============ Constants ============
+
+    // HyperEVM mainnet addresses
+    address constant KHYPE = 0xfD739d4e423301CE9385c1fb8850539D657C296D;
+    address constant WHYPE = 0x0000000000000000000000000000000000000001; // Wrapped HYPE
+    address constant PENDLE_ROUTER = 0x888888888889758F76e7103c6CbF23ABbF58F946;
+    address constant PENDLE_ROUTER_STATIC = 0x6813d43782395A1F2AAb42f39aeEDE03ac655e09;
+
+    // Pendle market addresses for KHYPE
+    address constant PT_KHYPE = 0x311dB0FDe558689550c68355783c95eFDfe25329;
+    address constant SY_KHYPE = 0xB14Ef175C97b12e56983FAf377Cc797c8Ba63e5d;
+    address constant YT_KHYPE = 0x8867d2b7aDb8609c51810237EcC9A25A2F601B97;
+    address constant KHYPE_MARKET = 0x06a2D0E7e2A99A59cF96ae84F3dBFf5A0ee22f5e;
+
+    // Strategy configuration
+    bytes32 constant PT_KHYPE_LOOP_ID = keccak256("pt-khype-loop");
+    uint256 constant INITIAL_DEPOSIT = 1000e18; // 1000 KHYPE
+    uint256 constant ALLOCATION_AMOUNT = 500e18; // 500 KHYPE to strategy
+    uint256 constant DAILY_LIMIT = 10000e18; // 10000 KHYPE daily limit
+    uint256 constant SLIPPAGE_BPS = 100; // 1% slippage
+
+    // ============ State Variables ============
+
+    VaultV2Factory vaultFactory;
+    UniversalAdapterEscrowFactory adapterFactory;
+    VaultV2 vault;
+    UniversalAdapterEscrow adapter;
+    UniversalValuerOffchain valuer;
+
+    address deployer;
+    address user;
+    address strategyAgent;
+
+    // ============ Pendle Interfaces ============
+
+    interface IPendleRouter {
+        struct TokenInput {
+            address tokenIn;
+            uint256 netTokenIn;
+            address tokenMintSy;
+            address pendleSwap;
+            SwapData swapData;
+        }
+
+        struct SwapData {
+            SwapType swapType;
+            address extRouter;
+            bytes extCalldata;
+            bool needScale;
+        }
+
+        enum SwapType {
+            NONE,
+            KYBERSWAP,
+            ONE_INCH,
+            ETH_WETH
+        }
+
+        struct ApproxParams {
+            uint256 guessMin;
+            uint256 guessMax;
+            uint256 guessOffchain;
+            uint256 maxIteration;
+            uint256 eps;
+        }
+
+        function swapExactTokenForPt(
+            address receiver,
+            address market,
+            uint256 minPtOut,
+            ApproxParams memory guessPtOut,
+            TokenInput memory input,
+            LimitOrderData memory limit
+        ) external returns (uint256 netPtOut, uint256 netSyFee, uint256 netSyInterm);
+
+        struct LimitOrderData {
+            address limitRouter;
+            uint256 epsSkipMarket;
+            FillOrderParams[] normalFills;
+            FillOrderParams[] flashFills;
+            bytes optData;
+        }
+
+        struct FillOrderParams {
+            Order order;
+            bytes signature;
+            uint256 makingAmount;
+        }
+
+        struct Order {
+            uint256 salt;
+            uint256 expiry;
+            uint256 nonce;
+            OrderType orderType;
+            address token;
+            address YT;
+            address maker;
+            address receiver;
+            uint256 makingAmount;
+            uint256 lnImpliedRate;
+            uint256 failSafeRate;
+            bytes permit;
+        }
+
+        enum OrderType {
+            SY_FOR_PT,
+            PT_FOR_SY,
+            SY_FOR_YT,
+            YT_FOR_SY
+        }
+    }
+
+    interface IPendleMarket {
+        function readState(address router) external view returns (MarketState memory);
+
+        struct MarketState {
+            int256 totalPt;
+            int256 totalSy;
+            int256 totalLp;
+            int256 treasury;
+            int256 scalarRoot;
+            uint256 expiry;
+            uint256 lnFeeRateRoot;
+            uint256 reserveFeePercent;
+            uint256 lastLnImpliedRate;
+        }
+    }
+
+    // ============ Main Execution ============
+
+    function run() public {
+        // Setup
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        deployer = vm.addr(deployerPrivateKey);
+        user = address(0x1234); // Test user
+        strategyAgent = address(0x5678); // Strategy agent
+
+        console.log("\n========================================");
+        console.log("PT-KHYPE LOOP STRATEGY E2E TEST");
+        console.log("========================================");
+        console.log("Deployer:", deployer);
+        console.log("User:", user);
+        console.log("Strategy Agent:", strategyAgent);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Step 1: Deploy infrastructure
+        deployInfrastructure();
+
+        // Step 2: Configure strategy
+        configureStrategy();
+
+        // Step 3: User deposits to vault
+        userDeposit();
+
+        // Step 4: Allocate to strategy
+        allocateToStrategy();
+
+        // Step 5: Execute PT-KHYPE swap
+        executePendleSwap();
+
+        // Step 6: Verify position
+        verifyPosition();
+
+        // Step 7: Deallocate from strategy
+        deallocateFromStrategy();
+
+        // Step 8: User withdraws
+        userWithdraw();
+
+        vm.stopBroadcast();
+
+        console.log("\n========================================");
+        console.log("E2E TEST COMPLETED SUCCESSFULLY");
+        console.log("========================================");
+    }
+
+    // ============ Step 1: Deploy Infrastructure ============
+
+    function deployInfrastructure() internal {
+        console.log("\n--- Step 1: Deploying Infrastructure ---");
+
+        // Deploy factories
+        vaultFactory = new VaultV2Factory();
+        console.log("VaultV2Factory deployed at:", address(vaultFactory));
+
+        adapterFactory = new UniversalAdapterEscrowFactory();
+        console.log("UniversalAdapterEscrowFactory deployed at:", address(adapterFactory));
+
+        // Deploy valuer
+        valuer = new UniversalValuerOffchain(deployer, KHYPE);
+        console.log("UniversalValuerOffchain deployed at:", address(valuer));
+
+        // Configure valuer signers
+        valuer.initiateSignerChange(deployer, true, 100);
+        valuer.setRequiredWeight(100);
+
+        // Deploy vault
+        bytes32 salt = keccak256(abi.encodePacked("PT-KHYPE-VAULT", block.timestamp));
+        address vaultAddress = vaultFactory.deployVaultV2(
+            KHYPE,           // asset
+            deployer,        // owner
+            salt,            // salt
+            VaultV2.Config({
+                asset: KHYPE,
+                decimals: 18,
+                owner: deployer,
+                maxRateForCurator: 0,
+                liquidityAdapter: address(0),
+                minRelativeLiquidityForCurator: 0,
+                managementFeeRecipient: deployer,
+                managementFeeRate: 0,
+                performanceFeeRecipient: deployer,
+                performanceFeeRate: 0,
+                gate: address(0),
+                maxRateForUser: type(uint256).max,
+                minRelativeLiquidityForUser: 0
+            })
+        );
+        vault = VaultV2(vaultAddress);
+        console.log("VaultV2 deployed at:", address(vault));
+
+        // Deploy adapter
+        address adapterAddress = adapterFactory.deployAdapter(
+            address(vault),
+            address(valuer),
+            false,  // useOffchainValuer
+            salt
+        );
+        adapter = UniversalAdapterEscrow(payable(adapterAddress));
+        console.log("UniversalAdapterEscrow deployed at:", address(adapter));
+
+        // Add adapter to vault
+        vault.addAdapter(address(adapter));
+        console.log("Adapter added to vault");
+
+        // Set allocator
+        vault.setIsAllocator(deployer, true);
+        console.log("Deployer set as allocator");
+    }
+
+    // ============ Step 2: Configure Strategy ============
+
+    function configureStrategy() internal {
+        console.log("\n--- Step 2: Configuring PT-KHYPE Strategy ---");
+
+        // Whitelist Pendle Router functions
+        adapter.updateWhitelist(
+            PENDLE_ROUTER,
+            IPendleRouter.swapExactTokenForPt.selector,
+            true,
+            type(uint256).max
+        );
+        console.log("Whitelisted swapExactTokenForPt");
+
+        // Whitelist KHYPE approve for Pendle
+        adapter.updateWhitelist(
+            KHYPE,
+            IERC20.approve.selector,
+            true,
+            type(uint256).max
+        );
+        console.log("Whitelisted KHYPE approve");
+
+        // Whitelist PT token transfer (for deallocation)
+        adapter.updateWhitelist(
+            PT_KHYPE,
+            IERC20.transfer.selector,
+            true,
+            type(uint256).max
+        );
+        console.log("Whitelisted PT-KHYPE transfer");
+
+        // Create pre-configured strategy calls for PT swap
+        IUniversalAdapterEscrow.Call[] memory strategyCalls = new IUniversalAdapterEscrow.Call[](2);
+
+        // Approve KHYPE to Pendle Router
+        strategyCalls[0] = IUniversalAdapterEscrow.Call({
+            target: KHYPE,
+            value: 0,
+            data: abi.encodeWithSelector(IERC20.approve.selector, PENDLE_ROUTER, type(uint256).max)
+        });
+
+        // Swap KHYPE for PT-KHYPE (will be configured dynamically in real execution)
+        strategyCalls[1] = IUniversalAdapterEscrow.Call({
+            target: PENDLE_ROUTER,
+            value: 0,
+            data: "" // Placeholder - will be set during execution
+        });
+
+        // Set strategy configuration
+        adapter.setStrategy(
+            PT_KHYPE_LOOP_ID,
+            strategyAgent,
+            abi.encode(strategyCalls),
+            DAILY_LIMIT
+        );
+        console.log("PT-KHYPE strategy configured");
+        console.log("  Strategy ID:", vm.toString(PT_KHYPE_LOOP_ID));
+        console.log("  Agent:", strategyAgent);
+        console.log("  Daily Limit:", DAILY_LIMIT / 1e18, "KHYPE");
+    }
+
+    // ============ Step 3: User Deposit ============
+
+    function userDeposit() internal {
+        console.log("\n--- Step 3: User Depositing to Vault ---");
+
+        // Mint KHYPE to user (simulating user having tokens)
+        deal(KHYPE, user, INITIAL_DEPOSIT);
+        console.log("Minted", INITIAL_DEPOSIT / 1e18, "KHYPE to user");
+
+        // User approves and deposits
+        vm.startPrank(user);
+        IERC20(KHYPE).approve(address(vault), INITIAL_DEPOSIT);
+        uint256 shares = vault.deposit(INITIAL_DEPOSIT, user);
+        vm.stopPrank();
+
+        console.log("User deposited:", INITIAL_DEPOSIT / 1e18, "KHYPE");
+        console.log("User received:", shares / 1e18, "shares");
+        console.log("Vault total assets:", vault.totalAssets() / 1e18, "KHYPE");
+    }
+
+    // ============ Step 4: Allocate to Strategy ============
+
+    function allocateToStrategy() internal {
+        console.log("\n--- Step 4: Allocating to PT-KHYPE Strategy ---");
+
+        // Prepare allocation data
+        IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
+        bytes memory allocData = abi.encode(
+            PT_KHYPE_LOOP_ID,    // strategyId
+            ALLOCATION_AMOUNT,    // amount
+            false,                // executeNow (will execute separately)
+            emptyCalls           // no immediate execution
+        );
+
+        // Allocate funds to strategy
+        vault.allocate(address(adapter), allocData, ALLOCATION_AMOUNT);
+
+        console.log("Allocated", ALLOCATION_AMOUNT / 1e18, "KHYPE to strategy");
+        console.log("Adapter KHYPE balance:", IERC20(KHYPE).balanceOf(address(adapter)) / 1e18);
+
+        // Verify allocation
+        uint256 allocation = adapter.getAllocation(PT_KHYPE_LOOP_ID);
+        console.log("Strategy allocation recorded:", allocation / 1e18, "KHYPE");
+    }
+
+    // ============ Step 5: Execute Pendle Swap ============
+
+    function executePendleSwap() internal {
+        console.log("\n--- Step 5: Executing PT-KHYPE Swap ---");
+
+        // Get current market state
+        IPendleMarket market = IPendleMarket(KHYPE_MARKET);
+        IPendleMarket.MarketState memory state = market.readState(PENDLE_ROUTER_STATIC);
+        console.log("Market state - Total PT:", uint256(int256(state.totalPt)) / 1e18);
+        console.log("Market state - Total SY:", uint256(int256(state.totalSy)) / 1e18);
+
+        // Calculate expected PT output (with slippage)
+        uint256 minPtOut = (ALLOCATION_AMOUNT * (10000 - SLIPPAGE_BPS)) / 10000;
+
+        // Prepare swap parameters
+        IPendleRouter.TokenInput memory tokenInput = IPendleRouter.TokenInput({
+            tokenIn: KHYPE,
+            netTokenIn: ALLOCATION_AMOUNT,
+            tokenMintSy: address(0),
+            pendleSwap: address(0),
+            swapData: IPendleRouter.SwapData({
+                swapType: IPendleRouter.SwapType.NONE,
+                extRouter: address(0),
+                extCalldata: "",
+                needScale: false
+            })
+        });
+
+        IPendleRouter.ApproxParams memory approxParams = IPendleRouter.ApproxParams({
+            guessMin: minPtOut,
+            guessMax: ALLOCATION_AMOUNT * 2,
+            guessOffchain: minPtOut,
+            maxIteration: 256,
+            eps: 1e14 // 0.01%
+        });
+
+        IPendleRouter.LimitOrderData memory limitData;
+
+        // Build the swap call
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](2);
+
+        // Approve KHYPE to Pendle Router
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: KHYPE,
+            value: 0,
+            data: abi.encodeWithSelector(IERC20.approve.selector, PENDLE_ROUTER, ALLOCATION_AMOUNT)
+        });
+
+        // Execute swap
+        calls[1] = IUniversalAdapterEscrow.Call({
+            target: PENDLE_ROUTER,
+            value: 0,
+            data: abi.encodeWithSelector(
+                IPendleRouter.swapExactTokenForPt.selector,
+                address(adapter),  // receiver
+                KHYPE_MARKET,      // market
+                minPtOut,          // minPtOut
+                approxParams,      // guessPtOut
+                tokenInput,        // input
+                limitData          // limit
+            )
+        });
+
+        // Execute as strategy agent
+        vm.prank(strategyAgent);
+        adapter.executeStrategy(PT_KHYPE_LOOP_ID, calls);
+
+        uint256 ptBalance = IERC20(PT_KHYPE).balanceOf(address(adapter));
+        console.log("Swap executed successfully");
+        console.log("PT-KHYPE received:", ptBalance / 1e18);
+        console.log("Swap efficiency:", (ptBalance * 100) / ALLOCATION_AMOUNT, "%");
+    }
+
+    // ============ Step 6: Verify Position ============
+
+    function verifyPosition() internal {
+        console.log("\n--- Step 6: Verifying Position ---");
+
+        // Check balances
+        uint256 khypeBalance = IERC20(KHYPE).balanceOf(address(adapter));
+        uint256 ptBalance = IERC20(PT_KHYPE).balanceOf(address(adapter));
+        uint256 ytBalance = IERC20(YT_KHYPE).balanceOf(address(adapter));
+
+        console.log("Adapter balances:");
+        console.log("  KHYPE:", khypeBalance / 1e18);
+        console.log("  PT-KHYPE:", ptBalance / 1e18);
+        console.log("  YT-KHYPE:", ytBalance / 1e18);
+
+        // Verify allocation tracking
+        uint256 allocation = adapter.getAllocation(PT_KHYPE_LOOP_ID);
+        console.log("Strategy allocation:", allocation / 1e18, "KHYPE");
+
+        // Check active strategies
+        bytes32[] memory activeStrategies = adapter.getActiveStrategies();
+        console.log("Active strategies count:", activeStrategies.length);
+        require(activeStrategies[0] == PT_KHYPE_LOOP_ID, "Strategy not active");
+    }
+
+    // ============ Step 7: Deallocate from Strategy ============
+
+    function deallocateFromStrategy() internal {
+        console.log("\n--- Step 7: Deallocating from Strategy ---");
+
+        uint256 ptBalance = IERC20(PT_KHYPE).balanceOf(address(adapter));
+        console.log("PT-KHYPE to swap back:", ptBalance / 1e18);
+
+        // For this example, we'll simulate swapping PT back to KHYPE
+        // In production, this would use Pendle's swapExactPtForToken
+
+        // Prepare deallocation with withdrawal calls
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+
+        // For simplicity, we'll just transfer PT tokens back
+        // In real scenario, would swap PT back to KHYPE first
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
+            target: PT_KHYPE,
+            value: 0,
+            data: abi.encodeWithSelector(IERC20.transfer.selector, address(vault), ptBalance)
+        });
+
+        // Simulate receiving KHYPE back (for testing)
+        deal(KHYPE, address(adapter), ALLOCATION_AMOUNT);
+
+        // Deallocate
+        bytes memory deallocData = abi.encode(
+            PT_KHYPE_LOOP_ID,    // strategyId
+            ALLOCATION_AMOUNT,    // amount to deallocate
+            new IUniversalAdapterEscrow.Call[](0)  // no withdrawal calls for this test
+        );
+
+        vault.deallocate(address(adapter), deallocData, ALLOCATION_AMOUNT);
+
+        console.log("Deallocated", ALLOCATION_AMOUNT / 1e18, "KHYPE from strategy");
+
+        // Verify deallocation
+        uint256 remainingAllocation = adapter.getAllocation(PT_KHYPE_LOOP_ID);
+        console.log("Remaining allocation:", remainingAllocation / 1e18, "KHYPE");
+
+        bytes32[] memory activeStrategies = adapter.getActiveStrategies();
+        console.log("Active strategies after deallocation:", activeStrategies.length);
+    }
+
+    // ============ Step 8: User Withdraw ============
+
+    function userWithdraw() internal {
+        console.log("\n--- Step 8: User Withdrawing from Vault ---");
+
+        uint256 userShares = vault.balanceOf(user);
+        console.log("User shares:", userShares / 1e18);
+
+        // User withdraws all
+        vm.prank(user);
+        uint256 assetsReceived = vault.redeem(userShares, user, user);
+
+        console.log("User withdrew:", assetsReceived / 1e18, "KHYPE");
+        console.log("User final KHYPE balance:", IERC20(KHYPE).balanceOf(user) / 1e18);
+
+        // Calculate performance
+        if (assetsReceived >= INITIAL_DEPOSIT) {
+            uint256 profit = assetsReceived - INITIAL_DEPOSIT;
+            uint256 profitPercent = (profit * 100) / INITIAL_DEPOSIT;
+            console.log("Profit:", profit / 1e18, "KHYPE (", profitPercent, "%)");
+        } else {
+            uint256 loss = INITIAL_DEPOSIT - assetsReceived;
+            uint256 lossPercent = (loss * 100) / INITIAL_DEPOSIT;
+            console.log("Loss:", loss / 1e18, "KHYPE (", lossPercent, "%)");
+        }
+    }
+
+    // ============ Helper Functions ============
+
+    function logSeparator() internal pure {
+        console.log("----------------------------------------");
+    }
+}
