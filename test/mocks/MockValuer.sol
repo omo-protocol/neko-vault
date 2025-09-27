@@ -11,4 +11,9 @@ contract MockValuer {
     function getValue(address target) external view returns (uint256) {
         return values[target];
     }
+
+    // Add getTotalValue to match the refactored realAssets implementation
+    function getTotalValue(address target) external view returns (uint256) {
+        return values[target];
+    }
 }

@@ -6,17 +6,24 @@ import {IERC20} from "../interfaces/IERC20.sol";
 import {IAdapter} from "../interfaces/IAdapter.sol";
 import {IUniversalAdapterEscrow} from "./interfaces/IUniversalAdapterEscrow.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /// @title UniversalAdapterEscrow
 /// @notice Unified adapter that merges UniversalEscrowAdapter and StrategyEscrow functionality
 /// @dev Simplifies architecture by combining adapter and escrow logic into a single contract
 contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     using SafeERC20Lib for IERC20;
+    using EnumerableSet for EnumerableSet.Bytes32Set;
 
     /* CONSTANTS */
 
     uint256 private constant BASIS_POINTS = 10000;
     uint256 private constant DAY = 24 hours;
+
+    // Pre-computed function selectors for gas optimization
+    bytes4 private constant TRANSFER_SELECTOR = 0xa9059cbb; // transfer(address,uint256)
+    bytes4 private constant APPROVE_SELECTOR = 0x095ea7b3;  // approve(address,uint256)
+    bytes4 private constant TRANSFER_FROM_SELECTOR = 0x23b872dd; // transferFrom(address,address,uint256)
 
     /* IMMUTABLES */
 
@@ -30,7 +37,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Strategy management
     mapping(bytes32 => StrategyConfig) public strategies;
     mapping(bytes32 => uint256) public allocations;
-    bytes32[] public activeStrategies;
+    EnumerableSet.Bytes32Set private activeStrategies;
 
     // Whitelist management
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
@@ -110,17 +117,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Update allocation tracking
         allocations[strategyId] += amount;
 
-        // Track if this is a new active strategy
-        bool isNew = true;
-        for (uint256 i = 0; i < activeStrategies.length; i++) {
-            if (activeStrategies[i] == strategyId) {
-                isNew = false;
-                break;
-            }
-        }
-        if (isNew) {
-            activeStrategies.push(strategyId);
-        }
+        // Add to active strategies if not already present (O(1) operation)
+        activeStrategies.add(strategyId);
 
         // Optionally execute strategy immediately after allocation
         if (executeNow && calls.length > 0) {
@@ -184,14 +182,17 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IAdapter
     function realAssets() external view override returns (uint256 assets) {
-        // Simple interface for valuation - can be extended with proper valuer interfaces
+        // Call getTotalValue which aggregates all strategy values + idle assets
         (bool success, bytes memory data) = valuer.staticcall(
-            abi.encodeWithSignature("getValue(address)", address(this))
+            abi.encodeWithSignature("getTotalValue(address)", address(this))
         );
+
         if (success && data.length >= 32) {
             return abi.decode(data, (uint256));
         }
-        return 0;
+
+        // Fallback: return at least the idle assets
+        return IERC20(asset).balanceOf(address(this));
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
@@ -309,7 +310,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IUniversalAdapterEscrow
     function getActiveStrategies() external view returns (bytes32[] memory) {
-        return activeStrategies;
+        return activeStrategies.values();
     }
 
     /* INTERNAL FUNCTIONS */
@@ -374,9 +375,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @return Whether this is a token transfer
     function _isTokenTransfer(bytes4 selector, bytes memory data) internal pure returns (bool) {
         return (
-            selector == bytes4(keccak256("transfer(address,uint256)")) ||
-            selector == bytes4(keccak256("approve(address,uint256)")) ||
-            selector == bytes4(keccak256("transferFrom(address,address,uint256)"))
+            selector == TRANSFER_SELECTOR ||
+            selector == APPROVE_SELECTOR ||
+            selector == TRANSFER_FROM_SELECTOR
         ) && data.length >= 68; // Minimum length for these functions
     }
 
@@ -392,8 +393,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bytes4 selector = bytes4(data);
 
         // For transfer and approve, amount is the second parameter
-        if (selector == bytes4(keccak256("transfer(address,uint256)")) ||
-            selector == bytes4(keccak256("approve(address,uint256)"))) {
+        if (selector == TRANSFER_SELECTOR || selector == APPROVE_SELECTOR) {
             uint256 amount;
             assembly {
                 amount := mload(add(data, 68)) // Skip 4 bytes selector + 32 bytes address
@@ -402,7 +402,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         // For transferFrom, amount is the third parameter
-        if (selector == bytes4(keccak256("transferFrom(address,address,uint256)"))) {
+        if (selector == TRANSFER_FROM_SELECTOR) {
             if (data.length < 100) return 0;
             uint256 amount;
             assembly {
@@ -417,17 +417,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @notice Remove a strategy from the active list
     /// @param strategyId The strategy to remove
     function _removeFromActiveStrategies(bytes32 strategyId) internal {
-        uint256 length = activeStrategies.length;
-        for (uint256 i = 0; i < length; i++) {
-            if (activeStrategies[i] == strategyId) {
-                // Move last element to this position and pop
-                if (i != length - 1) {
-                    activeStrategies[i] = activeStrategies[length - 1];
-                }
-                activeStrategies.pop();
-                break;
-            }
-        }
+        // O(1) operation with EnumerableSet
+        activeStrategies.remove(strategyId);
     }
 
     /// @notice Receive ETH
