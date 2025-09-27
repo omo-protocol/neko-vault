@@ -498,8 +498,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
         uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // Should only return idle assets (0) since report is stale
-        assertEq(totalValue, 0);
+        // SECURITY FIX: Should still return last known value even if stale to prevent manipulation
+        // This prevents malicious users from exploiting price drops when values go stale
+        assertEq(totalValue, 1000e18);
     }
 
     function testGetTotalValueLowConfidence() public {
@@ -512,8 +513,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer.updateValue(STRATEGY_A, 1000e18, 50, 1, block.timestamp + 1 hours, signatures);
 
         uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // Should be 0 since confidence is below threshold
-        assertEq(totalValue, 0);
+        // SECURITY FIX: Should still return value even with low confidence to prevent manipulation
+        // This prevents malicious users from exploiting price drops when confidence is low
+        assertEq(totalValue, 1000e18);
     }
 
     /* VIEW FUNCTION TESTS */

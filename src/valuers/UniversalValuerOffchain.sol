@@ -168,13 +168,28 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {
-            ValueReport memory report = latestReports[strategies[i]];
+            bytes32 strategyId = strategies[i];
+            ValueReport memory report = latestReports[strategyId];
 
-            // Skip stale or low confidence values
+            // CRITICAL FIX: Always include a value for each strategy to prevent value manipulation
+            // Priority: 1. Fresh value with sufficient confidence
+            //          2. Stale value (still usable but potentially outdated)
+            //          3. Fallback value (emergency backup)
+            //          4. Last known value regardless of staleness
+
             if (block.timestamp <= report.timestamp + MAX_STALENESS &&
                 report.confidence >= defaultConfidenceThreshold) {
+                // Use fresh, high-confidence value
+                totalValue += report.value;
+            } else if (fallbackValues[strategyId] > 0) {
+                // Use fallback value if main value is stale or low confidence
+                totalValue += fallbackValues[strategyId];
+            } else if (report.value > 0) {
+                // Use last known value even if stale (prevents value drops)
+                // This ensures continuity and prevents manipulation
                 totalValue += report.value;
             }
+            // If none of the above, the strategy contributes 0 (only for never-initialized strategies)
         }
 
         // Add idle assets
