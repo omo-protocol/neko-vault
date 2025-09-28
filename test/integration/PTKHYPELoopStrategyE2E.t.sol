@@ -278,20 +278,21 @@ contract PTKHYPELoopStrategyE2ETest is Test {
         adapter.sweep(address(khype), owner);
     }
 
-    function testDailyLimitEnforcement() public {
-        // Create a strategy with a small daily limit
+    function testDailyLimitRemoved() public {
+        // L-16 Fix: Test that daily limits have been removed per recommendation
+        // Previously this test verified daily limit enforcement, now it verifies removal
         bytes32 limitedStrategyId = keccak256("limited-strategy");
-        uint256 smallDailyLimit = 100e18;
+        uint256 dailyLimitParameter = 100e18; // This parameter is now ignored
 
         vm.prank(owner);
         adapter.setStrategy(
             limitedStrategyId,
             strategyAgent,
             "",
-            smallDailyLimit
+            dailyLimitParameter // Daily limit parameter kept for interface compatibility but ignored
         );
 
-        // Set caps for the limited strategy
+        // Set caps for the strategy
         vm.startPrank(curator);
         bytes memory idData = abi.encodePacked("limited-strategy");
         vault.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (idData, type(uint128).max)));
@@ -321,7 +322,7 @@ contract PTKHYPELoopStrategyE2ETest is Test {
             type(uint256).max
         );
 
-        // First, execute a transfer that uses most of the daily limit (99e18)
+        // Execute a large transfer (99e18)
         IUniversalAdapterEscrow.Call[] memory calls1 = new IUniversalAdapterEscrow.Call[](1);
         calls1[0] = IUniversalAdapterEscrow.Call({
             target: address(khype),
@@ -330,19 +331,21 @@ contract PTKHYPELoopStrategyE2ETest is Test {
         });
 
         vm.prank(strategyAgent);
-        adapter.executeStrategy(limitedStrategyId, calls1);
+        adapter.executeStrategy(limitedStrategyId, calls1); // Should succeed
 
-        // Now try to execute another transfer that would exceed the daily limit (2e18)
+        // Execute another large transfer that would have exceeded old daily limit
         IUniversalAdapterEscrow.Call[] memory calls2 = new IUniversalAdapterEscrow.Call[](1);
         calls2[0] = IUniversalAdapterEscrow.Call({
             target: address(khype),
             value: 0,
-            data: abi.encodeWithSelector(khype.transfer.selector, user, 2e18)
+            data: abi.encodeWithSelector(khype.transfer.selector, user, 50e18)
         });
 
         vm.prank(strategyAgent);
-        vm.expectRevert(IUniversalAdapterEscrow.DailyLimitExceeded.selector);
-        adapter.executeStrategy(limitedStrategyId, calls2);
+        adapter.executeStrategy(limitedStrategyId, calls2); // Should succeed - daily limits removed
+
+        // Total transferred: 149e18, which exceeds old daily limit of 100e18
+        // This proves daily limits have been removed per L-16 recommendation
     }
 
     function testMultipleStrategies() public {

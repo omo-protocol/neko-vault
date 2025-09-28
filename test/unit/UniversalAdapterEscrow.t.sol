@@ -401,17 +401,45 @@ contract UniversalAdapterEscrowTest is Test {
         adapter.executeStrategy(STRATEGY_1, calls);
     }
 
-    function testDailyLimitEnforcement() public {
-        // Setup with low daily limit
+    function testDailyLimitRemoved() public {
+        // L-16 Fix: Daily limits have been removed per recommendation
+        // Setup strategy (dailyLimit parameter is kept for interface compatibility but ignored)
         vm.startPrank(owner);
-        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // 10 USDC daily limit
+        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // Daily limit parameter ignored
         adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 100e6);
         vm.stopPrank();
 
         // Fund adapter
         asset.mint(address(adapter), 100e6);
 
-        // First transfer - within limit
+        // Multiple large transfers that would have exceeded old daily limit should now succeed
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 15e6),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+
+        // Another large transfer - should also succeed (no daily limit enforcement)
+        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 20e6);
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+    }
+
+    function testPerCallLimitStillEnforced() public {
+        // L-16 Fix: Daily limits removed, but per-call limits still work
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // Daily limit ignored
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 5e6); // Per-call limit of 5 USDC
+        vm.stopPrank();
+
+        asset.mint(address(adapter), 100e6);
+
+        // Transfer within per-call limit - should succeed
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(asset),
@@ -420,42 +448,20 @@ contract UniversalAdapterEscrowTest is Test {
         });
 
         vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, calls);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
 
-        // Second transfer - exceeds daily limit
+        // Transfer exceeding per-call limit - should fail
         calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 6e6);
 
         vm.prank(agent);
-        vm.expectRevert(IUniversalAdapterEscrow.DailyLimitExceeded.selector);
+        vm.expectRevert(IUniversalAdapterEscrow.CallLimitExceeded.selector);
         adapter.executeStrategy(STRATEGY_1, calls);
-    }
 
-    function testDailyLimitReset() public {
-        // Setup
-        vm.startPrank(owner);
-        adapter.setStrategy(STRATEGY_1, agent, "", 10e6);
-        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 100e6);
-        vm.stopPrank();
-
-        asset.mint(address(adapter), 100e6);
-
-        // Use up daily limit
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
-            target: address(asset),
-            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 10e6),
-            value: 0
-        });
+        // Another transfer within per-call limit - should succeed (no daily limit blocking)
+        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 4e6);
 
         vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, calls);
-
-        // Fast forward 1 day
-        vm.warp(block.timestamp + 1 days);
-
-        // Should work again
-        vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, calls);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
     }
 
     /* PAUSE TESTS */
@@ -678,5 +684,55 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.FunctionNotWhitelisted.selector);
         adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+    }
+
+    /* L-16 FIX TESTS */
+
+    function testL16DailyLimitLogicRemoved() public {
+        // L-16 Fix: Verify that daily limit logic has been completely removed
+        // Operations that would have been blocked by daily limits should now succeed
+
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // Daily limit parameter ignored
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 0);
+        adapter.updateWhitelist(address(rewardToken), bytes4(keccak256("transfer(address,uint256)")), true, 0);
+        vm.stopPrank();
+
+        // Fund adapter
+        asset.mint(address(adapter), 100e6);
+        rewardToken.mint(address(adapter), 100e18);
+
+        // Large transfers that would have exceeded daily limits should all succeed
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+
+        // Transfer large amount of vault asset
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 50e6),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+
+        // Transfer large amount of reward token
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(rewardToken),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 80e18),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+
+        // Transfer more vault asset (total would be 60e6, far exceeding old 10e6 daily limit)
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 30e6),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed - daily limits removed
     }
 }

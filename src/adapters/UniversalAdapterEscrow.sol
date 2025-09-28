@@ -332,16 +332,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /* INTERNAL FUNCTIONS */
 
     /// @notice Execute multiple calls with validation
-    /// @param strategyId The strategy executing the calls
     /// @param calls Array of calls to execute
-    function _executeMulticall(bytes32 strategyId, Call[] memory calls) internal {
-        StrategyConfig storage strategy = strategies[strategyId];
-
-        // Reset daily limit if needed
-        if (block.timestamp >= strategy.lastResetTime + DAY) {
-            strategy.lastResetTime = block.timestamp;
-            strategy.dailyUsed = 0;
-        }
+    function _executeMulticall(bytes32 /* strategyId */, Call[] memory calls) internal {
+        // L-16 Fix: Removed daily limit tracking logic per recommendation
+        // Daily limits were problematic and could prevent emergency operations
 
         for (uint256 i = 0; i < calls.length; i++) {
             Call memory call = calls[i];
@@ -363,18 +357,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (call.value > 0 || _isTokenTransfer(selector, call.data)) {
                 uint256 transferAmount = _extractTransferAmount(call.data, call.value);
 
-                // Check per-call limit
+                // Check per-call limit (applies to all transfers)
                 if (config.limit > 0 && transferAmount > config.limit) {
                     revert CallLimitExceeded();
                 }
 
-                // Check daily limit
-                if (strategy.dailyLimit > 0) {
-                    if (strategy.dailyUsed + transferAmount > strategy.dailyLimit) {
-                        revert DailyLimitExceeded();
-                    }
-                    strategy.dailyUsed += transferAmount;
-                }
+                // L-16 Fix: Daily limit logic removed per recommendation
+                // Per-call limits (config.limit) provide sufficient protection
+                // Daily limits were problematic due to denomination mixing and
+                // could prevent emergency operations in high exposure scenarios
             }
 
             // Execute the call
