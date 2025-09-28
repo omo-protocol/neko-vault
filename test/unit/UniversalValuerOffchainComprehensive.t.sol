@@ -1001,6 +1001,46 @@ contract UniversalValuerOffchainComprehensive is Test {
             90
         );
     }
+
+    /**
+     * @notice Test L-01 fix: Verify price bounds validation works with optimized calculation
+     */
+    function testOptimizedPriceBoundsValidation() public {
+        // Configure strategy with price bounds
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            3000, // 30% pushThreshold
+            90
+        );
+
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_A, 4000); // 40% max change
+
+        // First update to establish a baseline
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // Update with change that exceeds price bounds (should revert)
+        vm.warp(block.timestamp + 6 minutes); // Bypass update interval
+        signatures[0] = _signValue(STRATEGY_A, 1500e18, 95, 2, block.timestamp + 1 hours, signer1Key); // 50% increase > 40% limit
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
+            5000, // 50% change
+            4000  // 40% limit
+        ));
+        valuer.updateValue(STRATEGY_A, 1500e18, 95, 2, block.timestamp + 1 hours, signatures);
+
+        // Update with change within bounds (should succeed)
+        signatures[0] = _signValue(STRATEGY_A, 1300e18, 95, 3, block.timestamp + 1 hours, signer1Key); // 30% increase < 40% limit
+        valuer.updateValue(STRATEGY_A, 1300e18, 95, 3, block.timestamp + 1 hours, signatures);
+
+        assertEq(valuer.getValue(STRATEGY_A), 1300e18, "Value should be updated");
+    }
 }
 
 contract SimpleMockAdapter {

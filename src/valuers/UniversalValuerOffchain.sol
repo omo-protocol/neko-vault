@@ -94,8 +94,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
         }
 
-        // Validate price bounds
-        _validatePriceBounds(strategyId, lastReport.value, value);
+        // Validate price bounds (L-01 FIX: pass pre-calculated changePercent to avoid double calculation)
+        if (lastReport.value > 0) {
+            _validatePriceBounds(strategyId, changePercent);
+        }
 
         // Validate confidence meets minimum requirement
         if (confidence < config.minConfidence) revert LowConfidence();
@@ -532,15 +534,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @dev Validate price bounds to prevent extreme movements
-    function _validatePriceBounds(bytes32 strategyId, uint256 oldValue, uint256 newValue) internal view {
-        if (oldValue == 0) return; // No bounds check for initial value
-
+    /// @param strategyId The strategy identifier
+    /// @param changePercent The pre-calculated change percentage to validate
+    function _validatePriceBounds(bytes32 strategyId, uint256 changePercent) internal view {
         uint256 maxChange = maxPriceChangeBps[strategyId];
         if (maxChange == 0) {
             maxChange = MAX_PRICE_CHANGE_BPS; // Use default if not set
         }
 
-        uint256 changePercent = _calculateChangePercent(oldValue, newValue);
         if (changePercent > maxChange) {
             revert PriceChangeExceedsBounds(changePercent, maxChange);
         }
