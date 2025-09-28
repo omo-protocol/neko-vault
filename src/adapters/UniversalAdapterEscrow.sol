@@ -105,17 +105,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (data.length == 0) revert InvalidData();
 
         // Decode allocation data
-        (bytes32 strategyId, uint256 amount, bool executeNow, Call[] memory calls) =
+        (bytes32 strategyId, , bool executeNow, Call[] memory calls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
         // Validate strategy exists and is active
         if (!strategies[strategyId].active) revert StrategyNotActive();
 
-        // Validate amount
-        if (amount == 0 || amount > assets) revert InvalidAmount();
+        // Use assets (actual transferred amount) instead of amount (requested amount)
+        // This handles fee-on-transfer and weird ERC20 tokens correctly
+        if (assets == 0) revert InvalidAmount();
 
-        // Update allocation tracking
-        allocations[strategyId] += amount;
+        // Update allocation tracking with actual received assets
+        allocations[strategyId] += assets;
 
         // Add to active strategies if not already present (O(1) operation)
         activeStrategies.add(strategyId);
@@ -128,7 +129,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Return results
         ids = new bytes32[](1);
         ids[0] = strategyId;
-        change = int256(amount);
+        change = int256(assets);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }

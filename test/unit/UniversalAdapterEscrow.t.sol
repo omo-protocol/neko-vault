@@ -6,6 +6,7 @@ import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.
 import {UniversalAdapterEscrowFactory} from "../../src/adapters/UniversalAdapterEscrowFactory.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockFeeOnTransferToken} from "../mocks/MockFeeOnTransferToken.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
@@ -292,6 +293,56 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(ids[0], STRATEGY_1);
         assertEq(change, -int256(120e6), "Should be able to withdraw yield");
         assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after withdrawing more than allocated");
+    }
+
+    function testAllocateWithFeeOnTransferToken() public {
+        // Create a fee-on-transfer adapter for testing
+        MockFeeOnTransferToken feeToken = new MockFeeOnTransferToken("FeeToken", "FEE", 18);
+        feeToken.setTransferFeePercent(100); // 1% fee
+
+        // Create a new adapter with the fee token
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(
+            address(vault),
+            address(valuer),
+            false
+        );
+
+        // Mock the asset function to return our fee token
+        vm.mockCall(
+            address(vault),
+            abi.encodeWithSignature("asset()"),
+            abi.encode(address(feeToken))
+        );
+
+        vm.prank(owner);
+        vault.addAdapter(address(feeAdapter));
+
+        vm.prank(owner);
+        feeAdapter.setStrategy(STRATEGY_1, agent, "", 1000e18);
+
+        // Mint tokens and simulate vault transfer with fee
+        uint256 requestedAmount = 100e18;
+        feeToken.mint(address(vault), requestedAmount);
+
+        // Simulate vault transferring to adapter (with fee deducted)
+        vm.prank(address(vault));
+        feeToken.transfer(address(feeAdapter), requestedAmount);
+
+        // Check actual received amount (should be less due to fee)
+        uint256 actualReceived = feeToken.balanceOf(address(feeAdapter));
+        uint256 expectedReceived = requestedAmount - (requestedAmount * 100) / 10000; // 1% fee
+        assertEq(actualReceived, expectedReceived, "Should receive amount minus fee");
+
+        // Allocate using actual received amount (this is what vault passes as assets parameter)
+        bytes memory allocData = abi.encode(STRATEGY_1, requestedAmount, false, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = feeAdapter.allocate(allocData, actualReceived, bytes4(0), address(0));
+
+        // Verify allocation is tracked with actual received amount, not requested amount
+        assertEq(feeAdapter.getAllocation(STRATEGY_1), actualReceived, "Should track actual received amount");
+        assertEq(change, int256(actualReceived), "Should return actual received amount as change");
+        assertEq(ids[0], STRATEGY_1);
     }
 
     /* WHITELIST TESTS */
