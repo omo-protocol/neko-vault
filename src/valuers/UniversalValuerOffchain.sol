@@ -97,6 +97,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         // Validate price bounds
         _validatePriceBounds(strategyId, lastReport.value, value);
 
+        // Validate confidence meets minimum requirement
+        if (confidence < config.minConfidence) revert LowConfidence();
+
         // Verify signatures with duplicate prevention
         uint256 totalWeight = _verifySignatures(
             strategyId,
@@ -228,6 +231,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             // Check nonce for each strategy
             if (nonce <= latestReports[strategyId].nonce) continue;
+
+            // Validate confidence meets minimum requirement for this strategy
+            UpdateConfig memory config = updateConfigs[strategyId];
+            if (confidences[i] < config.minConfidence) revert LowConfidence();
 
             latestReports[strategyId] = ValueReport({
                 value: values[i],

@@ -504,6 +504,16 @@ contract UniversalValuerOffchainComprehensive is Test {
     }
 
     function testGetTotalValueLowConfidence() public {
+        // Configure strategy to accept low confidence updates for this test
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            1000,
+            50  // Allow 50% confidence for this test
+        );
+
         // Create a simple mock adapter that returns STRATEGY_A as active
         SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
 
@@ -757,6 +767,147 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         // Verify the value wasn't updated
         assertEq(valuer.getValue(STRATEGY_A), value, "Value should not be updated with pending deactivated signer");
+    }
+
+    /**
+     * @notice Test M-06 fix: Confidence check should reject updates with insufficient confidence
+     */
+    function testLowConfidenceRejected() public {
+        // Configure strategy with minimum confidence requirement
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,    // minUpdateInterval
+            24 hours,     // maxStaleness
+            1000,         // pushThreshold (10%)
+            90            // minConfidence - require at least 90% confidence
+        );
+
+        // Create a valid signature for value update with low confidence
+        uint256 value = 1000e18;
+        uint256 lowConfidence = 50;  // Only 50% confidence, below the 90% requirement
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 30 minutes;
+
+        bytes32 messageHash = keccak256(abi.encode(
+            STRATEGY_A,
+            value,
+            lowConfidence,
+            nonce,
+            expiry,
+            block.chainid,
+            address(valuer)
+        ));
+
+        bytes32 ethSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            messageHash
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signer1Key, ethSignedHash);
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = abi.encodePacked(r, s, v);
+
+        // Should revert due to low confidence
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.updateValue(STRATEGY_A, value, lowConfidence, nonce, expiry, signatures);
+
+        // Now try with sufficient confidence (95% to meet both strategy and global requirements)
+        uint256 goodConfidence = 95;
+        uint256 newNonce = 2;
+
+        bytes32 newMessageHash = keccak256(abi.encode(
+            STRATEGY_A,
+            value,
+            goodConfidence,
+            newNonce,
+            expiry,
+            block.chainid,
+            address(valuer)
+        ));
+
+        bytes32 newEthSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            newMessageHash
+        ));
+
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(signer1Key, newEthSignedHash);
+        signatures[0] = abi.encodePacked(r2, s2, v2);
+
+        // This should succeed with sufficient confidence
+        valuer.updateValue(STRATEGY_A, value, goodConfidence, newNonce, expiry, signatures);
+        assertEq(valuer.getValue(STRATEGY_A), value, "Value should be updated with sufficient confidence");
+    }
+
+    /**
+     * @notice Test M-06 fix for batch updates: Should reject batch updates with insufficient confidence
+     */
+    function testBatchUpdateLowConfidenceRejected() public {
+        // Configure strategies with minimum confidence requirements
+        vm.startPrank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,    // minUpdateInterval
+            24 hours,     // maxStaleness
+            1000,         // pushThreshold
+            85            // minConfidence - require at least 85% confidence
+        );
+
+        valuer.configureStrategy(
+            STRATEGY_B,
+            5 minutes,
+            24 hours,
+            1000,
+            90            // minConfidence - require at least 90% confidence
+        );
+        vm.stopPrank();
+
+        // Prepare batch update with one strategy having low confidence
+        bytes32[] memory strategyIds = new bytes32[](2);
+        uint256[] memory values = new uint256[](2);
+        uint256[] memory confidences = new uint256[](2);
+
+        strategyIds[0] = STRATEGY_A;
+        strategyIds[1] = STRATEGY_B;
+        values[0] = 1000e18;
+        values[1] = 2000e18;
+        confidences[0] = 85;  // Meets STRATEGY_A requirement
+        confidences[1] = 80;  // Below STRATEGY_B requirement (90)
+
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 30 minutes;
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        // Should revert due to STRATEGY_B's low confidence
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Now try with sufficient confidence for both
+        confidences[0] = 95;  // Meets both STRATEGY_A (85) and global (95) requirements
+        confidences[1] = 95;  // Meets both STRATEGY_B (90) and global (95) requirements
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        // This should succeed
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+        assertEq(valuer.getValue(STRATEGY_A), values[0], "STRATEGY_A should be updated");
+        assertEq(valuer.getValue(STRATEGY_B), values[1], "STRATEGY_B should be updated");
     }
 }
 
