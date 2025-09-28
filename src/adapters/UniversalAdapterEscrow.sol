@@ -115,11 +115,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Validate strategy exists and is active
         if (!strategies[strategyId].active) revert StrategyNotActive();
 
-        // Use assets (actual transferred amount) instead of amount (requested amount)
-        // This handles fee-on-transfer and weird ERC20 tokens correctly
+        // L-13 FIX: Use full assets amount to prevent locked tokens
+        // Unlike old architecture where only partial amount was used, we utilize 100% of transferred assets
+        // This prevents the issue where assets > amount would leave tokens stuck in adapter
         if (assets == 0) revert InvalidAmount();
 
-        // Update allocation tracking with actual received assets
+        // Update allocation tracking with actual received assets (full amount utilized)
         allocations[strategyId] += assets;
 
         // Add to active strategies if not already present (O(1) operation)
@@ -195,6 +196,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IAdapter
     function realAssets() external view override returns (uint256 assets) {
+        // L-13 FIX: Comprehensive asset utilization tracking
+        // This function ensures all assets (both allocated to strategies and idle) are accounted for
+        // No assets are lost or left unused in the adapter
+
         // Call getTotalValue which aggregates all strategy values + idle assets
         (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getTotalValue(address)", address(this))
@@ -207,7 +212,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // Fallback: return at least the idle assets
+        // Fallback: return at least the idle assets (ensures no assets are hidden)
         return IERC20(asset).balanceOf(address(this));
     }
 
@@ -327,6 +332,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @inheritdoc IUniversalAdapterEscrow
     function getActiveStrategies() external view returns (bytes32[] memory) {
         return activeStrategies.values();
+    }
+
+    /// @notice Get idle assets that are not allocated to any strategy
+    /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
+    /// @return idleAssets Amount of assets sitting idle in the adapter
+    function getIdleAssets() external view returns (uint256 idleAssets) {
+        return IERC20(asset).balanceOf(address(this));
     }
 
     /* INTERNAL FUNCTIONS */

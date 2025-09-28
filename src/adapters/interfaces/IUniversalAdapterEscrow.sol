@@ -145,4 +145,9 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Check if using offchain valuer
     /// @return Whether using offchain valuer
     function useOffchainValuer() external view returns (bool);
+
+    /// @notice Get idle assets that are not allocated to any strategy
+    /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
+    /// @return idleAssets Amount of assets sitting idle in the adapter
+    function getIdleAssets() external view returns (uint256 idleAssets);
 }

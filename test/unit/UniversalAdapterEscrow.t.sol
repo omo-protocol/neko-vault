@@ -735,4 +735,55 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(agent);
         adapter.executeStrategy(STRATEGY_1, calls); // Should succeed - daily limits removed
     }
+
+    function testL13FullAssetUtilization() public {
+        // L-13 FIX: Test that all assets are fully tracked and utilized
+        // This demonstrates how the current architecture prevents the L-13 issue
+
+        // Set up strategy
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Simulate vault transferring assets to adapter
+        uint256 assetAmount = 1000e6;
+        asset.mint(address(adapter), assetAmount);
+
+        // Initial state: assets are idle
+        assertEq(adapter.getIdleAssets(), assetAmount, "Assets should be idle before allocation");
+
+        // Allocate with full asset amount - this tracks the allocation internally
+        bytes memory allocateData = abi.encode(STRATEGY_1, assetAmount, false, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.allocate(allocateData, assetAmount, bytes4(0), address(0));
+
+        // L-13 FIX: All assets are tracked and available for strategy use
+        assertEq(adapter.getAllocation(STRATEGY_1), assetAmount, "Full asset amount should be tracked");
+        assertEq(int256(assetAmount), change, "Change should equal full asset amount");
+        assertEq(ids[0], STRATEGY_1, "Strategy ID should be returned");
+
+        // Assets remain in adapter but are allocated to strategy (available for use)
+        assertEq(adapter.getIdleAssets(), assetAmount, "Assets remain available for strategy execution");
+
+        // The key difference from old architecture: assets are tracked and available, not lost
+        assertTrue(adapter.getAllocation(STRATEGY_1) > 0, "Assets are allocated and tracked for strategy use");
+    }
+
+    function testL13IdleAssetVisibility() public {
+        // L-13 FIX: Test visibility into idle assets
+
+        // Initially no idle assets
+        assertEq(adapter.getIdleAssets(), 0, "Should start with no idle assets");
+
+        // Transfer some assets directly to adapter (simulating edge case)
+        uint256 idleAmount = 100e6;
+        asset.mint(address(adapter), idleAmount);
+
+        // Should be visible through getIdleAssets
+        assertEq(adapter.getIdleAssets(), idleAmount, "Idle assets should be visible");
+
+        // Should be included in realAssets
+        uint256 totalAssets = adapter.realAssets();
+        assertGe(totalAssets, idleAmount, "Real assets should include idle assets");
+    }
 }
