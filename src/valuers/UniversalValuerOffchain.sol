@@ -149,8 +149,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        // L-08 FIX: Use strategy-specific maxStaleness instead of global MAX_STALENESS
-        uint256 maxStaleness = config.maxStaleness > 0 ? config.maxStaleness : MAX_STALENESS;
+        // L-18 FIX: If strategy is configured, use config values directly; otherwise use constants as fallback
+        uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
 
         // Check staleness
         if (block.timestamp > report.timestamp + maxStaleness) {
@@ -161,8 +161,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             revert ValueTooStale();
         }
 
-        // L-08 FIX: Use strategy-specific minConfidence instead of global defaultConfidenceThreshold
-        uint256 minConfidence = config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
+        // L-18 FIX: If strategy is configured, use config values directly; otherwise use defaults as fallback
+        uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
 
         // Check confidence threshold
         if (report.confidence < minConfidence) {
@@ -185,9 +185,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             ValueReport memory report = latestReports[strategyId];
             UpdateConfig memory config = updateConfigs[strategyId];
 
-            // L-08 FIX: Use strategy-specific config values instead of global constants
-            uint256 maxStaleness = config.maxStaleness > 0 ? config.maxStaleness : MAX_STALENESS;
-            uint256 minConfidence = config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
+            // L-18 FIX: If strategy is configured, use config values directly; otherwise use defaults as fallback
+            uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
+            uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
 
             // CRITICAL FIX: Always include a value for each strategy to prevent value manipulation
             // Priority: 1. Fresh value with sufficient confidence
@@ -340,7 +340,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 pushThreshold,
         uint256 minConfidence
     ) external onlyOwner {
-        // L-05 FIX: Validate input parameters to prevent dangerous configurations
         if (minUpdateInterval < MIN_UPDATE_INTERVAL) revert UpdateTooFrequent();
         if (maxStaleness > MAX_STALENESS) revert ValueTooStale();
         if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();

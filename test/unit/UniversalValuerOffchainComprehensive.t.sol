@@ -1520,11 +1520,11 @@ contract UniversalValuerOffchainComprehensive is Test {
     function testConfigureStrategyInvalidMinUpdateInterval() public {
         vm.startPrank(owner);
 
-        // Should revert for interval below minimum
+        // L-18 Fix: Test new minimum bound (1 minute instead of old 5 minutes)
         vm.expectRevert(IUniversalValuerOffchain.UpdateTooFrequent.selector);
         valuer.configureStrategy(
             STRATEGY_A,
-            MIN_UPDATE_INTERVAL - 1, // Below minimum
+            59 seconds, // Below new minimum of 1 minute
             MAX_STALENESS,
             1000,
             95
@@ -1536,12 +1536,12 @@ contract UniversalValuerOffchainComprehensive is Test {
     function testConfigureStrategyInvalidMaxStaleness() public {
         vm.startPrank(owner);
 
-        // Should revert for staleness above maximum
+        // L-18 Fix: Should revert for staleness above new maximum (7 days)
         vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
         valuer.configureStrategy(
             STRATEGY_A,
             MIN_UPDATE_INTERVAL,
-            MAX_STALENESS + 1, // Above maximum
+            7 days + 1 seconds, // Above new maximum (7 days)
             1000,
             95
         );
@@ -1615,6 +1615,84 @@ contract UniversalValuerOffchainComprehensive is Test {
             1000,
             79 // Below new threshold
         );
+
+        vm.stopPrank();
+    }
+
+    /* L-18 FIX TESTS */
+
+    function testL18ConfiguredStrategyUsesConfigValues() public {
+        vm.startPrank(owner);
+
+        // L-18 Fix: Configured strategies should use config values, not constants
+
+        // Configure strategy with specific staleness (12h, different from MAX_STALENESS 24h)
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL, // 5 minutes
+            12 hours, // Different from MAX_STALENESS (24 hours)
+            1000,
+            95
+        );
+
+        // Set up a report
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(STRATEGY_A, 1000, 95, 1, block.timestamp + 3600, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000, 95, 1, block.timestamp + 3600, signatures);
+
+        // Forward time to 15 hours (exceeds config staleness of 12h but within MAX_STALENESS of 24h)
+        vm.warp(block.timestamp + 15 hours);
+
+        // Should revert with ValueTooStale because config.maxStaleness (12h) is used, not MAX_STALENESS (24h)
+        vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
+        valuer.getValue(STRATEGY_A);
+
+        vm.stopPrank();
+    }
+
+    function testL18ConfiguredStrategyUsesConfigConfidence() public {
+        vm.startPrank(owner);
+
+        // First set a lower default confidence threshold to allow the test
+        valuer.setDefaultConfidenceThreshold(70);
+
+        // Configure strategy with specific confidence requirement (80, higher than new default 70)
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            1000,
+            80 // Higher than new defaultConfidenceThreshold (70)
+        );
+
+        // Set up a report with confidence 85 (above config 80, above new default 70)
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(STRATEGY_A, 1000, 85, 1, block.timestamp + 3600, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000, 85, 1, block.timestamp + 3600, signatures);
+
+        // Should succeed because config.minConfidence (80) is used, not defaultConfidenceThreshold (70)
+        uint256 value = valuer.getValue(STRATEGY_A);
+        assertEq(value, 1000, "Should use config confidence, not default threshold");
+
+        vm.stopPrank();
+    }
+
+    function testL18UnconfiguredStrategyUsesDefaults() public {
+        vm.startPrank(owner);
+
+        // L-18 Fix: Unconfigured strategies should still work with defaults
+
+        // Use a fresh strategy ID that hasn't been configured
+        bytes32 UNCONFIGURED_STRATEGY = keccak256("UNCONFIGURED_STRATEGY");
+
+        // Set up a report for unconfigured strategy
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(UNCONFIGURED_STRATEGY, 1000, 95, 1, block.timestamp + 3600, signer1Key);
+        valuer.updateValue(UNCONFIGURED_STRATEGY, 1000, 95, 1, block.timestamp + 3600, signatures);
+
+        // Should succeed because it falls back to constants (MAX_STALENESS, defaultConfidenceThreshold)
+        uint256 value = valuer.getValue(UNCONFIGURED_STRATEGY);
+        assertEq(value, 1000, "Unconfigured strategy should work with defaults");
 
         vm.stopPrank();
     }
