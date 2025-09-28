@@ -65,6 +65,8 @@ interface IUniversalValuerOffchain {
 
     event RequiredWeightUpdated(uint256 newWeight);
 
+    event DefaultConfidenceThresholdUpdated(uint256 newThreshold);
+
     event FallbackValueSet(bytes32 indexed strategyId, uint256 value);
 
     event EmergencyModeToggled(bool enabled);

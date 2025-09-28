@@ -230,12 +230,29 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         // Update all values
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
+            ValueReport memory lastReport = latestReports[strategyId];
 
             // Check nonce for each strategy
-            if (nonce <= latestReports[strategyId].nonce) continue;
+            if (nonce <= lastReport.nonce) continue;
+
+            // L-02 FIX: Add missing validation checks to match updateValue()
+            UpdateConfig memory config = updateConfigs[strategyId];
+            uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
+
+            // Check minimum update interval (unless significant change)
+            if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
+                // Only allow update if change exceeds threshold
+                if (changePercent < config.pushThreshold) {
+                    continue; // Skip this update instead of reverting the entire batch
+                }
+            }
+
+            // Validate price bounds (L-02 FIX: add price bounds validation)
+            if (lastReport.value > 0) {
+                _validatePriceBounds(strategyId, changePercent);
+            }
 
             // Validate confidence meets minimum requirement for this strategy
-            UpdateConfig memory config = updateConfigs[strategyId];
             if (confidences[i] < config.minConfidence) revert LowConfidence();
 
             latestReports[strategyId] = ValueReport({
@@ -334,6 +351,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (weight == 0) revert InvalidWeight();
         requiredWeight = weight;
         emit RequiredWeightUpdated(weight);
+    }
+
+    /// @notice Set default confidence threshold for strategy value acceptance
+    /// @param threshold New confidence threshold (0-100)
+    function setDefaultConfidenceThreshold(uint256 threshold) external onlyOwner {
+        if (threshold > 100) revert LowConfidence(); // Reuse existing error for invalid confidence
+        defaultConfidenceThreshold = threshold;
+        emit DefaultConfidenceThresholdUpdated(threshold);
     }
 
     /// @notice Set price change bounds for a strategy

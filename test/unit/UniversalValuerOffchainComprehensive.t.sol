@@ -1041,6 +1041,353 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         assertEq(valuer.getValue(STRATEGY_A), 1300e18, "Value should be updated");
     }
+
+    /**
+     * @notice Test L-02 fix: Verify batchUpdateValues includes all missing validation checks
+     */
+    function testBatchUpdateValuesValidationChecks() public {
+        // Configure strategies with different parameters
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,  // minUpdateInterval
+            24 hours,   // maxStaleness
+            2000,       // 20% pushThreshold
+            90          // minConfidence
+        );
+
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_B,
+            10 minutes, // different minUpdateInterval
+            24 hours,
+            3000,       // 30% pushThreshold
+            95          // minConfidence
+        );
+
+        // Set price bounds
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_A, 5000); // 50% max change
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_B, 4000); // 40% max change
+
+        // Initial batch update to establish baseline
+        bytes32[] memory strategyIds = new bytes32[](2);
+        strategyIds[0] = STRATEGY_A;
+        strategyIds[1] = STRATEGY_B;
+
+        uint256[] memory values = new uint256[](2);
+        values[0] = 1000e18;
+        values[1] = 2000e18;
+
+        uint256[] memory confidences = new uint256[](2);
+        confidences[0] = 95; // Meets both strategy and global requirements
+        confidences[1] = 95;
+
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 1 hours;
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Advance time by 3 minutes (less than both strategies' intervals)
+        vm.warp(block.timestamp + 3 minutes);
+
+        // Attempt batch update with changes below push threshold
+        values[0] = 1010e18; // 1% change < 20% pushThreshold for STRATEGY_A
+        values[1] = 2020e18; // 1% change < 30% pushThreshold for STRATEGY_B
+        nonce = 2;
+        expiry = block.timestamp + 1 hours;
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        // L-02 FIX: This should succeed (skip problematic updates) instead of reverting
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Values should remain unchanged due to insufficient change + too frequent
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18, "STRATEGY_A should remain unchanged");
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should remain unchanged");
+
+        // Now test with sufficient change (above push threshold)
+        values[0] = 1250e18; // 25% change > 20% pushThreshold for STRATEGY_A
+        values[1] = 2700e18; // 35% change > 30% pushThreshold for STRATEGY_B
+        nonce = 3;
+        expiry = block.timestamp + 1 hours;
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Values should be updated since change exceeds push threshold
+        assertEq(valuer.getValue(STRATEGY_A), 1250e18, "STRATEGY_A should be updated");
+        assertEq(valuer.getValue(STRATEGY_B), 2700e18, "STRATEGY_B should be updated");
+    }
+
+    /**
+     * @notice Test L-02 fix: Verify price bounds validation in batch updates
+     */
+    function testBatchUpdatePriceBoundsValidation() public {
+        // Configure strategy
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            2000, // 20% pushThreshold
+            90
+        );
+
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_A, 3000); // 30% max change
+
+        // Initial update
+        bytes32[] memory strategyIds = new bytes32[](1);
+        strategyIds[0] = STRATEGY_A;
+
+        uint256[] memory values = new uint256[](1);
+        values[0] = 1000e18;
+
+        uint256[] memory confidences = new uint256[](1);
+        confidences[0] = 95;
+
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 1 hours;
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Advance time beyond update interval
+        vm.warp(block.timestamp + 6 minutes);
+
+        // Try to update with change exceeding price bounds
+        values[0] = 1400e18; // 40% change > 30% limit
+        nonce = 2;
+        expiry = block.timestamp + 1 hours;
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        // L-02 FIX: Should revert due to price bounds validation
+        vm.expectRevert(abi.encodeWithSelector(
+            IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
+            4000, // 40% change
+            3000  // 30% limit
+        ));
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Try with change within bounds
+        values[0] = 1250e18; // 25% change < 30% limit
+        nonce = 3;
+        expiry = block.timestamp + 1 hours;
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+        assertEq(valuer.getValue(STRATEGY_A), 1250e18, "Value should be updated within bounds");
+    }
+
+    /**
+     * @notice Test L-02 fix: Verify mixed validation scenarios in batch
+     */
+    function testBatchUpdateMixedValidationScenarios() public {
+        // Configure strategies differently
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            2000, // 20% pushThreshold
+            90
+        );
+
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_B,
+            5 minutes,
+            24 hours,
+            1000, // 10% pushThreshold
+            90
+        );
+
+        // Initial updates
+        bytes32[] memory strategyIds = new bytes32[](2);
+        strategyIds[0] = STRATEGY_A;
+        strategyIds[1] = STRATEGY_B;
+
+        uint256[] memory values = new uint256[](2);
+        values[0] = 1000e18;
+        values[1] = 2000e18;
+
+        uint256[] memory confidences = new uint256[](2);
+        confidences[0] = 95;
+        confidences[1] = 95;
+
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 1 hours;
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Advance time by 3 minutes (less than minUpdateInterval)
+        vm.warp(block.timestamp + 3 minutes);
+
+        // Mixed scenario: STRATEGY_A has sufficient change, STRATEGY_B doesn't
+        values[0] = 1250e18; // 25% change > 20% pushThreshold (should update)
+        values[1] = 2010e18; // 0.5% change < 10% pushThreshold (should skip)
+        nonce = 2;
+        expiry = block.timestamp + 1 hours;
+
+        signatures[0] = _signBatch(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // STRATEGY_A should update, STRATEGY_B should remain unchanged
+        assertEq(valuer.getValue(STRATEGY_A), 1250e18, "STRATEGY_A should update due to sufficient change");
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should remain unchanged due to insufficient change");
+    }
+
+    // L-03 FIX: Test cases for defaultConfidenceThreshold setter
+    function testSetDefaultConfidenceThreshold() public {
+        vm.startPrank(owner);
+
+        // Test normal threshold values
+        uint256 newThreshold = 85;
+        vm.expectEmit(true, true, true, true);
+        emit DefaultConfidenceThresholdUpdated(newThreshold);
+        valuer.setDefaultConfidenceThreshold(newThreshold);
+        assertEq(valuer.defaultConfidenceThreshold(), newThreshold, "Should update defaultConfidenceThreshold");
+
+        // Test boundary values
+        valuer.setDefaultConfidenceThreshold(0);
+        assertEq(valuer.defaultConfidenceThreshold(), 0, "Should allow 0% confidence");
+
+        valuer.setDefaultConfidenceThreshold(100);
+        assertEq(valuer.defaultConfidenceThreshold(), 100, "Should allow 100% confidence");
+
+        vm.stopPrank();
+    }
+
+    function testSetDefaultConfidenceThresholdInvalidValue() public {
+        vm.startPrank(owner);
+
+        // Test value above 100 should revert
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.setDefaultConfidenceThreshold(101);
+
+        // Test very high invalid value
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.setDefaultConfidenceThreshold(999);
+
+        vm.stopPrank();
+    }
+
+    function testSetDefaultConfidenceThresholdUnauthorized() public {
+        vm.startPrank(unauthorized);
+
+        vm.expectRevert(IUniversalValuerOffchain.NotAuthorized.selector);
+        valuer.setDefaultConfidenceThreshold(50);
+
+        vm.stopPrank();
+    }
+
+    function testDefaultConfidenceThresholdAffectsGetValue() public {
+        vm.startPrank(owner);
+
+        // Set a higher confidence threshold
+        valuer.setDefaultConfidenceThreshold(98);
+
+        // Configure strategy with lower confidence requirement
+        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 100, 90);
+
+        vm.stopPrank();
+
+        // Update with confidence that meets strategy requirement but not global
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 30 minutes;
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(
+            STRATEGY_A,
+            1000e18,
+            96, // Higher than strategy requirement (90) but lower than global (98)
+            nonce,
+            expiry,
+            signer1Key
+        );
+
+        vm.startPrank(signer1);
+
+        // updateValue should succeed (only checks strategy-specific minConfidence)
+        valuer.updateValue(STRATEGY_A, 1000e18, 96, nonce, expiry, signatures);
+
+        vm.stopPrank();
+
+        // But getValue should revert because of global threshold
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.getValue(STRATEGY_A);
+    }
+
+    event DefaultConfidenceThresholdUpdated(uint256 newThreshold);
 }
 
 contract SimpleMockAdapter {
