@@ -447,6 +447,17 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
+    function testRequestUpdateBlockedInEmergencyMode() public {
+        // L-06 FIX: Test that requestUpdate is blocked during emergency mode
+        vm.startPrank(owner);
+        valuer.setEmergencyMode(true);
+        vm.stopPrank();
+
+        // Attempt to call requestUpdate during emergency mode should revert
+        vm.expectRevert(IUniversalValuerOffchain.EmergencyMode.selector);
+        valuer.requestUpdate(STRATEGY_A);
+    }
+
     /* ACCESS CONTROL TESTS */
 
     function testOnlyOwnerFunctions() public {

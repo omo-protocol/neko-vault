@@ -128,7 +128,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @inheritdoc IUniversalValuerOffchain
-    function requestUpdate(bytes32 strategyId) external override {
+    function requestUpdate(bytes32 strategyId) external override notEmergency {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
