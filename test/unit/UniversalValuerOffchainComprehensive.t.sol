@@ -909,6 +909,98 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertEq(valuer.getValue(STRATEGY_A), values[0], "STRATEGY_A should be updated");
         assertEq(valuer.getValue(STRATEGY_B), values[1], "STRATEGY_B should be updated");
     }
+
+    /**
+     * @notice Test M-08 fix: configureStrategy should reject when pushThreshold > maxPriceChangeBps
+     */
+    function testPushThresholdExceedsMaxChangeBounds() public {
+        // First set a price change bound
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_A, 2000); // 20% max change
+
+        // Try to configure strategy with pushThreshold > maxPriceChangeBps
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(
+            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
+            3000, // pushThreshold
+            2000  // maxChange
+        ));
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            3000, // 30% pushThreshold > 20% maxChange
+            90
+        );
+
+        // Should work when pushThreshold <= maxPriceChangeBps
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            1500, // 15% pushThreshold <= 20% maxChange
+            90
+        );
+    }
+
+    /**
+     * @notice Test M-08 fix: setPriceChangeBounds should reject when bounds conflict with existing pushThreshold
+     */
+    function testPriceChangeBoundsConflictWithPushThreshold() public {
+        // First configure strategy with pushThreshold
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            3000, // 30% pushThreshold
+            90
+        );
+
+        // Try to set price bounds lower than existing pushThreshold
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(
+            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
+            3000, // pushThreshold
+            2000  // maxChange
+        ));
+        valuer.setPriceChangeBounds(STRATEGY_A, 2000); // 20% < 30%
+
+        // Should work when bounds >= pushThreshold
+        vm.prank(owner);
+        valuer.setPriceChangeBounds(STRATEGY_A, 3500); // 35% >= 30%
+    }
+
+    /**
+     * @notice Test M-08 fix: pushThreshold validation with default MAX_PRICE_CHANGE_BPS
+     */
+    function testPushThresholdWithDefaultMaxChange() public {
+        // Try to configure strategy with pushThreshold > default MAX_PRICE_CHANGE_BPS (50%)
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(
+            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
+            6000, // pushThreshold
+            5000  // default MAX_PRICE_CHANGE_BPS
+        ));
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            6000, // 60% pushThreshold > 50% default
+            90
+        );
+
+        // Should work when pushThreshold <= default MAX_PRICE_CHANGE_BPS
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,
+            24 hours,
+            4000, // 40% pushThreshold <= 50% default
+            90
+        );
+    }
 }
 
 contract SimpleMockAdapter {

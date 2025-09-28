@@ -96,6 +96,7 @@ interface IUniversalValuerOffchain {
     error InvalidWeight();
     error InvalidPriceChangeBounds();
     error PriceChangeExceedsBounds(uint256 changePercent, uint256 maxChange);
+    error PushThresholdExceedsMaxChange(uint256 pushThreshold, uint256 maxChange);
 
     /* FUNCTIONS */
 

@@ -308,6 +308,15 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 pushThreshold,
         uint256 minConfidence
     ) external onlyOwner {
+        // M-08 FIX: Ensure pushThreshold doesn't exceed maxPriceChangeBps to prevent stuck strategies
+        uint256 maxChange = maxPriceChangeBps[strategyId];
+        if (maxChange == 0) {
+            maxChange = MAX_PRICE_CHANGE_BPS; // Use default if not set
+        }
+        if (pushThreshold > maxChange) {
+            revert PushThresholdExceedsMaxChange(pushThreshold, maxChange);
+        }
+
         updateConfigs[strategyId] = UpdateConfig({
             minUpdateInterval: minUpdateInterval,
             maxStaleness: maxStaleness,
@@ -328,6 +337,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Set price change bounds for a strategy
     function setPriceChangeBounds(bytes32 strategyId, uint256 maxChangeBps) external onlyOwner {
         if (maxChangeBps > BASIS_POINTS) revert InvalidPriceChangeBounds();
+
+        // M-08 FIX: Ensure new price bounds don't conflict with existing pushThreshold
+        UpdateConfig memory config = updateConfigs[strategyId];
+        if (config.pushThreshold > 0 && config.pushThreshold > maxChangeBps) {
+            revert PushThresholdExceedsMaxChange(config.pushThreshold, maxChangeBps);
+        }
+
         maxPriceChangeBps[strategyId] = maxChangeBps;
         emit PriceChangeBoundsSet(strategyId, maxChangeBps);
     }
