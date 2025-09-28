@@ -226,8 +226,8 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
-        // Deallocate
-        bytes memory deallocData = abi.encode(STRATEGY_1, 50e6, new IUniversalAdapterEscrow.Call[](0));
+        // Deallocate - no longer includes amount parameter
+        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
 
         vm.expectEmit(true, false, false, true);
         emit AllocationUpdated(STRATEGY_1, 50e6, -int256(50e6));
@@ -252,11 +252,11 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
-        // Deallocate all (amount = 0 means all)
-        bytes memory deallocData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
+        // Deallocate all - pass assets as max to deallocate all
+        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 0, bytes4(0), address(0));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 100e6, bytes4(0), address(0));
 
         assertEq(change, -int256(100e6));
         assertEq(adapter.getAllocation(STRATEGY_1), 0);

@@ -142,19 +142,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
-        // Decode deallocation data
-        (bytes32 strategyId, uint256 amount, Call[] memory withdrawCalls) =
-            abi.decode(data, (bytes32, uint256, Call[]));
+        // Decode deallocation data - no longer includes amount
+        (bytes32 strategyId, Call[] memory withdrawCalls) =
+            abi.decode(data, (bytes32, Call[]));
 
         // Validate allocation exists
         uint256 currentAllocation = allocations[strategyId];
         if (currentAllocation == 0) revert InvalidStrategy();
 
-        // Calculate actual amount to deallocate
-        uint256 actualAmount = amount == 0 ? currentAllocation : amount;
-        if (actualAmount > currentAllocation) {
-            actualAmount = currentAllocation;
-        }
+        // Use assets parameter directly, capped by current allocation
+        uint256 actualAmount = assets > currentAllocation ? currentAllocation : assets;
 
         // Execute withdrawal calls if provided (to withdraw from protocol)
         if (withdrawCalls.length > 0) {
@@ -188,7 +185,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         );
 
         if (success && data.length >= 32) {
-            return abi.decode(data, (uint256));
+            uint256 totalValue = abi.decode(data, (uint256));
+            if (totalValue > 0) {
+                return totalValue;
+            }
         }
 
         // Fallback: return at least the idle assets

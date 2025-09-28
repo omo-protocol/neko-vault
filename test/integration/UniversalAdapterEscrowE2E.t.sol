@@ -157,7 +157,7 @@ contract UniversalAdapterEscrowE2E is Test {
         asset.mint(address(adapter), 1000e6);
 
         // Deallocate
-        bytes memory deallocData = abi.encode(LENDING_STRATEGY, 1000e6, withdrawCalls);
+        bytes memory deallocData = abi.encode(LENDING_STRATEGY, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));

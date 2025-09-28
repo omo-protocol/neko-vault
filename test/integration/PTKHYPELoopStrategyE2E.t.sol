@@ -498,7 +498,6 @@ contract PTKHYPELoopStrategyE2ETest is Test {
 
         bytes memory deallocData = abi.encode(
             PT_KHYPE_LOOP_ID,
-            ALLOCATION_AMOUNT,
             new IUniversalAdapterEscrow.Call[](0)
         );
 
