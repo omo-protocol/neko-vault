@@ -65,7 +65,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         _;
     }
 
-    modifier onlyStrategyAgent(bytes32 strategyId) {
+    modifier onlyStrategyAgentOrOwner(bytes32 strategyId) {
         StrategyConfig memory strategy = strategies[strategyId];
         if (!strategy.active) revert StrategyNotActive();
         if (msg.sender != strategy.agent && msg.sender != owner) revert NotAuthorized();
@@ -254,13 +254,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function executeStrategy(
         bytes32 strategyId,
         Call[] calldata calls
-    ) external onlyStrategyAgent(strategyId) notPaused {
+    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         _executeMulticall(strategyId, calls);
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
     /// @inheritdoc IUniversalAdapterEscrow
-    function executePreConfigured(bytes32 strategyId) external onlyStrategyAgent(strategyId) notPaused {
+    function executePreConfigured(bytes32 strategyId) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         StrategyConfig memory strategy = strategies[strategyId];
         if (strategy.preConfiguredData.length == 0) revert InvalidData();
 
