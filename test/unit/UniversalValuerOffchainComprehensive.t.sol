@@ -661,6 +661,103 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         vm.stopPrank();
     }
+
+    /**
+     * @notice Test M-05 fix: Pending signer deactivation should exclude signers from verification
+     */
+    function testPendingSignerDeactivationExcluded() public {
+        // Setup initial signer
+        uint256 signerKey = 0x1234;
+        address testSigner = vm.addr(signerKey);
+
+        vm.prank(owner);
+        valuer.initiateSignerChange(testSigner, true, 100);
+
+        // Set required weight to 100 (so we need testSigner's signature)
+        vm.prank(owner);
+        valuer.setRequiredWeight(100);
+
+        // Configure strategy
+        vm.prank(owner);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            5 minutes,    // minUpdateInterval
+            24 hours,     // maxStaleness
+            1000,         // pushThreshold (10%)
+            95            // minConfidence
+        );
+
+        // Create a valid signature for value update
+        uint256 value = 1000e18;
+        uint256 confidence = 95;
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 30 minutes;
+
+        bytes32 messageHash = keccak256(abi.encode(
+            STRATEGY_A,
+            value,
+            confidence,
+            nonce,
+            expiry,
+            block.chainid,
+            address(valuer)
+        ));
+
+        bytes32 ethSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            messageHash
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = abi.encodePacked(r, s, v);
+
+        // First: Update should succeed with active signer
+        valuer.updateValue(STRATEGY_A, value, confidence, nonce, expiry, signatures);
+        assertEq(valuer.getValue(STRATEGY_A), value, "Initial update should succeed");
+
+        // Now initiate signer removal (sets pending deactivation)
+        vm.prank(owner);
+        valuer.initiateSignerChange(testSigner, false, 0);
+
+        // Check that signer is still authorized but has pending deactivation
+        assertTrue(valuer.isAuthorizedSigner(testSigner), "Signer should still be authorized");
+        assertTrue(valuer.signerChangeTimestamp(testSigner) > block.timestamp, "Should have future deactivation timestamp");
+
+        // Advance time to bypass minimum update interval
+        vm.warp(block.timestamp + 6 minutes);
+
+        // Try to update with pending deactivated signer - should fail
+        // Use a small price change to avoid price bounds validation
+        uint256 newValue = 1001e18; // Only 0.1% change
+        uint256 newNonce = 2;
+        uint256 newExpiry = block.timestamp + 30 minutes;
+
+        bytes32 newMessageHash = keccak256(abi.encode(
+            STRATEGY_A,
+            newValue,
+            confidence,
+            newNonce,
+            newExpiry,
+            block.chainid,
+            address(valuer)
+        ));
+
+        bytes32 newEthSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            newMessageHash
+        ));
+
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(signerKey, newEthSignedHash);
+        signatures[0] = abi.encodePacked(r2, s2, v2);
+
+        // This should fail because signer has pending deactivation
+        vm.expectRevert(IUniversalValuerOffchain.InsufficientSignatures.selector);
+        valuer.updateValue(STRATEGY_A, newValue, confidence, newNonce, newExpiry, signatures);
+
+        // Verify the value wasn't updated
+        assertEq(valuer.getValue(STRATEGY_A), value, "Value should not be updated with pending deactivated signer");
+    }
 }
 
 contract SimpleMockAdapter {
