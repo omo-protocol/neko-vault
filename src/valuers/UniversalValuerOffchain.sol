@@ -146,9 +146,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @inheritdoc IUniversalValuerOffchain
     function getValue(bytes32 strategyId) external view override returns (uint256) {
         ValueReport memory report = latestReports[strategyId];
+        UpdateConfig memory config = updateConfigs[strategyId];
+
+        // L-08 FIX: Use strategy-specific maxStaleness instead of global MAX_STALENESS
+        uint256 maxStaleness = config.maxStaleness > 0 ? config.maxStaleness : MAX_STALENESS;
 
         // Check staleness
-        if (block.timestamp > report.timestamp + MAX_STALENESS) {
+        if (block.timestamp > report.timestamp + maxStaleness) {
             // Use fallback value if available
             if (fallbackValues[strategyId] > 0) {
                 return fallbackValues[strategyId];
@@ -156,8 +160,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             revert ValueTooStale();
         }
 
+        // L-08 FIX: Use strategy-specific minConfidence instead of global defaultConfidenceThreshold
+        uint256 minConfidence = config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
+
         // Check confidence threshold
-        if (report.confidence < defaultConfidenceThreshold) {
+        if (report.confidence < minConfidence) {
             revert LowConfidence();
         }
 
@@ -175,6 +182,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         for (uint256 i = 0; i < strategies.length; i++) {
             bytes32 strategyId = strategies[i];
             ValueReport memory report = latestReports[strategyId];
+            UpdateConfig memory config = updateConfigs[strategyId];
+
+            // L-08 FIX: Use strategy-specific config values instead of global constants
+            uint256 maxStaleness = config.maxStaleness > 0 ? config.maxStaleness : MAX_STALENESS;
+            uint256 minConfidence = config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
 
             // CRITICAL FIX: Always include a value for each strategy to prevent value manipulation
             // Priority: 1. Fresh value with sufficient confidence
@@ -182,8 +194,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             //          3. Fallback value (emergency backup)
             //          4. Last known value regardless of staleness
 
-            if (block.timestamp <= report.timestamp + MAX_STALENESS &&
-                report.confidence >= defaultConfidenceThreshold) {
+            if (block.timestamp <= report.timestamp + maxStaleness &&
+                report.confidence >= minConfidence) {
                 // Use fresh, high-confidence value
                 totalValue += report.value;
             } else if (fallbackValues[strategyId] > 0) {

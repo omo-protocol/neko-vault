@@ -1393,7 +1393,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
-    function testDefaultConfidenceThresholdAffectsGetValue() public {
+    function testL08StrategySpecificConfigTakesPrecedenceInGetValue() public {
         vm.startPrank(owner);
 
         // Set a higher confidence threshold
@@ -1452,9 +1452,45 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.prank(owner);
         valuer.setDefaultConfidenceThreshold(97);
 
-        // getValue should revert because of global threshold
+        // L-08 FIX: getValue should succeed because it uses strategy-specific minConfidence (95),
+        // not global defaultConfidenceThreshold (97). Strategy config takes precedence.
+        uint256 value = valuer.getValue(STRATEGY_A);
+        assertEq(value, 1100e18);
+    }
+
+    function testL08FallbackToGlobalDefaultsWhenNoConfigSet() public {
+        // L-08 FIX: Test that getValue() falls back to global defaults when no strategy config is set
+        // Use a fresh strategy ID that hasn't been configured in setUp()
+        bytes32 UNCONFIGURED_STRATEGY = keccak256("UNCONFIGURED_STRATEGY");
+
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(90);
+        vm.stopPrank();
+
+        // Add a value without configuring strategy (config will have 0 values)
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(UNCONFIGURED_STRATEGY, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(UNCONFIGURED_STRATEGY, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // getValue() should succeed because confidence (95) >= defaultConfidenceThreshold (90)
+        uint256 value = valuer.getValue(UNCONFIGURED_STRATEGY);
+        assertEq(value, 1000e18);
+
+        // Raise global threshold above confidence
+        vm.prank(owner);
+        valuer.setDefaultConfidenceThreshold(96);
+
+        // Check what the current config values are for debugging
+        (uint256 minUpdateInterval, uint256 maxStaleness, uint256 pushThreshold, uint256 minConfidence) =
+            valuer.updateConfigs(UNCONFIGURED_STRATEGY);
+
+        // Verify that strategy is not configured (config should be all zeros)
+        assertEq(minConfidence, 0);
+        assertEq(valuer.defaultConfidenceThreshold(), 96);
+
+        // getValue() should now revert because confidence (95) < defaultConfidenceThreshold (96)
         vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
-        valuer.getValue(STRATEGY_A);
+        valuer.getValue(UNCONFIGURED_STRATEGY);
     }
 
     // L-05 FIX: Test cases for configureStrategy input validation
