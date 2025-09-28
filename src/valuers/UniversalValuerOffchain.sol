@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {IUniversalValuerOffchain} from "../adapters/interfaces/IUniversalValuerOffchain.sol";
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title UniversalValuerOffchain
 /// @notice Off-chain valuation system with signed oracle reports and hybrid push/pull model
@@ -545,27 +546,24 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         return totalWeight;
     }
 
-    /// @dev Recover signer from signature
+    /// @dev Recover signer from signature using OpenZeppelin's battle-tested ECDSA library
+    /// @param hash The hash that was signed (already prefixed with Ethereum message format)
+    /// @param signature The signature bytes
+    /// @return The recovered signer address
     function _recoverSigner(bytes32 hash, bytes memory signature) internal pure returns (address) {
+        // L-11 FIX: Use OpenZeppelin's ECDSA.recover for safer signature validation
+        // This handles malleability and edge cases better than custom ecrecover implementation
+
+        // Basic signature length validation to maintain existing behavior
         if (signature.length != 65) revert InvalidSignature();
 
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
+        // OpenZeppelin's ECDSA.recover handles most edge cases internally
+        // and returns address(0) for invalid signatures instead of reverting
+        address signer = ECDSA.recover(hash, signature);
 
-        assembly {
-            r := mload(add(signature, 0x20))
-            s := mload(add(signature, 0x40))
-            v := byte(0, mload(add(signature, 0x60)))
-        }
+        if (signer == address(0)) revert InvalidSignature();
 
-        if (v < 27) {
-            v += 27;
-        }
-
-        if (v != 27 && v != 28) revert InvalidSignature();
-
-        return ecrecover(hash, v, r, s);
+        return signer;
     }
 
     /// @dev Calculate percentage change
