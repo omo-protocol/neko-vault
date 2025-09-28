@@ -147,19 +147,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             abi.decode(data, (bytes32, Call[]));
 
         // Validate allocation exists
-        uint256 currentAllocation = allocations[strategyId];
-        if (currentAllocation == 0) revert InvalidStrategy();
+        if (allocations[strategyId] == 0) revert InvalidStrategy();
 
-        // Use assets parameter directly, capped by current allocation
-        uint256 actualAmount = assets > currentAllocation ? currentAllocation : assets;
+        // Get current value including yield from valuer
+        uint256 currentValue = _getStrategyValue(strategyId);
+
+        // Use assets parameter directly, capped by current value (including yield)
+        uint256 actualAmount = assets > currentValue ? currentValue : assets;
 
         // Execute withdrawal calls if provided (to withdraw from protocol)
         if (withdrawCalls.length > 0) {
             _executeMulticall(strategyId, withdrawCalls);
         }
 
-        // Update allocation
-        allocations[strategyId] -= actualAmount;
+        // Update allocation - handle case where actualAmount exceeds tracked allocation
+        uint256 allocationDecrease = actualAmount > allocations[strategyId]
+            ? allocations[strategyId]
+            : actualAmount;
+        allocations[strategyId] -= allocationDecrease;
 
         // Remove from active strategies if fully deallocated
         if (allocations[strategyId] == 0) {
@@ -419,6 +424,27 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function _removeFromActiveStrategies(bytes32 strategyId) internal {
         // O(1) operation with EnumerableSet
         activeStrategies.remove(strategyId);
+    }
+
+    /// @notice Get strategy value including yield from valuer
+    /// @param strategyId The strategy identifier
+    /// @return value The strategy value including any yield
+    function _getStrategyValue(bytes32 strategyId) internal view returns (uint256 value) {
+        // Try to get value from valuer, fallback to allocation if valuer call fails
+        (bool success, bytes memory data) = valuer.staticcall(
+            abi.encodeWithSignature("getValue(bytes32)", strategyId)
+        );
+
+        if (success && data.length >= 32) {
+            value = abi.decode(data, (uint256));
+            // If valuer returns 0, use allocation as fallback
+            if (value == 0) {
+                value = allocations[strategyId];
+            }
+        } else {
+            // Fallback to allocation if valuer call fails
+            value = allocations[strategyId];
+        }
     }
 
     /// @notice Receive ETH

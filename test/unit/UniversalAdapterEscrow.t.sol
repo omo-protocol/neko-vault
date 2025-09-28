@@ -266,6 +266,34 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(active.length, 0);
     }
 
+    function testDeallocateWithYield() public {
+        // Setup: allocate first
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Simulate yield by setting higher value in valuer (150e6 vs 100e6 allocated)
+        valuer.setValue(STRATEGY_1, 150e6);
+
+        // Transfer extra assets to adapter to cover yield withdrawal
+        asset.mint(address(adapter), 50e6);
+
+        // Deallocate with yield - should be able to withdraw 120e6 even though only 100e6 was allocated
+        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 120e6, bytes4(0), address(0));
+
+        assertEq(ids[0], STRATEGY_1);
+        assertEq(change, -int256(120e6), "Should be able to withdraw yield");
+        assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after withdrawing more than allocated");
+    }
+
     /* WHITELIST TESTS */
 
     function testUpdateWhitelist() public {
