@@ -72,10 +72,10 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         valuer.setRequiredWeight(100);
 
-        // Configure strategies
-        valuer.configureStrategy(STRATEGY_A, 1 hours, 24 hours, 500, 95);
-        valuer.configureStrategy(STRATEGY_B, 1 hours, 24 hours, 500, 95);
-        valuer.configureStrategy(STRATEGY_C, 1 hours, 24 hours, 500, 85);
+        // Configure strategies (L-05 FIX: Use parameters that meet validation requirements)
+        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 95);
+        valuer.configureStrategy(STRATEGY_B, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 95);
+        valuer.configureStrategy(STRATEGY_C, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 95);
         vm.stopPrank();
     }
 
@@ -340,16 +340,17 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.startPrank(owner);
 
         vm.expectEmit(true, true, true, true);
-        emit StrategyConfigured(newStrategy, 2 hours, 48 hours, 1000);
+        emit StrategyConfigured(newStrategy, 2 hours, 24 hours, 1000);
 
-        valuer.configureStrategy(newStrategy, 2 hours, 48 hours, 1000, 90);
+        // L-05 FIX: Use valid parameters that meet validation requirements
+        valuer.configureStrategy(newStrategy, 2 hours, 24 hours, 1000, 95);
 
         // Check the configuration was set (public mapping returns tuple)
         (uint256 minInterval, uint256 maxStale, uint256 threshold, uint256 minConf) = valuer.updateConfigs(newStrategy);
         assertEq(minInterval, 2 hours);
-        assertEq(maxStale, 48 hours);
+        assertEq(maxStale, 24 hours);
         assertEq(threshold, 1000);
-        assertEq(minConf, 90);
+        assertEq(minConf, 95);
 
         vm.stopPrank();
     }
@@ -504,8 +505,11 @@ contract UniversalValuerOffchainComprehensive is Test {
     }
 
     function testGetTotalValueLowConfidence() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(40);
+
         // Configure strategy to accept low confidence updates for this test
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -513,6 +517,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             1000,
             50  // Allow 50% confidence for this test
         );
+        vm.stopPrank();
 
         // Create a simple mock adapter that returns STRATEGY_A as active
         SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
@@ -773,8 +778,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test M-06 fix: Confidence check should reject updates with insufficient confidence
      */
     function testLowConfidenceRejected() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Configure strategy with minimum confidence requirement
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,    // minUpdateInterval
@@ -782,6 +790,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             1000,         // pushThreshold (10%)
             90            // minConfidence - require at least 90% confidence
         );
+        vm.stopPrank();
 
         // Create a valid signature for value update with low confidence
         uint256 value = 1000e18;
@@ -843,8 +852,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test M-06 fix for batch updates: Should reject batch updates with insufficient confidence
      */
     function testBatchUpdateLowConfidenceRejected() public {
-        // Configure strategies with minimum confidence requirements
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
         vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
+        // Configure strategies with minimum confidence requirements
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,    // minUpdateInterval
@@ -914,12 +926,14 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test M-08 fix: configureStrategy should reject when pushThreshold > maxPriceChangeBps
      */
     function testPushThresholdExceedsMaxChangeBounds() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // First set a price change bound
-        vm.prank(owner);
         valuer.setPriceChangeBounds(STRATEGY_A, 2000); // 20% max change
 
         // Try to configure strategy with pushThreshold > maxPriceChangeBps
-        vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(
             IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
             3000, // pushThreshold
@@ -932,6 +946,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             3000, // 30% pushThreshold > 20% maxChange
             90
         );
+        vm.stopPrank();
 
         // Should work when pushThreshold <= maxPriceChangeBps
         vm.prank(owner);
@@ -948,8 +963,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test M-08 fix: setPriceChangeBounds should reject when bounds conflict with existing pushThreshold
      */
     function testPriceChangeBoundsConflictWithPushThreshold() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // First configure strategy with pushThreshold
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -957,6 +975,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             3000, // 30% pushThreshold
             90
         );
+        vm.stopPrank();
 
         // Try to set price bounds lower than existing pushThreshold
         vm.prank(owner);
@@ -976,20 +995,21 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test M-08 fix: pushThreshold validation with default MAX_PRICE_CHANGE_BPS
      */
     function testPushThresholdWithDefaultMaxChange() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Try to configure strategy with pushThreshold > default MAX_PRICE_CHANGE_BPS (50%)
-        vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(
-            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
-            6000, // pushThreshold
-            5000  // default MAX_PRICE_CHANGE_BPS
-        ));
+        // L-05 FIX: This will now trigger InvalidPriceChangeBounds before PushThresholdExceedsMaxChange
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
             24 hours,
-            6000, // 60% pushThreshold > 50% default
+            6000, // 60% pushThreshold > 50% default MAX_PRICE_CHANGE_BPS
             90
         );
+        vm.stopPrank();
 
         // Should work when pushThreshold <= default MAX_PRICE_CHANGE_BPS
         vm.prank(owner);
@@ -1006,8 +1026,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test L-01 fix: Verify price bounds validation works with optimized calculation
      */
     function testOptimizedPriceBoundsValidation() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Configure strategy with price bounds
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -1015,6 +1038,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             3000, // 30% pushThreshold
             90
         );
+        vm.stopPrank();
 
         vm.prank(owner);
         valuer.setPriceChangeBounds(STRATEGY_A, 4000); // 40% max change
@@ -1046,8 +1070,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test L-02 fix: Verify batchUpdateValues includes all missing validation checks
      */
     function testBatchUpdateValuesValidationChecks() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Configure strategies with different parameters
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,  // minUpdateInterval
@@ -1056,7 +1083,6 @@ contract UniversalValuerOffchainComprehensive is Test {
             90          // minConfidence
         );
 
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_B,
             10 minutes, // different minUpdateInterval
@@ -1066,10 +1092,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         );
 
         // Set price bounds
-        vm.prank(owner);
         valuer.setPriceChangeBounds(STRATEGY_A, 5000); // 50% max change
-        vm.prank(owner);
         valuer.setPriceChangeBounds(STRATEGY_B, 4000); // 40% max change
+        vm.stopPrank();
 
         // Initial batch update to establish baseline
         bytes32[] memory strategyIds = new bytes32[](2);
@@ -1150,8 +1175,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test L-02 fix: Verify price bounds validation in batch updates
      */
     function testBatchUpdatePriceBoundsValidation() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Configure strategy
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -1160,8 +1188,8 @@ contract UniversalValuerOffchainComprehensive is Test {
             90
         );
 
-        vm.prank(owner);
         valuer.setPriceChangeBounds(STRATEGY_A, 3000); // 30% max change
+        vm.stopPrank();
 
         // Initial update
         bytes32[] memory strategyIds = new bytes32[](1);
@@ -1235,8 +1263,11 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test L-02 fix: Verify mixed validation scenarios in batch
      */
     function testBatchUpdateMixedValidationScenarios() public {
+        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        vm.startPrank(owner);
+        valuer.setDefaultConfidenceThreshold(80);
+
         // Configure strategies differently
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -1245,7 +1276,6 @@ contract UniversalValuerOffchainComprehensive is Test {
             90
         );
 
-        vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_B,
             5 minutes,
@@ -1253,6 +1283,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             1000, // 10% pushThreshold
             90
         );
+        vm.stopPrank();
 
         // Initial updates
         bytes32[] memory strategyIds = new bytes32[](2);
@@ -1357,19 +1388,19 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Set a higher confidence threshold
         valuer.setDefaultConfidenceThreshold(98);
 
-        // Configure strategy with lower confidence requirement
-        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 100, 90);
+        // Configure strategy with confidence requirement equal to global
+        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 100, 98);
 
         vm.stopPrank();
 
-        // Update with confidence that meets strategy requirement but not global
+        // Update with confidence that meets strategy requirement and global
         uint256 nonce = 1;
         uint256 expiry = block.timestamp + 30 minutes;
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _signValue(
             STRATEGY_A,
             1000e18,
-            96, // Higher than strategy requirement (90) but lower than global (98)
+            98, // Meets both strategy requirement (98) and global (98)
             nonce,
             expiry,
             signer1Key
@@ -1378,13 +1409,167 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.startPrank(signer1);
 
         // updateValue should succeed (only checks strategy-specific minConfidence)
-        valuer.updateValue(STRATEGY_A, 1000e18, 96, nonce, expiry, signatures);
+        valuer.updateValue(STRATEGY_A, 1000e18, 98, nonce, expiry, signatures);
 
         vm.stopPrank();
 
-        // But getValue should revert because of global threshold
+        // Now lower the global threshold to allow lower confidence strategies
+        vm.prank(owner);
+        valuer.setDefaultConfidenceThreshold(90);
+
+        // Reconfigure strategy with lower confidence to test the difference
+        vm.prank(owner);
+        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 100, 95);
+
+        // Update with confidence that meets strategy (95%) but will be below global when we raise it
+        uint256 nonce2 = 2;
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(
+            STRATEGY_A,
+            1100e18,
+            96, // Meets strategy requirement (95%)
+            nonce2,
+            expiry,
+            signer1Key
+        );
+
+        vm.startPrank(signer1);
+        valuer.updateValue(STRATEGY_A, 1100e18, 96, nonce2, expiry, signatures2);
+        vm.stopPrank();
+
+        // Now raise the global threshold above the stored value
+        vm.prank(owner);
+        valuer.setDefaultConfidenceThreshold(97);
+
+        // getValue should revert because of global threshold
         vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
         valuer.getValue(STRATEGY_A);
+    }
+
+    // L-05 FIX: Test cases for configureStrategy input validation
+    function testConfigureStrategyValidInputs() public {
+        vm.startPrank(owner);
+
+        // Valid configuration should succeed
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL, // Exactly minimum
+            MAX_STALENESS,       // Exactly maximum
+            1000,               // 10% push threshold
+            95                  // Valid confidence
+        );
+
+        // Verify the configuration was set
+        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) =
+            valuer.updateConfigs(STRATEGY_A);
+        assertEq(minInterval, MIN_UPDATE_INTERVAL, "Should set minUpdateInterval");
+        assertEq(maxStale, MAX_STALENESS, "Should set maxStaleness");
+        assertEq(pushThresh, 1000, "Should set pushThreshold");
+        assertEq(minConf, 95, "Should set minConfidence");
+
+        vm.stopPrank();
+    }
+
+    function testConfigureStrategyInvalidMinUpdateInterval() public {
+        vm.startPrank(owner);
+
+        // Should revert for interval below minimum
+        vm.expectRevert(IUniversalValuerOffchain.UpdateTooFrequent.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL - 1, // Below minimum
+            MAX_STALENESS,
+            1000,
+            95
+        );
+
+        vm.stopPrank();
+    }
+
+    function testConfigureStrategyInvalidMaxStaleness() public {
+        vm.startPrank(owner);
+
+        // Should revert for staleness above maximum
+        vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS + 1, // Above maximum
+            1000,
+            95
+        );
+
+        vm.stopPrank();
+    }
+
+    function testConfigureStrategyInvalidPushThreshold() public {
+        vm.startPrank(owner);
+
+        // Should revert for pushThreshold above MAX_PRICE_CHANGE_BPS
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            5001, // Above 50% (5000 basis points)
+            95
+        );
+
+        vm.stopPrank();
+    }
+
+    function testConfigureStrategyInvalidMinConfidence() public {
+        vm.startPrank(owner);
+
+        // Should revert for confidence below defaultConfidenceThreshold
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            1000,
+            94 // Below default threshold of 95
+        );
+
+        // Should revert for confidence above 100
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            1000,
+            101 // Above 100%
+        );
+
+        vm.stopPrank();
+    }
+
+    function testConfigureStrategyWithCustomConfidenceThreshold() public {
+        vm.startPrank(owner);
+
+        // Set a lower confidence threshold first
+        valuer.setDefaultConfidenceThreshold(80);
+
+        // Now should accept confidence at the new threshold
+        valuer.configureStrategy(
+            STRATEGY_A,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            1000,
+            80 // Equal to new threshold
+        );
+
+        // But should still reject below threshold
+        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        valuer.configureStrategy(
+            STRATEGY_B,
+            MIN_UPDATE_INTERVAL,
+            MAX_STALENESS,
+            1000,
+            79 // Below new threshold
+        );
+
+        vm.stopPrank();
     }
 
     event DefaultConfidenceThresholdUpdated(uint256 newThreshold);

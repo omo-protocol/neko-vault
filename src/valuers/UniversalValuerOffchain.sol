@@ -327,6 +327,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 pushThreshold,
         uint256 minConfidence
     ) external onlyOwner {
+        // L-05 FIX: Validate input parameters to prevent dangerous configurations
+        if (minUpdateInterval < MIN_UPDATE_INTERVAL) revert UpdateTooFrequent();
+        if (maxStaleness > MAX_STALENESS) revert ValueTooStale();
+        if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
+        if (minConfidence < defaultConfidenceThreshold || minConfidence > 100) revert LowConfidence();
+
         // M-08 FIX: Ensure pushThreshold doesn't exceed maxPriceChangeBps to prevent stuck strategies
         uint256 maxChange = maxPriceChangeBps[strategyId];
         if (maxChange == 0) {
