@@ -573,4 +573,110 @@ contract UniversalAdapterEscrowTest is Test {
         assertTrue(success);
         assertEq(address(adapter).balance, 1 ether);
     }
+
+    /* L-14 FIX TESTS */
+
+    function testForceDeallocateValidation() public {
+        // Setup strategy and allocation
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Allocate some assets
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Whitelist asset for transfers (required for legitimate operations)
+        vm.prank(owner);
+        adapter.updateWhitelist(address(asset), bytes4(0xa9059cbb), true, 0); // transfer
+
+        // Create legitimate transfer call
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSelector(0xa9059cbb, address(vault), 50e6), // transfer(vault, 50e6)
+            value: 0
+        });
+
+        bytes memory data = abi.encode(STRATEGY_1, calls);
+
+        // Test that normal deallocate works (using regular deallocate selector)
+        vm.prank(address(vault));
+        bytes4 normalDeallocateSelector = 0xda3485c6; // deallocate(address,bytes,uint256)
+        adapter.deallocate(data, 50e6, normalDeallocateSelector, address(this));
+
+        // Re-allocate for next test
+        bytes memory reallocData = abi.encode(STRATEGY_1, 50e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 50e6);
+        asset.transfer(address(adapter), 50e6);
+        vm.prank(address(vault));
+        adapter.allocate(reallocData, 50e6, bytes4(0), address(0));
+
+        // Test that forceDeallocate with whitelisted operations works
+        vm.prank(address(vault));
+        bytes4 forceDeallocateSelector = 0x47def04c; // forceDeallocate(address,bytes,uint256,address)
+        adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+    }
+
+    function testForceDeallocateRejectsETHTransfers() public {
+        // Setup strategy and allocation
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Whitelist the transfer function first so we reach the ETH transfer check
+        vm.prank(owner);
+        adapter.updateWhitelist(address(asset), bytes4(0xa9059cbb), true, 0); // transfer
+
+        // Create call with ETH transfer (should be rejected for forceDeallocate)
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSelector(0xa9059cbb, address(vault), 50e6),
+            value: 1 ether // ETH transfer
+        });
+
+        bytes memory data = abi.encode(STRATEGY_1, calls);
+        bytes4 forceDeallocateSelector = 0x47def04c;
+
+        // Should revert because ETH transfers are not allowed in forceDeallocate
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
+        adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+    }
+
+    function testForceDeallocateRejectsNonWhitelistedFunctions() public {
+        // Setup strategy and allocation
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Create call with non-whitelisted function
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSelector(0x12345678, address(vault), 50e6), // random non-whitelisted function
+            value: 0
+        });
+
+        bytes memory data = abi.encode(STRATEGY_1, calls);
+        bytes4 forceDeallocateSelector = 0x47def04c;
+
+        // Should revert because function is not whitelisted
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.FunctionNotWhitelisted.selector);
+        adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+    }
 }

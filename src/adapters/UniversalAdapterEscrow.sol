@@ -25,6 +25,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant APPROVE_SELECTOR = 0x095ea7b3;  // approve(address,uint256)
     bytes4 private constant TRANSFER_FROM_SELECTOR = 0x23b872dd; // transferFrom(address,address,uint256)
 
+    // Vault function selectors for call validation
+    bytes4 private constant DEALLOCATE_SELECTOR = 0xda3485c6; // deallocate(address,bytes,uint256)
+    bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0x47def04c; // forceDeallocate(address,bytes,uint256,address)
+
     /* IMMUTABLES */
 
     address public immutable parentVault;
@@ -138,7 +142,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function deallocate(
         bytes memory data,
         uint256 assets,
-        bytes4,
+        bytes4 caller,
         address
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
@@ -149,6 +153,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Validate allocation exists
         if (allocations[strategyId] == 0) revert InvalidStrategy();
+
+        // L-14 Fix: Restrict operations for forceDeallocate calls
+        if (caller == FORCE_DEALLOCATE_SELECTOR) {
+            // For forceDeallocate, only allow safe token transfer operations
+            _validateForceDeallocateCalls(withdrawCalls);
+        }
 
         // Get current value including yield from valuer
         uint256 currentValue = _getStrategyValue(strategyId);
@@ -445,6 +455,50 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         } else {
             // Fallback to allocation if valuer call fails
             value = allocations[strategyId];
+        }
+    }
+
+    /// @notice Validate calls for forceDeallocate to prevent malicious operations
+    /// @param calls Array of calls to validate
+    function _validateForceDeallocateCalls(Call[] memory calls) internal view {
+        for (uint256 i = 0; i < calls.length; i++) {
+            Call memory call = calls[i];
+            bytes4 selector = bytes4(call.data);
+
+            // Only allow safe token transfer operations for forceDeallocate
+            // This prevents malicious operations while allowing legitimate withdrawals
+            if (selector == TRANSFER_SELECTOR || selector == TRANSFER_FROM_SELECTOR) {
+                // For token transfers, ensure the target is a known token (asset or whitelisted)
+                WhitelistConfig memory config = functionWhitelist[call.target][selector];
+                if (!config.allowed) {
+                    // Check if all functions are whitelisted for this target
+                    config = functionWhitelist[call.target][bytes4(0)];
+                    if (!config.allowed) {
+                        revert FunctionNotWhitelisted();
+                    }
+                }
+            } else if (selector == APPROVE_SELECTOR) {
+                // Approvals are generally safe but should still be whitelisted
+                WhitelistConfig memory config = functionWhitelist[call.target][selector];
+                if (!config.allowed) {
+                    config = functionWhitelist[call.target][bytes4(0)];
+                    if (!config.allowed) {
+                        revert FunctionNotWhitelisted();
+                    }
+                }
+            } else {
+                // For forceDeallocate, only allow explicitly whitelisted functions
+                // This is more restrictive than normal deallocate
+                WhitelistConfig memory config = functionWhitelist[call.target][selector];
+                if (!config.allowed) {
+                    revert FunctionNotWhitelisted();
+                }
+            }
+
+            // Prevent ETH transfers in forceDeallocate for additional safety
+            if (call.value > 0) {
+                revert InvalidAmount();
+            }
         }
     }
 
