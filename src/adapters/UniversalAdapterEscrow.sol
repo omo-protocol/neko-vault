@@ -161,15 +161,36 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _validateForceDeallocateCalls(withdrawCalls);
         }
 
-        // Get current value including yield from valuer
-        uint256 currentValue = _getStrategyValue(strategyId);
+        // SECURITY FIX: Smart Balance-First Deallocate
+        // Check adapter balance first to avoid unnecessary protocol withdrawals
+        // This ensures profits and idle assets are accessible
+        uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
+        uint256 actualAmount;
 
-        // Use assets parameter directly, capped by current value (including yield)
-        uint256 actualAmount = assets > currentValue ? currentValue : assets;
+        if (assets <= adapterBalance) {
+            // Sufficient balance in adapter - no need for external withdrawal calls
+            // This optimizes gas and allows access to idle assets and accumulated profits
+            actualAmount = assets;
+            // Skip withdrawal calls since we have enough balance
+        } else {
+            // Insufficient balance - need to withdraw from protocol
+            // Get current strategy value including yield
+            uint256 currentValue = _getStrategyValue(strategyId);
 
-        // Execute withdrawal calls if provided (to withdraw from protocol)
-        if (withdrawCalls.length > 0) {
-            _executeMulticall(strategyId, withdrawCalls);
+            // Execute withdrawal calls to pull funds from external protocol
+            if (withdrawCalls.length > 0) {
+                _executeMulticall(strategyId, withdrawCalls);
+            }
+
+            // After withdrawal, check new balance and cap by what's actually available
+            uint256 newBalance = IERC20(asset).balanceOf(address(this));
+            actualAmount = assets > newBalance ? newBalance : assets;
+
+            // Ensure we don't report more than what strategy had
+            // This maintains consistency with strategy tracking
+            if (actualAmount > currentValue) {
+                actualAmount = currentValue;
+            }
         }
 
         // Update allocation - handle case where actualAmount exceeds tracked allocation

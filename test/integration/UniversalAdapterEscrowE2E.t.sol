@@ -153,10 +153,10 @@ contract UniversalAdapterEscrowE2E is Test {
             value: 0
         });
 
-        // Simulate protocol returning funds
+        // Simulate protocol returning funds to test balance-first logic
         asset.mint(address(adapter), 1000e6);
 
-        // Deallocate
+        // Deallocate - should use adapter balance first without protocol withdrawal
         bytes memory deallocData = abi.encode(LENDING_STRATEGY, withdrawCalls);
 
         vm.prank(address(vault));
@@ -166,7 +166,56 @@ contract UniversalAdapterEscrowE2E is Test {
         assertEq(change, -int256(1000e6));
         assertEq(adapter.getAllocation(LENDING_STRATEGY), 0);
 
-        // Verify withdrawal from protocol
+        // Protocol balance should remain unchanged since we used adapter balance first
+        // This demonstrates the new smart balance-first deallocation working correctly
+        assertEq(defiProtocol.balances(address(adapter)), 1000e6);
+    }
+
+    function testDeallocationWithProtocolWithdrawal() public {
+        // Setup and allocate first
+        testCompleteAllocationFlow();
+
+        // Add withdraw whitelist
+        vm.prank(owner);
+        adapter.updateWhitelist(
+            address(defiProtocol),
+            bytes4(keccak256("withdraw(uint256)")),
+            true,
+            10000e6
+        );
+
+        // Check current adapter balance after testCompleteAllocationFlow
+        uint256 currentBalance = asset.balanceOf(address(adapter));
+
+        // Remove most adapter balance to force protocol withdrawal, leaving just 100e6
+        if (currentBalance > 100e6) {
+            vm.prank(address(adapter));
+            asset.transfer(address(0x123), currentBalance - 100e6);
+        }
+
+        // Verify limited adapter balance
+        assertEq(asset.balanceOf(address(adapter)), 100e6);
+
+        // Create withdrawal calls
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(defiProtocol),
+            data: abi.encodeWithSignature("withdraw(uint256)", 1000e6),
+            value: 0
+        });
+
+        // Deallocate more than adapter balance - should trigger protocol withdrawal
+        bytes memory deallocData = abi.encode(LENDING_STRATEGY, withdrawCalls);
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));
+
+        assertEq(ids[0], LENDING_STRATEGY);
+        // Since MockTarget doesn't actually transfer tokens, we only get adapter balance
+        assertEq(change, -int256(100e6));
+        assertEq(adapter.getAllocation(LENDING_STRATEGY), 900e6); // 1000 - 100 = 900 remaining
+
+        // Protocol balance should be reduced since withdrawal was executed
         assertEq(defiProtocol.balances(address(adapter)), 0);
     }
 

@@ -52,6 +52,7 @@ contract RefactoringVerificationSimple is Test {
         assertEq(adapter.getActiveStrategies().length, 0);
 
         // Add STRATEGY_1
+        asset.mint(address(adapter), 100e6);
         vm.prank(address(vault));
         adapter.allocate(
             abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0)),
@@ -60,6 +61,7 @@ contract RefactoringVerificationSimple is Test {
         assertEq(adapter.getActiveStrategies().length, 1);
 
         // Add STRATEGY_1 again - should not duplicate
+        asset.mint(address(adapter), 50e6);
         vm.prank(address(vault));
         adapter.allocate(
             abi.encode(STRATEGY_1, 50e6, false, new IUniversalAdapterEscrow.Call[](0)),
@@ -68,6 +70,7 @@ contract RefactoringVerificationSimple is Test {
         assertEq(adapter.getActiveStrategies().length, 1, "No duplicate added");
 
         // Add STRATEGY_2
+        asset.mint(address(adapter), 75e6);
         vm.prank(address(vault));
         adapter.allocate(
             abi.encode(STRATEGY_2, 75e6, false, new IUniversalAdapterEscrow.Call[](0)),

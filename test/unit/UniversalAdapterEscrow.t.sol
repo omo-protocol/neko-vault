@@ -10,6 +10,7 @@ import {MockFeeOnTransferToken} from "../mocks/MockFeeOnTransferToken.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
+import {IERC20} from "../../src/interfaces/IERC20.sol";
 
 contract UniversalAdapterEscrowTest is Test {
     UniversalAdapterEscrow adapter;
@@ -785,5 +786,182 @@ contract UniversalAdapterEscrowTest is Test {
         // Should be included in realAssets
         uint256 totalAssets = adapter.realAssets();
         assertGe(totalAssets, idleAmount, "Real assets should include idle assets");
+    }
+
+    function testDeallocateSmartBalanceFirst() public {
+        // SECURITY FIX: Test the new smart balance-first deallocate logic
+
+        // Setup: Allocate to a strategy
+        bytes32 strategyId = STRATEGY_1;
+        address strategyAgent = address(0x789);
+
+        vm.prank(owner);
+        adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
+
+        uint256 initialAllocation = 500e6;
+        asset.mint(address(this), initialAllocation);
+        asset.transfer(address(adapter), initialAllocation);
+
+        vm.prank(address(vault));
+        bytes memory allocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocateData, initialAllocation, 0, address(0));
+
+        // Simulate profits by adding extra tokens to adapter
+        uint256 profits = 200e6;
+        asset.mint(address(adapter), profits);
+
+        // Test: Deallocate with balance available in adapter (should NOT execute external calls)
+        uint256 deallocateAmount = 300e6;
+        bytes memory deallocateData = abi.encode(strategyId, new IUniversalAdapterEscrow.Call[](0));
+
+        // Record balance before
+        uint256 balanceBefore = asset.balanceOf(address(adapter));
+        assertEq(balanceBefore, 700e6, "Should have initial allocation + profits");
+
+        // Should use adapter balance without external calls
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(
+            deallocateData,
+            deallocateAmount,
+            bytes4(0),
+            address(0)
+        );
+
+        assertEq(ids[0], strategyId, "Should return correct strategy ID");
+        assertEq(change, -int256(deallocateAmount), "Should report correct change");
+
+        // Verify allocation was reduced correctly
+        uint256 remainingAllocation = adapter.getAllocation(strategyId);
+        assertEq(remainingAllocation, 200e6, "Allocation should be reduced by deallocate amount");
+
+        // Balance stays in adapter until vault pulls it - this is correct behavior
+        uint256 remainingBalance = asset.balanceOf(address(adapter));
+        assertEq(remainingBalance, balanceBefore, "Balance remains until vault pulls assets");
+    }
+
+    function testDeallocateWithProtocolWithdrawal() public {
+        // SECURITY FIX: Test deallocate when adapter balance is insufficient
+
+        // Setup: Allocate to a strategy
+        bytes32 strategyId = STRATEGY_1;
+        address strategyAgent = address(0x789);
+
+        vm.startPrank(owner);
+        adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
+
+        // Create and whitelist a mock protocol for testing
+        MockProtocol mockProtocol = new MockProtocol(address(asset));
+        adapter.updateWhitelist(address(mockProtocol), bytes4(0), true, 0);
+        vm.stopPrank();
+
+        uint256 initialAllocation = 500e6;
+        asset.mint(address(this), initialAllocation);
+        asset.transfer(address(adapter), initialAllocation);
+
+        // Allocate funds
+        vm.prank(address(vault));
+        bytes memory allocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocateData, initialAllocation, 0, address(0));
+
+        // Simulate that funds were invested in protocol
+        // Move most funds from adapter to protocol
+        vm.prank(address(adapter));
+        asset.transfer(address(mockProtocol), 450e6);
+
+        // Adapter now has only 50e6, protocol has 450e6
+        assertEq(asset.balanceOf(address(adapter)), 50e6, "Adapter should have limited balance");
+        assertEq(asset.balanceOf(address(mockProtocol)), 450e6, "Protocol should hold most funds");
+
+        // Test: Request more than adapter balance (200e6 when adapter only has 50e6)
+        uint256 deallocateAmount = 200e6;
+
+        // Create withdrawal call to get funds from protocol
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(mockProtocol),
+            data: abi.encodeWithSignature("withdraw(uint256)", 150e6),
+            value: 0
+        });
+
+        bytes memory deallocateData = abi.encode(strategyId, calls);
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(
+            deallocateData,
+            deallocateAmount,
+            bytes4(0),
+            address(0)
+        );
+
+        assertEq(ids[0], strategyId, "Should return correct strategy ID");
+        assertEq(change, -int256(deallocateAmount), "Should report correct change");
+
+        // Verify funds were pulled from protocol
+        assertEq(asset.balanceOf(address(mockProtocol)), 300e6, "Protocol should have 150e6 less");
+        assertEq(asset.balanceOf(address(adapter)), 200e6, "Adapter should have received funds");
+    }
+
+    function testDeallocateProfitsAccessible() public {
+        // SECURITY FIX: Test that profits are fully accessible via deallocate
+
+        // Setup strategy
+        bytes32 strategyId = STRATEGY_1;
+        address strategyAgent = address(0x789);
+
+        vm.prank(owner);
+        adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
+
+        uint256 initialAllocation = 500e6;
+        asset.mint(address(this), initialAllocation);
+        asset.transfer(address(adapter), initialAllocation);
+
+        // Allocate
+        vm.prank(address(vault));
+        bytes memory allocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocateData, initialAllocation, 0, address(0));
+
+        // Simulate 40% profit generated by strategy
+        uint256 profits = 200e6;
+        asset.mint(address(adapter), profits);
+
+        // Balance should now be initial + profits
+        assertEq(asset.balanceOf(address(adapter)), initialAllocation + profits, "Should have allocation + profits");
+
+        // Test: Can deallocate full amount including profits without external calls
+        uint256 deallocateWithProfits = initialAllocation + 100e6; // Take initial + half of profits
+        bytes memory deallocateData = abi.encode(strategyId, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(
+            deallocateData,
+            deallocateWithProfits,
+            bytes4(0),
+            address(0)
+        );
+
+        assertEq(ids[0], strategyId, "Should return correct strategy ID");
+        assertEq(change, -int256(deallocateWithProfits), "Should be able to withdraw with profits");
+
+        // Balance stays in adapter until vault pulls it
+        // The key is that deallocate correctly reported the full amount including profits
+        uint256 remainingBalance = asset.balanceOf(address(adapter));
+        assertEq(remainingBalance, 700e6, "Balance remains until vault pulls it");
+
+        // Verify allocation was fully depleted since we took more than initial
+        uint256 remainingAllocation = adapter.getAllocation(strategyId);
+        assertEq(remainingAllocation, 0, "Allocation should be zero after withdrawing more than initial");
+    }
+}
+
+// Mock protocol for testing withdrawals
+contract MockProtocol {
+    address public immutable asset;
+
+    constructor(address _asset) {
+        asset = _asset;
+    }
+
+    function withdraw(uint256 amount) external {
+        IERC20(asset).transfer(msg.sender, amount);
     }
 }
