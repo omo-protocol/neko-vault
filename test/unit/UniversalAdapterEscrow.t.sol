@@ -755,6 +755,98 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(adapter.getAllocation(STRATEGY_1), 50e6); // Reduced from 100e6 to 50e6
     }
 
+    /**
+     * @notice Tests using vault.forceDeallocate() directly as requested by auditor
+     */
+    function testVaultForceDeallocateWithSufficientBalance() public {
+        // Setup: Create vault and add adapter
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Allocate assets
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Force deallocate through vault (not direct adapter call)
+        bytes memory data = abi.encode(STRATEGY_1); // Only strategyId needed for forceDeallocate
+
+        // Mock vault balance for penalty calculation
+        asset.mint(address(vault), 200e6);
+
+        vm.prank(address(this)); // Caller of forceDeallocate
+        uint256 penaltyShares = vault.forceDeallocate(address(adapter), data, 50e6, address(this));
+
+        // Verify allocation was reduced
+        assertEq(adapter.getAllocation(STRATEGY_1), 50e6);
+        // Verify penalty was applied (penalty should be > 0)
+        assertGt(penaltyShares, 0);
+    }
+
+    function testVaultForceDeallocateInsufficientBalance() public {
+        // Setup: Create vault and add adapter with limited balance
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Allocate only 50e6 assets
+        bytes memory allocData = abi.encode(STRATEGY_1, 50e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 50e6);
+        asset.transfer(address(adapter), 50e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 50e6, bytes4(0), address(0));
+
+        // Try to force deallocate more than available (should fail)
+        bytes memory data = abi.encode(STRATEGY_1); // Only strategyId needed for forceDeallocate
+
+        // Mock vault balance for penalty calculation
+        asset.mint(address(vault), 200e6);
+
+        vm.prank(address(this)); // Caller of forceDeallocate
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
+        vault.forceDeallocate(address(adapter), data, 100e6, address(this));
+    }
+
+    function testVaultForceDeallocateIgnoresMaliciousCallData() public {
+        // Setup: Create vault and add adapter
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Allocate assets
+        bytes memory allocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Create malicious call data that would transfer all funds
+        IUniversalAdapterEscrow.Call[] memory maliciousCalls = new IUniversalAdapterEscrow.Call[](1);
+        maliciousCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSelector(asset.transfer.selector, address(this), 100e6),
+            value: 0
+        });
+
+        // Include malicious calls in data (they should be ignored)
+        bytes memory data = abi.encode(STRATEGY_1, maliciousCalls);
+        uint256 balanceBefore = asset.balanceOf(address(this));
+
+        // Mock vault balance for penalty calculation
+        asset.mint(address(vault), 200e6);
+
+        vm.prank(address(this)); // Caller of forceDeallocate
+        uint256 penaltyShares = vault.forceDeallocate(address(adapter), data, 50e6, address(this));
+
+        // Verify malicious calls were ignored (balance unchanged except for expected transfers)
+        uint256 balanceAfter = asset.balanceOf(address(this));
+        assertEq(balanceAfter, balanceBefore); // No unexpected transfers occurred
+
+        // Verify normal deallocate behavior worked
+        assertEq(adapter.getAllocation(STRATEGY_1), 50e6);
+        assertGt(penaltyShares, 0);
+    }
+
     /* L-16 FIX TESTS */
 
     function testL16DailyLimitLogicRemoved() public {
