@@ -496,7 +496,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             if (alreadyUsed) continue;
 
             // Check if signer is authorized and not pending deactivation
-            // If pendingSignerRemoval[signer] is true, signer should be excluded immediately
+            // If pendingSignerRemoval[signer] is true, signer should be excluded after his removal delay passes
             if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
