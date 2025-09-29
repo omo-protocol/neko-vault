@@ -506,38 +506,31 @@ contract UniversalAdapterEscrowTest is Test {
         adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
     }
 
-    function testPerCallLimitStillEnforced() public {
-        // L-16 Fix: Daily limits removed, but per-call limits still work
+    function testLimitsCompletelyRemoved() public {
+        // L-16 Fix: All limit checking removed - only whitelist-based access control remains
         vm.startPrank(owner);
-        adapter.setStrategy(STRATEGY_1, agent, "", 10e6); // Daily limit ignored
-        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 5e6); // Per-call limit of 5 USDC
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6); // Daily limit value is ignored
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 5e6); // Per-call limit value is ignored
         vm.stopPrank();
 
         asset.mint(address(adapter), 100e6);
 
-        // Transfer within per-call limit - should succeed
+        // Large transfer that would have exceeded old per-call limit - should succeed now
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(asset),
-            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 5e6),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 50e6), // Much larger than old 5e6 limit
             value: 0
         });
 
         vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed - no limit checking
 
-        // Transfer exceeding per-call limit - should fail
-        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 6e6);
-
-        vm.prank(agent);
-        vm.expectRevert(IUniversalAdapterEscrow.CallLimitExceeded.selector);
-        adapter.executeStrategy(STRATEGY_1, calls);
-
-        // Another transfer within per-call limit - should succeed (no daily limit blocking)
-        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 4e6);
+        // Another large transfer - should also succeed
+        calls[0].data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 30e6);
 
         vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed
+        adapter.executeStrategy(STRATEGY_1, calls); // Should succeed - only whitelist matters
     }
 
     /* PAUSE TESTS */

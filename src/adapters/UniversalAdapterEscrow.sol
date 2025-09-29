@@ -17,14 +17,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /* CONSTANTS */
 
-    uint256 private constant BASIS_POINTS = 10000;
-    uint256 private constant DAY = 24 hours;
-
-    // Pre-computed function selectors for gas optimization
-    bytes4 private constant TRANSFER_SELECTOR = 0xa9059cbb; // transfer(address,uint256)
-    bytes4 private constant APPROVE_SELECTOR = 0x095ea7b3;  // approve(address,uint256)
-    bytes4 private constant TRANSFER_FROM_SELECTOR = 0x23b872dd; // transferFrom(address,address,uint256)
-
     // Vault function selectors for call validation
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
@@ -412,20 +404,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 }
             }
 
-            // Check call limit for value transfers
-            if (call.value > 0 || _isTokenTransfer(selector, call.data)) {
-                uint256 transferAmount = _extractTransferAmount(call.data, call.value);
-
-                // Check per-call limit (applies to all transfers)
-                if (config.limit > 0 && transferAmount > config.limit) {
-                    revert CallLimitExceeded();
-                }
-
-                // L-16 Fix: Daily limit logic removed per recommendation
-                // Per-call limits (config.limit) provide sufficient protection
-                // Daily limits were problematic due to denomination mixing and
-                // could prevent emergency operations in high exposure scenarios
-            }
+            // L-16 Fix: All limit checking removed per security recommendation
+            // Limits were problematic due to denomination mixing and could prevent
+            // emergency operations. Whitelisting provides sufficient access control.
 
             // Execute the call
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
@@ -435,50 +416,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
     }
 
-    /// @notice Check if a function selector is a token transfer
-    /// @param selector The function selector
-    /// @param data The calldata
-    /// @return Whether this is a token transfer
-    function _isTokenTransfer(bytes4 selector, bytes memory data) internal pure returns (bool) {
-        return (
-            selector == TRANSFER_SELECTOR ||
-            selector == APPROVE_SELECTOR ||
-            selector == TRANSFER_FROM_SELECTOR
-        ) && data.length >= 68; // Minimum length for these functions
-    }
-
-    /// @notice Extract transfer amount from calldata
-    /// @param data The calldata
-    /// @param value ETH value being sent
-    /// @return The transfer amount
-    function _extractTransferAmount(bytes memory data, uint256 value) internal pure returns (uint256) {
-        if (value > 0) return value;
-
-        if (data.length < 68) return 0;
-
-        bytes4 selector = bytes4(data);
-
-        // For transfer and approve, amount is the second parameter
-        if (selector == TRANSFER_SELECTOR || selector == APPROVE_SELECTOR) {
-            uint256 amount;
-            assembly {
-                amount := mload(add(data, 68)) // Skip 4 bytes selector + 32 bytes address
-            }
-            return amount;
-        }
-
-        // For transferFrom, amount is the third parameter
-        if (selector == TRANSFER_FROM_SELECTOR) {
-            if (data.length < 100) return 0;
-            uint256 amount;
-            assembly {
-                amount := mload(add(data, 100)) // Skip 4 bytes selector + 32 bytes from + 32 bytes to
-            }
-            return amount;
-        }
-
-        return 0;
-    }
 
     /// @notice Remove a strategy from the active list
     /// @param strategyId The strategy to remove
