@@ -172,8 +172,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         (bytes32 strategyId, , , Call[] memory withdrawCalls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
-        // Validate allocation exists
-        if (allocations[strategyId] == 0) revert InvalidStrategy();
+        // IMPORTANT: No allocation validation here - users should be able to withdraw
+        // idle assets, profits, or do emergency withdrawals even from strategies with 0 allocation
 
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
