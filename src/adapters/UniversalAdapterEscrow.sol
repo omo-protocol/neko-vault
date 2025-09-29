@@ -43,6 +43,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     mapping(bytes32 => uint256) public allocations;
     EnumerableSet.Bytes32Set private activeStrategies;
 
+    // Total allocations tracking for gas optimization
+    uint256 public totalAllocations;
+
     // Whitelist management
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
 
@@ -125,17 +128,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // We must track the actual received amount, not the intended transfer amount
         uint256 currentBalance = IERC20(asset).balanceOf(address(this));
 
-        // Calculate what the balance should have been before this transfer
-        // by summing all existing allocations (this represents previously received tokens)
-        uint256 totalPreviousAllocations = 0;
-        bytes32[] memory activeStrategyIds = activeStrategies.values();
-        for (uint256 i = 0; i < activeStrategyIds.length; i++) {
-            totalPreviousAllocations += allocations[activeStrategyIds[i]];
-        }
-
+        // GAS OPTIMIZATION: Use totalAllocations state variable instead of looping
+        // This is O(1) instead of O(n) where n is the number of active strategies
         // Actual received amount = current balance - what was already allocated
         // This accounts for any fees deducted during transfer
-        uint256 actualReceived = currentBalance - totalPreviousAllocations;
+        uint256 actualReceived = currentBalance - totalAllocations;
 
         // Ensure we don't track more than what was intended to be transferred
         if (actualReceived > assets) {
@@ -144,6 +141,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Update allocation tracking with actual received amount (not intended amount)
         allocations[strategyId] += actualReceived;
+        totalAllocations += actualReceived;
 
         // Add to active strategies if not already present (O(1) operation)
         activeStrategies.add(strategyId);
@@ -225,6 +223,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             ? allocations[strategyId]
             : actualAmount;
         allocations[strategyId] -= allocationDecrease;
+        totalAllocations -= allocationDecrease;
 
         // Remove from active strategies if fully deallocated
         if (allocations[strategyId] == 0) {
