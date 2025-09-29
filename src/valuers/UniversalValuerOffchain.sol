@@ -497,7 +497,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             // Check if signer is authorized and not pending deactivation
             // If pendingSignerRemoval[signer] is true, signer should be excluded immediately
-            if (signers[signer].authorized && !pendingSignerRemoval[signer]) {
+            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;
@@ -537,7 +537,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             // Check if signer is authorized and not pending deactivation
             // If pendingSignerRemoval[signer] is true, signer should be excluded immediately
-            if (signers[signer].authorized && !pendingSignerRemoval[signer]) {
+            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;

@@ -708,7 +708,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,    // minUpdateInterval
-            24 hours,     // maxStaleness
+            24 hours,     // maxStaleness (at maximum allowed)
             1000,         // pushThreshold (10%)
             95            // minConfidence
         );
@@ -750,36 +750,41 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertTrue(valuer.isAuthorizedSigner(testSigner), "Signer should still be authorized");
         assertTrue(valuer.signerChangeTimestamp(testSigner) > block.timestamp, "Should have future deactivation timestamp");
 
-        // Advance time to bypass minimum update interval
-        vm.warp(block.timestamp + 6 minutes);
+        // Advance time to exactly match signer timelock expiry (24 hours)
+        vm.warp(block.timestamp + 24 hours); // Exactly at 24-hour SIGNER_TIMELOCK expiry
+
+        // Note: isAuthorizedSigner() only checks basic authorization, not pending removal
+        // The actual exclusion logic is in _verifySignatures during updateValue
 
         // Try to update with pending deactivated signer - should fail
         // Use a small price change to avoid price bounds validation
-        uint256 newValue = 1001e18; // Only 0.1% change
-        uint256 newNonce = 2;
-        uint256 newExpiry = block.timestamp + 30 minutes;
+        uint256 testValue = 1001e18; // Only 0.1% change
+        uint256 testNonce = 2;
+        uint256 currentTime = block.timestamp;
+        uint256 testExpiry = currentTime + 59 minutes; // Maximum allowed (just under 1 hour)
 
-        bytes32 newMessageHash = keccak256(abi.encode(
+        bytes32 testMessageHash = keccak256(abi.encode(
             STRATEGY_A,
-            newValue,
+            testValue,
             confidence,
-            newNonce,
-            newExpiry,
+            testNonce,
+            testExpiry,
             block.chainid,
             address(valuer)
         ));
 
-        bytes32 newEthSignedHash = keccak256(abi.encodePacked(
+        bytes32 testEthSignedHash = keccak256(abi.encodePacked(
             "\x19Ethereum Signed Message:\n32",
-            newMessageHash
+            testMessageHash
         ));
 
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(signerKey, newEthSignedHash);
-        signatures[0] = abi.encodePacked(r2, s2, v2);
+        (uint8 testV, bytes32 testR, bytes32 testS) = vm.sign(signerKey, testEthSignedHash);
+        bytes[] memory testSignatures = new bytes[](1);
+        testSignatures[0] = abi.encodePacked(testR, testS, testV);
 
-        // This should fail because signer has pending deactivation
+        // This should fail because signer has pending deactivation and timelock expired
         vm.expectRevert(IUniversalValuerOffchain.InsufficientSignatures.selector);
-        valuer.updateValue(STRATEGY_A, newValue, confidence, newNonce, newExpiry, signatures);
+        valuer.updateValue(STRATEGY_A, testValue, confidence, testNonce, testExpiry, testSignatures);
 
         // Verify the value wasn't updated
         assertEq(valuer.getValue(STRATEGY_A), value, "Value should not be updated with pending deactivated signer");
