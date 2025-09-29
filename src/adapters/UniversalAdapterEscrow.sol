@@ -26,8 +26,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant TRANSFER_FROM_SELECTOR = 0x23b872dd; // transferFrom(address,address,uint256)
 
     // Vault function selectors for call validation
-    bytes4 private constant DEALLOCATE_SELECTOR = 0xda3485c6; // deallocate(address,bytes,uint256)
-    bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0x47def04c; // forceDeallocate(address,bytes,uint256,address)
+    bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
+    bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
 
     /* IMMUTABLES */
 
@@ -177,41 +177,47 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Validate allocation exists
         if (allocations[strategyId] == 0) revert InvalidStrategy();
 
-        // L-14 Fix: Restrict operations for forceDeallocate calls
-        if (caller == FORCE_DEALLOCATE_SELECTOR) {
-            // For forceDeallocate, only allow safe token transfer operations
-            _validateForceDeallocateCalls(withdrawCalls);
-        }
-
-        // SECURITY FIX: Smart Balance-First Deallocate
-        // Check adapter balance first to avoid unnecessary protocol withdrawals
-        // This ensures profits and idle assets are accessible
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
 
-        if (assets <= adapterBalance) {
-            // Sufficient balance in adapter - no need for external withdrawal calls
-            // This optimizes gas and allows access to idle assets and accumulated profits
-            actualAmount = assets;
-            // Skip withdrawal calls since we have enough balance
-        } else {
-            // Insufficient balance - need to withdraw from protocol
-            // Get current strategy value including yield
-            uint256 currentValue = _getStrategyValue(strategyId);
-
-            // Execute withdrawal calls to pull funds from external protocol
-            if (withdrawCalls.length > 0) {
-                _executeMulticall(strategyId, withdrawCalls);
+        // SECURITY FIX: Safer forceDeallocate implementation
+        if (caller == FORCE_DEALLOCATE_SELECTOR) {
+            // For forceDeallocate, never execute external calls for security
+            // Only allow if sufficient balance is available in adapter
+            // Vault has approval to pull tokens directly via transferFrom
+            if (assets > adapterBalance) {
+                revert InvalidAmount();
             }
+            actualAmount = assets;
+            // No external calls executed - vault pulls tokens via existing approval
+        } else {
+            // Normal deallocate: Smart Balance-First Deallocate
+            // Check adapter balance first to avoid unnecessary protocol withdrawals
+            // This ensures profits and idle assets are accessible
+            if (assets <= adapterBalance) {
+                // Sufficient balance in adapter - no need for external withdrawal calls
+                // This optimizes gas and allows access to idle assets and accumulated profits
+                actualAmount = assets;
+                // Skip withdrawal calls since we have enough balance
+            } else {
+                // Insufficient balance - need to withdraw from protocol
+                // Get current strategy value including yield
+                uint256 currentValue = _getStrategyValue(strategyId);
 
-            // After withdrawal, check new balance and cap by what's actually available
-            uint256 newBalance = IERC20(asset).balanceOf(address(this));
-            actualAmount = assets > newBalance ? newBalance : assets;
+                // Execute withdrawal calls to pull funds from external protocol
+                if (withdrawCalls.length > 0) {
+                    _executeMulticall(strategyId, withdrawCalls);
+                }
 
-            // Ensure we don't report more than what strategy had
-            // This maintains consistency with strategy tracking
-            if (actualAmount > currentValue) {
-                actualAmount = currentValue;
+                // After withdrawal, check new balance and cap by what's actually available
+                uint256 newBalance = IERC20(asset).balanceOf(address(this));
+                actualAmount = assets > newBalance ? newBalance : assets;
+
+                // Ensure we don't report more than what strategy had
+                // This maintains consistency with strategy tracking
+                if (actualAmount > currentValue) {
+                    actualAmount = currentValue;
+                }
             }
         }
 
@@ -504,49 +510,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
     }
 
-    /// @notice Validate calls for forceDeallocate to prevent malicious operations
-    /// @param calls Array of calls to validate
-    function _validateForceDeallocateCalls(Call[] memory calls) internal view {
-        for (uint256 i = 0; i < calls.length; i++) {
-            Call memory call = calls[i];
-            bytes4 selector = bytes4(call.data);
-
-            // Only allow safe token transfer operations for forceDeallocate
-            // This prevents malicious operations while allowing legitimate withdrawals
-            if (selector == TRANSFER_SELECTOR || selector == TRANSFER_FROM_SELECTOR) {
-                // For token transfers, ensure the target is a known token (asset or whitelisted)
-                WhitelistConfig memory config = functionWhitelist[call.target][selector];
-                if (!config.allowed) {
-                    // Check if all functions are whitelisted for this target
-                    config = functionWhitelist[call.target][bytes4(0)];
-                    if (!config.allowed) {
-                        revert FunctionNotWhitelisted();
-                    }
-                }
-            } else if (selector == APPROVE_SELECTOR) {
-                // Approvals are generally safe but should still be whitelisted
-                WhitelistConfig memory config = functionWhitelist[call.target][selector];
-                if (!config.allowed) {
-                    config = functionWhitelist[call.target][bytes4(0)];
-                    if (!config.allowed) {
-                        revert FunctionNotWhitelisted();
-                    }
-                }
-            } else {
-                // For forceDeallocate, only allow explicitly whitelisted functions
-                // This is more restrictive than normal deallocate
-                WhitelistConfig memory config = functionWhitelist[call.target][selector];
-                if (!config.allowed) {
-                    revert FunctionNotWhitelisted();
-                }
-            }
-
-            // Prevent ETH transfers in forceDeallocate for additional safety
-            if (call.value > 0) {
-                revert InvalidAmount();
-            }
-        }
-    }
 
     /// @notice Receive ETH
     receive() external payable {}

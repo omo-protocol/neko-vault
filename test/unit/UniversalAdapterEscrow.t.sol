@@ -686,7 +686,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Test that normal deallocate works (using regular deallocate selector)
         vm.prank(address(vault));
-        bytes4 normalDeallocateSelector = 0xda3485c6; // deallocate(address,bytes,uint256)
+        bytes4 normalDeallocateSelector = 0x4b219d16; // deallocate(address,bytes,uint256)
         adapter.deallocate(data, 50e6, normalDeallocateSelector, address(this));
 
         // Re-allocate for next test
@@ -696,14 +696,14 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(reallocData, 50e6, bytes4(0), address(0));
 
-        // Test that forceDeallocate with whitelisted operations works
+        // Test that forceDeallocate works with sufficient balance (no external calls executed)
         vm.prank(address(vault));
-        bytes4 forceDeallocateSelector = 0x47def04c; // forceDeallocate(address,bytes,uint256,address)
+        bytes4 forceDeallocateSelector = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
         adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
     }
 
-    function testForceDeallocateRejectsETHTransfers() public {
-        // Setup strategy and allocation
+    function testForceDeallocateRejectsInsufficientBalance() public {
+        // Setup strategy and allocation with 100e6
         vm.prank(owner);
         adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
 
@@ -713,29 +713,19 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
-        // Whitelist the transfer function first so we reach the ETH transfer check
-        vm.prank(owner);
-        adapter.updateWhitelist(address(asset), bytes4(0xa9059cbb), true, 0); // transfer
-
-        // Create call with ETH transfer (should be rejected for forceDeallocate)
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
-            target: address(asset),
-            data: abi.encodeWithSelector(0xa9059cbb, address(vault), 50e6),
-            value: 1 ether // ETH transfer
-        });
-
+        // Try to force deallocate more than adapter balance (100e6 available, requesting 150e6)
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0); // Empty calls array
         bytes memory data = abi.encode(STRATEGY_1, calls);
-        bytes4 forceDeallocateSelector = 0x47def04c;
+        bytes4 forceDeallocateSelector = 0xe4d38cd8; // Correct selector
 
-        // Should revert because ETH transfers are not allowed in forceDeallocate
+        // Should revert because requested amount exceeds adapter balance
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
-        adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+        adapter.deallocate(data, 150e6, forceDeallocateSelector, address(this));
     }
 
-    function testForceDeallocateRejectsNonWhitelistedFunctions() public {
-        // Setup strategy and allocation
+    function testForceDeallocateSucceedsWithSufficientBalance() public {
+        // Setup strategy and allocation with 100e6
         vm.prank(owner);
         adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
 
@@ -745,21 +735,24 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
-        // Create call with non-whitelisted function
+        // Force deallocate with sufficient balance (no external calls should be executed)
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(asset),
-            data: abi.encodeWithSelector(0x12345678, address(vault), 50e6), // random non-whitelisted function
+            data: abi.encodeWithSelector(0x12345678, address(vault), 50e6), // This call should be ignored
             value: 0
         });
 
         bytes memory data = abi.encode(STRATEGY_1, calls);
-        bytes4 forceDeallocateSelector = 0x47def04c;
+        bytes4 forceDeallocateSelector = 0xe4d38cd8; // Correct selector
 
-        // Should revert because function is not whitelisted
+        // Should succeed because balance is sufficient and no external calls are executed
         vm.prank(address(vault));
-        vm.expectRevert(IUniversalAdapterEscrow.FunctionNotWhitelisted.selector);
-        adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+        (bytes32[] memory ids, int256 change) = adapter.deallocate(data, 50e6, forceDeallocateSelector, address(this));
+
+        assertEq(ids[0], STRATEGY_1);
+        assertEq(change, -50e6);
+        assertEq(adapter.getAllocation(STRATEGY_1), 50e6); // Reduced from 100e6 to 50e6
     }
 
     /* L-16 FIX TESTS */
