@@ -228,8 +228,8 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
-        // Deallocate - no longer includes amount parameter
-        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
+        // Deallocate - use same 4-parameter format as allocate
+        bytes memory deallocData = abi.encode(STRATEGY_1, 50e6, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.expectEmit(true, false, false, true);
         emit AllocationUpdated(STRATEGY_1, 50e6, -int256(50e6));
@@ -255,7 +255,7 @@ contract UniversalAdapterEscrowTest is Test {
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
         // Deallocate all - pass assets as max to deallocate all
-        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocData = abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 100e6, bytes4(0), address(0));
@@ -286,7 +286,7 @@ contract UniversalAdapterEscrowTest is Test {
         asset.mint(address(adapter), 50e6);
 
         // Deallocate with yield - should be able to withdraw 120e6 even though only 100e6 was allocated
-        bytes memory deallocData = abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocData = abi.encode(STRATEGY_1, 120e6, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 120e6, bytes4(0), address(0));
@@ -682,7 +682,7 @@ contract UniversalAdapterEscrowTest is Test {
             value: 0
         });
 
-        bytes memory data = abi.encode(STRATEGY_1, calls);
+        bytes memory data = abi.encode(STRATEGY_1, 50e6, false, calls);
 
         // Test that normal deallocate works (using regular deallocate selector)
         vm.prank(address(vault));
@@ -715,7 +715,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Try to force deallocate more than adapter balance (100e6 available, requesting 150e6)
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0); // Empty calls array
-        bytes memory data = abi.encode(STRATEGY_1, calls);
+        bytes memory data = abi.encode(STRATEGY_1, 150e6, false, calls);
         bytes4 forceDeallocateSelector = 0xe4d38cd8; // Correct selector
 
         // Should revert because requested amount exceeds adapter balance
@@ -743,7 +743,7 @@ contract UniversalAdapterEscrowTest is Test {
             value: 0
         });
 
-        bytes memory data = abi.encode(STRATEGY_1, calls);
+        bytes memory data = abi.encode(STRATEGY_1, 50e6, false, calls);
         bytes4 forceDeallocateSelector = 0xe4d38cd8; // Correct selector
 
         // Should succeed because balance is sufficient and no external calls are executed
@@ -771,7 +771,8 @@ contract UniversalAdapterEscrowTest is Test {
         adapter.allocate(allocData, 100e6, bytes4(0), address(0));
 
         // Force deallocate through vault (not direct adapter call)
-        bytes memory data = abi.encode(STRATEGY_1); // Only strategyId needed for forceDeallocate
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0); // Empty calls array
+        bytes memory data = abi.encode(STRATEGY_1, 50e6, false, calls); // Same format as allocate
 
         // Mock vault balance for penalty calculation
         asset.mint(address(vault), 200e6);
@@ -798,7 +799,8 @@ contract UniversalAdapterEscrowTest is Test {
         adapter.allocate(allocData, 50e6, bytes4(0), address(0));
 
         // Try to force deallocate more than available (should fail)
-        bytes memory data = abi.encode(STRATEGY_1); // Only strategyId needed for forceDeallocate
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0); // Empty calls array
+        bytes memory data = abi.encode(STRATEGY_1, 100e6, false, calls); // Same format as allocate
 
         // Mock vault balance for penalty calculation
         asset.mint(address(vault), 200e6);
@@ -829,7 +831,7 @@ contract UniversalAdapterEscrowTest is Test {
         });
 
         // Include malicious calls in data (they should be ignored)
-        bytes memory data = abi.encode(STRATEGY_1, maliciousCalls);
+        bytes memory data = abi.encode(STRATEGY_1, 50e6, false, maliciousCalls);
         uint256 balanceBefore = asset.balanceOf(address(this));
 
         // Mock vault balance for penalty calculation
@@ -972,7 +974,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Test: Deallocate with balance available in adapter (should NOT execute external calls)
         uint256 deallocateAmount = 300e6;
-        bytes memory deallocateData = abi.encode(strategyId, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         // Record balance before
         uint256 balanceBefore = asset.balanceOf(address(adapter));
@@ -1043,7 +1045,7 @@ contract UniversalAdapterEscrowTest is Test {
             value: 0
         });
 
-        bytes memory deallocateData = abi.encode(strategyId, calls);
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, calls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
@@ -1089,7 +1091,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Test: Can deallocate full amount including profits without external calls
         uint256 deallocateWithProfits = initialAllocation + 100e6; // Take initial + half of profits
-        bytes memory deallocateData = abi.encode(strategyId, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(

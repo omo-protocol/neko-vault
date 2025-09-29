@@ -170,31 +170,26 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
+        // Decode deallocation data - SAME format as allocate for vault compatibility
+        (bytes32 strategyId, , , Call[] memory withdrawCalls) =
+            abi.decode(data, (bytes32, uint256, bool, Call[]));
+
+        // Validate allocation exists
+        if (allocations[strategyId] == 0) revert InvalidStrategy();
+
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
-        bytes32 strategyId;
 
-        // SECURITY FIX: Completely separate forceDeallocate logic
+        // SECURITY FIX: For forceDeallocate, ignore calls but use same data format
         if (caller == FORCE_DEALLOCATE_SELECTOR) {
-            // For forceDeallocate, only decode strategyId - ignore any calls for security
-            // Data format for forceDeallocate should be: abi.encode(strategyId, ignored_data)
-            strategyId = abi.decode(data, (bytes32));
-
-            // Validate allocation exists
-            if (allocations[strategyId] == 0) revert InvalidStrategy();
-
             // Only allow if sufficient balance is available in adapter
             // Vault has approval to pull tokens directly via transferFrom
             if (assets > adapterBalance) {
                 revert InvalidAmount();
             }
             actualAmount = assets;
-            // No external calls executed - vault pulls tokens via existing approval
+            // No external calls executed - withdrawCalls are ignored for security
         } else {
-            // Normal deallocate: Decode full data including calls
-            Call[] memory withdrawCalls;
-            (strategyId, withdrawCalls) = abi.decode(data, (bytes32, Call[]));
-
             // Normal deallocate: Smart Balance-First Deallocate
             // Check adapter balance first to avoid unnecessary protocol withdrawals
             // This ensures profits and idle assets are accessible

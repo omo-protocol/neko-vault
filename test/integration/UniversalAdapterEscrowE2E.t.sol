@@ -157,7 +157,7 @@ contract UniversalAdapterEscrowE2E is Test {
         asset.mint(address(adapter), 1000e6);
 
         // Deallocate - should use adapter balance first without protocol withdrawal
-        bytes memory deallocData = abi.encode(LENDING_STRATEGY, withdrawCalls);
+        bytes memory deallocData = abi.encode(LENDING_STRATEGY, 0, false, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));
@@ -205,7 +205,7 @@ contract UniversalAdapterEscrowE2E is Test {
         });
 
         // Deallocate more than adapter balance - should trigger protocol withdrawal
-        bytes memory deallocData = abi.encode(LENDING_STRATEGY, withdrawCalls);
+        bytes memory deallocData = abi.encode(LENDING_STRATEGY, 0, false, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));

@@ -171,6 +171,8 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // First deallocate funds (can't remove strategy with allocation)
         bytes memory deallocData = abi.encode(
             strategyId,
+            0,
+            false,
             new IUniversalAdapterEscrow.Call[](0) // No withdrawal calls needed
         );
         vault.deallocate(address(adapter), deallocData, 100e18);

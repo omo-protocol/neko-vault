@@ -81,7 +81,7 @@ contract RefactoringVerificationSimple is Test {
         // Remove STRATEGY_1 (O(1) operation with EnumerableSet)
         vm.prank(address(vault));
         adapter.deallocate(
-            abi.encode(STRATEGY_1, new IUniversalAdapterEscrow.Call[](0)),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             150e6, bytes4(0), address(0)
         );
 
