@@ -120,8 +120,30 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // This prevents the issue where assets > amount would leave tokens stuck in adapter
         if (assets == 0) revert InvalidAmount();
 
-        // Update allocation tracking with actual received assets (full amount utilized)
-        allocations[strategyId] += assets;
+        // FEE-ON-TRANSFER FIX: Calculate actual received amount to handle weird ERC20s
+        // The vault transfers `assets` amount, but due to fees, adapter might receive less
+        // We must track the actual received amount, not the intended transfer amount
+        uint256 currentBalance = IERC20(asset).balanceOf(address(this));
+
+        // Calculate what the balance should have been before this transfer
+        // by summing all existing allocations (this represents previously received tokens)
+        uint256 totalPreviousAllocations = 0;
+        bytes32[] memory activeStrategyIds = activeStrategies.values();
+        for (uint256 i = 0; i < activeStrategyIds.length; i++) {
+            totalPreviousAllocations += allocations[activeStrategyIds[i]];
+        }
+
+        // Actual received amount = current balance - what was already allocated
+        // This accounts for any fees deducted during transfer
+        uint256 actualReceived = currentBalance - totalPreviousAllocations;
+
+        // Ensure we don't track more than what was intended to be transferred
+        if (actualReceived > assets) {
+            actualReceived = assets;
+        }
+
+        // Update allocation tracking with actual received amount (not intended amount)
+        allocations[strategyId] += actualReceived;
 
         // Add to active strategies if not already present (O(1) operation)
         activeStrategies.add(strategyId);
@@ -131,10 +153,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _executeMulticall(strategyId, calls);
         }
 
-        // Return results
+        // Return results using actual received amount
         ids = new bytes32[](1);
         ids[0] = strategyId;
-        change = int256(assets);
+        change = int256(actualReceived);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }

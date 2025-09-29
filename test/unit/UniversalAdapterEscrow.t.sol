@@ -297,53 +297,128 @@ contract UniversalAdapterEscrowTest is Test {
     }
 
     function testAllocateWithFeeOnTransferToken() public {
-        // Create a fee-on-transfer adapter for testing
+        // Create a fee-on-transfer token for testing
         MockFeeOnTransferToken feeToken = new MockFeeOnTransferToken("FeeToken", "FEE", 18);
         feeToken.setTransferFeePercent(100); // 1% fee
 
-        // Create a new adapter with the fee token
+        // Create a new vault with the fee token as its asset
+        MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
+
+        // Create adapter with the fee token vault
         UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(
-            address(vault),
+            address(feeVault),
             address(valuer),
             false
         );
 
-        // Mock the asset function to return our fee token
-        vm.mockCall(
-            address(vault),
-            abi.encodeWithSignature("asset()"),
-            abi.encode(address(feeToken))
-        );
-
         vm.prank(owner);
-        vault.addAdapter(address(feeAdapter));
+        feeVault.addAdapter(address(feeAdapter));
 
         vm.prank(owner);
         feeAdapter.setStrategy(STRATEGY_1, agent, "", 1000e18);
 
-        // Mint tokens and simulate vault transfer with fee
-        uint256 requestedAmount = 100e18;
-        feeToken.mint(address(vault), requestedAmount);
+        // TEST REAL SCENARIO: Vault passes intended amount, but adapter receives less due to fees
+        uint256 intendedAmount = 100e18; // What vault intends to transfer
+        feeToken.mint(address(feeVault), intendedAmount);
 
         // Simulate vault transferring to adapter (with fee deducted)
-        vm.prank(address(vault));
-        feeToken.transfer(address(feeAdapter), requestedAmount);
+        vm.prank(address(feeVault));
+        feeToken.transfer(address(feeAdapter), intendedAmount);
 
         // Check actual received amount (should be less due to fee)
         uint256 actualReceived = feeToken.balanceOf(address(feeAdapter));
-        uint256 expectedReceived = requestedAmount - (requestedAmount * 100) / 10000; // 1% fee
+        uint256 expectedReceived = intendedAmount - (intendedAmount * 100) / 10000; // 1% fee
         assertEq(actualReceived, expectedReceived, "Should receive amount minus fee");
 
-        // Allocate using actual received amount (this is what vault passes as assets parameter)
-        bytes memory allocData = abi.encode(STRATEGY_1, requestedAmount, false, new IUniversalAdapterEscrow.Call[](0));
+        // CRITICAL: Vault calls allocate with INTENDED amount, not actual received amount
+        // This is the real scenario described by the auditor
+        bytes memory allocData = abi.encode(STRATEGY_1, intendedAmount, false, new IUniversalAdapterEscrow.Call[](0));
 
-        vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = feeAdapter.allocate(allocData, actualReceived, bytes4(0), address(0));
+        vm.prank(address(feeVault));
+        (bytes32[] memory ids, int256 change) = feeAdapter.allocate(allocData, intendedAmount, bytes4(0), address(0));
 
-        // Verify allocation is tracked with actual received amount, not requested amount
-        assertEq(feeAdapter.getAllocation(STRATEGY_1), actualReceived, "Should track actual received amount");
+        // FEE-ON-TRANSFER FIX VERIFICATION:
+        // Our fix should track actual received amount, not intended amount
+        assertEq(feeAdapter.getAllocation(STRATEGY_1), actualReceived, "Should track actual received amount, not intended");
         assertEq(change, int256(actualReceived), "Should return actual received amount as change");
         assertEq(ids[0], STRATEGY_1);
+
+        // Verify no tokens are "lost" - the difference should be accurately accounted for
+        uint256 expectedFee = intendedAmount - actualReceived;
+        assertEq(expectedFee, (intendedAmount * 100) / 10000, "Fee calculation should be correct");
+
+        // Total tracked allocation should match actual balance in adapter
+        assertEq(feeAdapter.getAllocation(STRATEGY_1), feeToken.balanceOf(address(feeAdapter)),
+                "Tracked allocation should match actual adapter balance");
+    }
+
+    function testMultipleFeeOnTransferAllocations() public {
+        // Test multiple allocations with fee-on-transfer tokens to ensure tracking accuracy
+        MockFeeOnTransferToken feeToken = new MockFeeOnTransferToken("FeeToken", "FEE", 18);
+        feeToken.setTransferFeePercent(200); // 2% fee
+
+        // Create a new vault with the fee token as its asset
+        MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
+
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(
+            address(feeVault),
+            address(valuer),
+            false
+        );
+
+        vm.prank(owner);
+        feeVault.addAdapter(address(feeAdapter));
+
+        vm.startPrank(owner);
+        feeAdapter.setStrategy(STRATEGY_1, agent, "", 1000e18);
+        feeAdapter.setStrategy(STRATEGY_2, agent, "", 1000e18);
+        vm.stopPrank();
+
+        // First allocation to STRATEGY_1
+        uint256 firstIntended = 100e18;
+        feeToken.mint(address(feeVault), firstIntended);
+        vm.prank(address(feeVault));
+        feeToken.transfer(address(feeAdapter), firstIntended);
+
+        uint256 firstActual = feeToken.balanceOf(address(feeAdapter));
+
+        vm.prank(address(feeVault));
+        feeAdapter.allocate(
+            abi.encode(STRATEGY_1, firstIntended, false, new IUniversalAdapterEscrow.Call[](0)),
+            firstIntended, bytes4(0), address(0)
+        );
+
+        // Verify first allocation tracking
+        assertEq(feeAdapter.getAllocation(STRATEGY_1), firstActual, "First allocation should track actual amount");
+
+        // Second allocation to STRATEGY_2
+        uint256 secondIntended = 50e18;
+        feeToken.mint(address(feeVault), secondIntended);
+        vm.prank(address(feeVault));
+        feeToken.transfer(address(feeAdapter), secondIntended);
+
+        uint256 balanceAfterSecond = feeToken.balanceOf(address(feeAdapter));
+        uint256 secondActual = balanceAfterSecond - firstActual;
+
+        vm.prank(address(feeVault));
+        feeAdapter.allocate(
+            abi.encode(STRATEGY_2, secondIntended, false, new IUniversalAdapterEscrow.Call[](0)),
+            secondIntended, bytes4(0), address(0)
+        );
+
+        // Verify second allocation tracking
+        assertEq(feeAdapter.getAllocation(STRATEGY_2), secondActual, "Second allocation should track actual amount");
+
+        // Verify total tracking accuracy
+        uint256 totalTracked = feeAdapter.getAllocation(STRATEGY_1) + feeAdapter.getAllocation(STRATEGY_2);
+        uint256 totalBalance = feeToken.balanceOf(address(feeAdapter));
+        assertEq(totalTracked, totalBalance, "Total tracked should equal total balance");
+
+        // Verify fees were correctly accounted for
+        uint256 totalIntended = firstIntended + secondIntended;
+        uint256 totalFees = totalIntended - totalBalance;
+        uint256 expectedFees = (firstIntended * 200) / 10000 + (secondIntended * 200) / 10000;
+        assertEq(totalFees, expectedFees, "Total fees should be correctly calculated");
     }
 
     /* WHITELIST TESTS */
