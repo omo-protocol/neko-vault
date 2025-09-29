@@ -162,7 +162,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
 
         // L-18 FIX: If strategy is configured, use config values directly; otherwise use defaults as fallback
-        uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
+        uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
 
         // Check confidence threshold
         if (report.confidence < minConfidence) {
