@@ -175,22 +175,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 actualAmount = assets;
                 // No external calls needed - we have sufficient balance
 
-            } else if (adapterBalance > 0) {
-                // Scenario 2: Balance covers partially - use existing balance + withdraw difference
+            } else {//THIS WHEN ASSETS > ADAPTER BALANCE
+                // Scenario 2: Balance covers partially or 0 - use existing balance + withdraw difference
                 // We have adapterBalance available, need (assets - adapterBalance) more from protocol
                 uint256 currentValue = _getStrategyValue(strategyId);
+                uint256 balance = IERC20(asset).balanceOf(address(this));
+
+                uint256 missingAmount = assets - adapterBalance;
 
                 // Execute withdrawal calls to get the missing amount from protocol
                 if (withdrawCalls.length > 0) {
                     _executeMulticall(strategyId, withdrawCalls);
                 }
 
-                // Calculate how much we actually got from the withdrawal
                 uint256 newBalance = IERC20(asset).balanceOf(address(this));
-                uint256 actualWithdrawn = newBalance > adapterBalance ? newBalance - adapterBalance : 0;
+                uint256 actualWithdrawn = newBalance - balance;
 
                 // We can provide: existing balance + what we actually withdrew
-                actualAmount = adapterBalance + actualWithdrawn;
+                actualAmount = (actualWithdrawn > missingAmount ? missingAmount : actualWithdrawn) + balance;
 
                 // Cap to requested amount (in case we got more than needed)
                 if (actualAmount > assets) {
@@ -198,24 +200,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 }
 
                 // Ensure we don't report more than what strategy actually had
-                if (actualAmount > currentValue) {
-                    actualAmount = currentValue;
-                }
-
-            } else {
-                // Scenario 3: No balance available - withdraw everything from protocol
-                uint256 currentValue = _getStrategyValue(strategyId);
-
-                // Execute withdrawal calls to get full amount from protocol
-                if (withdrawCalls.length > 0) {
-                    _executeMulticall(strategyId, withdrawCalls);
-                }
-
-                // After withdrawal, check what we actually received
-                uint256 newBalance = IERC20(asset).balanceOf(address(this));
-                actualAmount = assets > newBalance ? newBalance : assets;
-
-                // Ensure we don't report more than what strategy had
                 if (actualAmount > currentValue) {
                     actualAmount = currentValue;
                 }
