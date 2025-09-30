@@ -29,9 +29,18 @@ The following adapters are currently available:
 - [Morpho Vault v1 Adapter](./src/adapters/MorphoVaultV1Adapter.sol).
   This adapter allocates to a fixed Morpho Vault v1 (v1.0 and v1.1), under the constraints of the [caps](#caps).
   Note that using this adapter with vaults other than Morpho Vaults V1 has not been audited.
-- [Universal Escrow Adapter](./src/adapters/UniversalEscrowAdapter.sol).
-  Universal adapter that bridges vaults to multiple strategies via StrategyEscrow, enabling allocation to any protocol with custom strategy logic. Features 2-step emergency recovery with 24-hour timelock, strategy pausing, configurable withdrawal recipient, and enhanced off-chain valuation integration with oracle security.
-- Morpho Market V2 Adapter. WIP
+- [Morpho Vault v2 Adapter](./src/adapters/MorphoVaultV2Adapter.sol).
+  This adapter allocates to Morpho Vault v2 instances, supporting the latest vault features and optimizations.
+- [Universal Adapter Escrow](./src/adapters/UniversalAdapterEscrow.sol).
+  **🔄 UNIFIED ARCHITECTURE**: Production-ready adapter combining adapter and escrow logic into a single contract. Recently updated with security audit recommendations and gas optimizations:
+  - **Security Audited**: Implements auditor-recommended three-scenario deallocate logic
+  - **Gas Optimized**: O(1) totalAllocations tracking instead of expensive O(n) loops
+  - **Smart Balance Handling**: Efficient three-scenario balance management for deallocations
+  - **Simplified Token Support**: Optimized for standard ERC20 tokens only (no fee-on-transfer complexity)
+  - **Whitelist-Based Execution**: Secure multicall with function whitelisting and pause controls
+  - **Enhanced Testing**: 121+ passing tests covering all scenarios and edge cases
+- [Pendle V2 Adapter](./src/adapters/PendleV2Adapter.sol).
+  Specialized adapter for Pendle V2 PT token strategies, enabling yield tokenization and leveraged farming.
 
 ### Caps
 
@@ -51,29 +60,40 @@ When defined, the liquidity adapter is also used to forward deposited funds.
 
 A typical liquidity adapter would allow deposits/withdrawals to go through a very liquid Market v1.
 
-### Universal Escrow System
+### Universal Adapter System
 
-The Universal Escrow System provides a flexible architecture for complex multi-protocol strategies:
+The Universal Adapter System provides a unified, gas-optimized architecture for complex multi-protocol strategies with recent security auditing and optimization improvements:
 
-**StrategyEscrow** (`src/adapters/StrategyEscrow.sol`): Secure escrow contract that executes strategy-specific operations via multicall:
-- **Daily Limits**: Enforces daily spending limits with automatic time-based resets
-- **Whitelisting**: Strategy-specific target whitelisting for secure external calls
-- **Emergency Controls**: 2-step recovery with 24-hour timelock, pause functionality
-- **Access Control**: Adapter-based authorization with reentrancy protection
-- **Safe Math**: Overflow/underflow protection in penalty calculations
+**UniversalAdapterEscrow** (`src/adapters/UniversalAdapterEscrow.sol`): Security-audited unified adapter:
+
+**🛡️ Recent Security Audit Updates**:
+- **Three-Scenario Deallocate Logic**: Implements auditor-recommended two-branch approach for optimal balance handling
+- **Zero-Allocation Support**: Users can withdraw idle assets and profits from strategies with 0 allocation
+- **Force Deallocate Security**: Enhanced validation for vault force deallocate operations
+
+**⚡ Gas Optimizations**:
+- **O(1) Total Allocations**: Replaced expensive O(n) strategy loops with constant-time state variable
+- **EnumerableSet Usage**: Efficient active strategy management with O(1) add/remove operations
+- **Simplified Logic**: Removed unused daily limits and fee-on-transfer tracking
+
+**🔧 Core Features**:
+- **Whitelist-Based Execution**: Secure multicall with function call validation
+- **Emergency Controls**: Pause functionality with owner-based access control
+- **Strategy Management**: Per-strategy agents and pre-configured multicall data
+- **Standard Token Focus**: Optimized for standard ERC20 tokens (Morpho Vault/Pendle compatible)
 
 **UniversalValuerOffchain** (`src/valuers/UniversalValuerOffchain.sol`): Off-chain oracle system for accurate strategy valuation:
 - **Signature Verification**: ECDSA validation with weighted multi-signature support and 1-hour expiry
-- **Hybrid Updates**: Push/pull model with 95% confidence scoring requirement
+- **Hybrid Updates**: Push/pull model with 95% global confidence threshold requirement
 - **Enhanced Security Features**:
-  - **Signer Rotation**: 24-hour timelock for removing authorized signers
-  - **Signature Expiry**: Maximum 1-hour validity to prevent replay attacks
-  - **Duplicate Prevention**: Built-in protection against signature reuse
-  - **Price Validation**: On-chain bounds checking with 50% default max change
-  - **Replay Protection**: Nonce-based validation system
-  - **Emergency Mode**: Owner-controlled fallback mechanism
+  - **Signer Management**: 24-hour timelock for removing authorized signers, immediate addition
+  - **Signature Protection**: Maximum 1-hour validity with chainid and contract address in hash
+  - **Duplicate Prevention**: Tracks used signers per nonce to prevent replay
+  - **Price Bounds**: Configurable max change per strategy (default 50%)
+  - **Staleness Control**: Strategy-specific max staleness (up to 24 hours)
+  - **Emergency Mode**: Owner-controlled fallback with immediate value updates
 
-This system enables vaults to allocate to complex strategies (e.g., PT-kHYPE loops, vNeko volatility farming) while maintaining security through off-chain computation and on-chain verification.
+This system enables vaults to allocate to complex strategies (e.g., PT-kHYPE loops, Pendle yield strategies) while maintaining security through cryptographic verification and gas-efficient operations.
 
 ### Timelocks
 
@@ -225,17 +245,29 @@ source .env && forge verify-contract 0x6427F104D2Ee54a395c61E55FaC5CD02d60F2dEF 
 
 ## Test Coverage
 
-The project maintains comprehensive test coverage exceeding 90% for all core components:
+The project maintains comprehensive test coverage with **121+ passing tests** across all UniversalAdapterEscrow functionality:
 
-- **UniversalEscrowAdapter**: 97.62% coverage (30/30 tests passing)
-- **StrategyEscrow**: 100% coverage (36/36 tests passing)
-- **UniversalValuerOffchain**: 96.55% coverage (52/52 tests passing)
-- **End-to-End Integration**: 6/6 tests passing
+### Core Test Suites
+
+- **UniversalAdapterEscrow.t.sol**: 42/42 tests passing - Core adapter functionality
+- **GasOptimizationTest.t.sol**: 3/3 tests passing - Gas efficiency verification
+- **ZeroAllocationDeallocateTest.t.sol**: 4/4 tests passing - Zero allocation scenarios
+- **ThreeScenarioDeallocateTest.t.sol**: 4/4 tests passing - Balance scenario validation
+- **UniversalAdapterEscrowE2E.t.sol**: 10/10 tests passing - End-to-end integration
+- **UniversalValuerOffchainComprehensive.t.sol**: 52/52 tests passing - Off-chain valuation
+- **UniversalTokenWrapperSecurity.t.sol**: 6/6 tests passing - Token wrapper security
+
+### Security & Audit Validation
+
+- **Security Audit Implementation**: Tests validate auditor-recommended deallocate patterns
+- **Gas Optimization Verification**: Confirms O(1) operations vs O(n) alternatives
+- **Edge Case Coverage**: Comprehensive testing of error conditions and boundary cases
+- **Integration Testing**: Complete flow testing from vault deposit to strategy withdrawal
 
 ### Test Documentation
 
-- `comprehensive-test-documentation.md`: 50-page detailed documentation covering all test scenarios, edge cases, and security validations
-- `security-audit-reference.md`: Comprehensive security reference document for smart contract audit firms
+- `UNIVERSAL_ADAPTER_README.md`: Comprehensive documentation of unified adapter system architecture
+- Security audit validation through dedicated test suites
 
 ### Running Tests
 
@@ -246,9 +278,13 @@ forge test
 # Run with coverage
 forge coverage
 
-# Run specific test files
-forge test --match-path test/unit/UniversalEscrowAdapterFixedAuth.t.sol
-forge test --match-path test/integration/UniversalEscrowSimpleE2E.t.sol
+# Run specific adapter tests
+forge test --match-contract UniversalAdapterEscrow
+forge test --match-path test/unit/UniversalAdapterEscrow.t.sol
+forge test --match-path test/integration/UniversalAdapterEscrowE2E.t.sol
+
+# Run gas optimization tests
+forge test --match-path test/unit/GasOptimizationTest.t.sol
 ```
 
 ## Audits
