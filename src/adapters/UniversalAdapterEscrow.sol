@@ -177,18 +177,25 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
             } else if (adapterBalance > 0) {
                 // Scenario 2: Balance covers partially - use existing balance + withdraw difference
-                // We need (assets - adapterBalance) from protocol
+                // We have adapterBalance available, need (assets - adapterBalance) more from protocol
                 uint256 currentValue = _getStrategyValue(strategyId);
 
                 // Execute withdrawal calls to get the missing amount from protocol
-                // Note: Withdrawal calls should ideally withdraw (assets - adapterBalance) amount
                 if (withdrawCalls.length > 0) {
                     _executeMulticall(strategyId, withdrawCalls);
                 }
 
-                // After withdrawal, we should have: adapterBalance + withdrawn amount
+                // Calculate how much we actually got from the withdrawal
                 uint256 newBalance = IERC20(asset).balanceOf(address(this));
-                actualAmount = assets > newBalance ? newBalance : assets;
+                uint256 actualWithdrawn = newBalance > adapterBalance ? newBalance - adapterBalance : 0;
+
+                // We can provide: existing balance + what we actually withdrew
+                actualAmount = adapterBalance + actualWithdrawn;
+
+                // Cap to requested amount (in case we got more than needed)
+                if (actualAmount > assets) {
+                    actualAmount = assets;
+                }
 
                 // Ensure we don't report more than what strategy actually had
                 if (actualAmount > currentValue) {
