@@ -14,6 +14,13 @@ import {MathLib} from "../libraries/MathLib.sol";
 contract UniversalTokenWrapper {
     using MathLib for uint256;
 
+    /* CONSTANTS */
+
+    // Virtual shares to prevent donation/inflation attacks
+    // Minted to address(1) on first deposit to make price manipulation economically infeasible
+    uint256 private constant VIRTUAL_SHARES = 1000;
+    address private constant DEAD_ADDRESS = address(1);
+
     /* IMMUTABLES */
 
     address public immutable underlying; // Rebasing token (e.g., stETH)
@@ -110,6 +117,7 @@ contract UniversalTokenWrapper {
 
     /// @notice Deposit underlying and mint shares to receiver.
     /// @dev Supports fee-on-transfer by measuring actual received amount.
+    ///      Uses virtual shares to prevent donation/inflation attacks.
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
@@ -123,19 +131,32 @@ contract UniversalTokenWrapper {
 
         // Calculate shares using PRE-deposit totals to prevent value dilution
         if (_totalSupply == 0 || beforeBal == 0) {
+            // CRITICAL SECURITY FIX: First deposit mints virtual shares to prevent donation attacks
+            // Virtual shares are permanently locked in DEAD_ADDRESS, making price manipulation
+            // economically infeasible (attacker would need to donate VIRTUAL_SHARES worth of assets)
             shares = received;
+            require(shares > VIRTUAL_SHARES, "WRP: first deposit too small");
+
+            // Mint virtual shares to dead address (permanently locked)
+            _mint(DEAD_ADDRESS, VIRTUAL_SHARES);
+
+            // Mint remaining shares to receiver
+            _mint(receiver, shares - VIRTUAL_SHARES);
+
+            emit Deposit(msg.sender, receiver, received, shares - VIRTUAL_SHARES);
+            return shares - VIRTUAL_SHARES;
         } else {
             shares = received.mulDivDown(_totalSupply, beforeBal);
+            require(shares != 0, "WRP: zero shares");
+            _mint(receiver, shares);
+            emit Deposit(msg.sender, receiver, received, shares);
+            return shares;
         }
-
-        require(shares != 0, "WRP: zero shares");
-        _mint(receiver, shares);
-        emit Deposit(msg.sender, receiver, received, shares);
     }
 
     /// @notice Mint shares to receiver by pulling enough underlying from caller.
     /// @dev If underlying is fee-on-transfer, slightly more assets may be required; this function reverts if not enough
-    ///      was received to support the requested shares.
+    ///      was received to support the requested shares. Uses virtual shares to prevent donation attacks.
     function mint(uint256 shares, address receiver) external returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
@@ -151,15 +172,26 @@ contract UniversalTokenWrapper {
         // Recompute shares from actual received using PRE-deposit totals to ensure shares are fully covered
         uint256 maxShares;
         if (_totalSupply == 0 || beforeBal == 0) {
+            // CRITICAL SECURITY FIX: First mint includes virtual shares protection
             maxShares = received;
+            require(maxShares > VIRTUAL_SHARES, "WRP: first mint too small");
+            require(shares <= maxShares - VIRTUAL_SHARES, "WRP: insufficient recv");
+
+            // Mint virtual shares to dead address (permanently locked)
+            _mint(DEAD_ADDRESS, VIRTUAL_SHARES);
+
+            // Mint requested shares to receiver
+            _mint(receiver, shares);
+
+            emit Deposit(msg.sender, receiver, received, shares);
+            return assets;
         } else {
             maxShares = received.mulDivDown(_totalSupply, beforeBal);
+            require(maxShares >= shares, "WRP: insufficient recv");
+            _mint(receiver, shares);
+            emit Deposit(msg.sender, receiver, received, shares);
+            return assets;
         }
-
-        require(maxShares >= shares, "WRP: insufficient recv");
-
-        _mint(receiver, shares);
-        emit Deposit(msg.sender, receiver, received, shares);
         // Note: If received > exact requirement, the surplus stays in wrapper and increases exchange rate marginally.
     }
 
