@@ -44,6 +44,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     // Price validation bounds
     mapping(bytes32 => uint256) public maxPriceChangeBps; // Per-strategy max change
 
+    // Initial value bounds (prevents decimal mismatch on first report)
+    mapping(bytes32 => uint256) public maxInitialValue; // Per-strategy max for first report
+
+    // Absolute staleness limit (beyond this, don't use stale values to prevent double-counting)
+    uint256 public constant ABSOLUTE_MAX_STALENESS = 48 hours; // Hard limit on stale value usage
+
     /* MODIFIERS */
 
     modifier onlyOwner() {
@@ -98,6 +104,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         // Validate price bounds (L-01 FIX: pass pre-calculated changePercent to avoid double calculation)
         if (lastReport.value > 0) {
             _validatePriceBounds(strategyId, changePercent);
+        } else {
+            // CRITICAL SECURITY FIX: Validate initial values to prevent decimal mismatch attacks
+            // First report must be bounded to prevent 1e18 vs 1e6 decimal errors
+            uint256 maxInitial = maxInitialValue[strategyId];
+            if (maxInitial > 0 && value > maxInitial) {
+                revert InitialValueExceedsMax(value, maxInitial);
+            }
         }
 
         // Validate confidence meets minimum requirement
@@ -189,25 +202,30 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
             uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
 
-            // CRITICAL FIX: Always include a value for each strategy to prevent value manipulation
+            // CRITICAL SECURITY FIX: Improved stale value handling to prevent double counting
             // Priority: 1. Fresh value with sufficient confidence
-            //          2. Stale value (still usable but potentially outdated)
+            //          2. Moderately stale value (within config staleness)
             //          3. Fallback value (emergency backup)
-            //          4. Last known value regardless of staleness
+            //          4. Last known value (only if within ABSOLUTE_MAX_STALENESS)
 
-            if (block.timestamp <= report.timestamp + maxStaleness &&
-                report.confidence >= minConfidence) {
+            uint256 stalenessAge = block.timestamp - report.timestamp;
+
+            if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
                 // Use fresh, high-confidence value
                 totalValue += report.value;
+            } else if (stalenessAge <= ABSOLUTE_MAX_STALENESS && report.confidence >= minConfidence) {
+                // Moderately stale but within absolute limit - use with caution
+                // This prevents using values that are so old they might double-count
+                totalValue += report.value;
             } else if (fallbackValues[strategyId] > 0) {
-                // Use fallback value if main value is stale or low confidence
+                // Use fallback value if main value is too stale or low confidence
                 totalValue += fallbackValues[strategyId];
-            } else if (report.value > 0) {
-                // Use last known value even if stale (prevents value drops)
-                // This ensures continuity and prevents manipulation
+            } else if (report.value > 0 && stalenessAge <= ABSOLUTE_MAX_STALENESS) {
+                // DEFENSE IN DEPTH: Only use last known value if within absolute staleness limit
+                // Beyond 48h, value is too risky (might double-count deallocated assets)
                 totalValue += report.value;
             }
-            // If none of the above, the strategy contributes 0 (only for never-initialized strategies)
+            // If none of the above, strategy contributes 0 (prevents double-counting)
         }
 
         // Add idle assets
@@ -398,6 +416,16 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         maxPriceChangeBps[strategyId] = maxChangeBps;
         emit PriceChangeBoundsSet(strategyId, maxChangeBps);
+    }
+
+    /// @notice Set maximum initial value for a strategy (prevents decimal mismatch on first report)
+    /// @param strategyId The strategy identifier
+    /// @param maxValue Maximum allowed value for first report (0 = no limit)
+    /// @dev CRITICAL: Set this to reasonable bounds based on expected strategy size in asset decimals
+    ///      Example: For USDC (6 decimals) strategy managing $1M, set to 1_000_000e6
+    function setMaxInitialValue(bytes32 strategyId, uint256 maxValue) external onlyOwner {
+        maxInitialValue[strategyId] = maxValue;
+        emit MaxInitialValueSet(strategyId, maxValue);
     }
 
     /// @notice Set fallback value for emergency
