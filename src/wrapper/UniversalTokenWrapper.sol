@@ -140,7 +140,6 @@ contract UniversalTokenWrapper {
     /// @notice Deposit underlying and mint shares to receiver.
     /// @dev Supports fee-on-transfer by measuring actual received amount.
     ///      Uses virtual shares to prevent donation/inflation attacks.
-    ///      Protected against reentrancy to prevent double-counting of deposits.
     function deposit(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
