@@ -255,30 +255,60 @@ contract UniversalTokenWrapper {
     /// @notice Redeem shares for underlying assets to receiver.
     /// @dev Measures actual balance delta to support tokens with sender-charged fees.
     ///      Protected against reentrancy to prevent underflow DoS attacks.
+    ///      CRITICAL FIX: Burns additional shares if sender-charged fees cause higher actual outflow.
     function redeem(uint256 shares, address receiver, address owner_) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
 
+        // Capture PRE-burn state for accurate share calculation
+        uint256 _totalSupply = totalSupply;
+        uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
+
         // Calculate expected assets for these shares
         assets = previewRedeem(shares);
 
-        // Capture balance before transfer to measure actual delta
-        uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
-
-        // Burn shares FIRST
+        // Burn requested shares FIRST (per ERC4626 spec)
         _burnFrom(owner_, shares);
 
         // Execute transfer
         SafeERC20Lib.safeTransfer(underlying, receiver, assets);
 
-        // Measure actual balance delta (protects against sender-charged fees)
+        // Measure actual balance delta (captures sender-charged fees)
         uint256 afterBal = IERC20(underlying).balanceOf(address(this));
         uint256 actualTransferred = beforeBal - afterBal;
 
-        // For standard tokens: actualTransferred == assets
-        // For sender-charged fee tokens: actualTransferred > assets (sender pays fee)
-        // The extra assets lost due to sender fee are absorbed by the wrapper
-        // This maintains exchange rate correctness for remaining holders
+        // CRITICAL SECURITY FIX: For sender-charged fee tokens, actualTransferred > assets
+        // We must burn additional shares to prevent exchange rate dilution
+        if (actualTransferred > assets) {
+            // Calculate how many shares SHOULD have been burned based on actual outflow
+            // Use PRE-burn totalSupply to maintain correct exchange rate
+            uint256 requiredShares;
+            if (_totalSupply == 0 || beforeBal == 0) {
+                requiredShares = actualTransferred;
+            } else {
+                requiredShares = actualTransferred.mulDivUp(_totalSupply, beforeBal);
+            }
+
+            // If we need to burn more shares than originally requested, burn the difference
+            if (requiredShares > shares) {
+                uint256 additionalShares = requiredShares - shares;
+
+                // Check if owner has enough shares for the additional burn
+                // If not, cap the burn to what's available
+                uint256 ownerBalance = balanceOf[owner_];
+                if (additionalShares > ownerBalance) {
+                    // Can only burn what's available
+                    // NOTE: This may result in slight exchange rate dilution for sender-charged tokens
+                    // Users should use withdraw() instead of redeem() for complete exits with such tokens
+                    additionalShares = ownerBalance;
+                }
+
+                if (additionalShares > 0) {
+                    _burnFrom(owner_, additionalShares);
+                    shares += additionalShares; // Update total burned shares
+                }
+            }
+        }
 
         emit Withdraw(msg.sender, receiver, owner_, actualTransferred, shares);
     }
