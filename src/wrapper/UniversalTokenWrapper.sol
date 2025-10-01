@@ -114,13 +114,21 @@ contract UniversalTokenWrapper {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
 
+        // Capture PRE-deposit state for accurate share calculation
+        uint256 _totalSupply = totalSupply;
         uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
+
         SafeERC20Lib.safeTransferFrom(underlying, msg.sender, address(this), assets);
         uint256 received = IERC20(underlying).balanceOf(address(this)) - beforeBal;
 
-        shares = convertToShares(received);
-        // For first deposit or if exchange rate not set, shares == received.
+        // Calculate shares using PRE-deposit totals to prevent value dilution
+        if (_totalSupply == 0 || beforeBal == 0) {
+            shares = received;
+        } else {
+            shares = received.mulDivDown(_totalSupply, beforeBal);
+        }
 
+        require(shares != 0, "WRP: zero shares");
         _mint(receiver, shares);
         emit Deposit(msg.sender, receiver, received, shares);
     }
@@ -132,13 +140,22 @@ contract UniversalTokenWrapper {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
 
-        assets = previewMint(shares);
+        // Capture PRE-deposit state for accurate share calculation
+        uint256 _totalSupply = totalSupply;
         uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
+
+        assets = previewMint(shares);
         SafeERC20Lib.safeTransferFrom(underlying, msg.sender, address(this), assets);
         uint256 received = IERC20(underlying).balanceOf(address(this)) - beforeBal;
 
-        // Recompute from actual received to ensure shares are fully covered.
-        uint256 maxShares = convertToShares(received);
+        // Recompute shares from actual received using PRE-deposit totals to ensure shares are fully covered
+        uint256 maxShares;
+        if (_totalSupply == 0 || beforeBal == 0) {
+            maxShares = received;
+        } else {
+            maxShares = received.mulDivDown(_totalSupply, beforeBal);
+        }
+
         require(maxShares >= shares, "WRP: insufficient recv");
 
         _mint(receiver, shares);
