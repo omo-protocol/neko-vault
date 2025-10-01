@@ -165,10 +165,8 @@ contract UniversalTokenWrapperWithdrawSecurity is Test {
     }
 
     function testSenderChargedFeeRedeemBehavior() public {
-        // NOTE: redeem() with sender-charged fee tokens has inherent limitations
-        // User specifies shares to burn upfront, so we can't adjust for sender fees
-        // The extra fee is absorbed by the wrapper, causing slight exchange rate deterioration
-        // This test documents this expected behavior
+        // CRITICAL FIX (4_xx.md): redeem() now burns additional shares when sender fees cause extra outflow
+        // This prevents exchange rate dilution and protects remaining holders
 
         // Setup: Multiple depositors
         vm.prank(alice);
@@ -183,6 +181,9 @@ contract UniversalTokenWrapperWithdrawSecurity is Test {
         uint256 totalAssetsBefore = feeWrapper.totalAssets();
         uint256 totalSupplyBefore = feeWrapper.totalSupply();
 
+        // Record Alice's initial share balance
+        uint256 aliceSharesBefore = feeWrapper.balanceOf(alice);
+
         // Alice redeems half her shares
         vm.prank(alice);
         uint256 assetsReceived = feeWrapper.redeem(aliceShares / 2, alice, alice);
@@ -190,26 +191,31 @@ contract UniversalTokenWrapperWithdrawSecurity is Test {
         uint256 totalAssetsAfter = feeWrapper.totalAssets();
         uint256 totalSupplyAfter = feeWrapper.totalSupply();
 
-        // For redeem(), the exchange rate MAY deteriorate slightly due to sender fees
-        // This is expected behavior - the sender fee is absorbed by the wrapper
+        // CRITICAL: With the fix, additional shares are burned to account for sender fees
+        // So Alice may have fewer shares remaining than expected
+        uint256 aliceSharesAfter = feeWrapper.balanceOf(alice);
+        uint256 sharesBurned = aliceSharesBefore - aliceSharesAfter;
+
+        console2.log("Shares requested to burn:", aliceShares / 2);
+        console2.log("Shares actually burned:", sharesBurned);
+        console2.log("Assets received:", assetsReceived);
+
+        // With sender-charged fees, more shares should be burned than requested
+        assertGe(sharesBurned, aliceShares / 2, "Should burn at least requested shares");
+
+        // CRITICAL: Exchange rate should be preserved (or improve slightly due to rounding)
         uint256 rateBefore = (totalAssetsBefore * 1e18) / totalSupplyBefore;
         uint256 rateAfter = (totalAssetsAfter * 1e18) / totalSupplyAfter;
 
         console2.log("Exchange rate before:", rateBefore);
         console2.log("Exchange rate after:", rateAfter);
-        console2.log("Assets received:", assetsReceived);
 
-        // The rate deterioration should be limited to the fee percentage
-        // With 10% sender fee, rate should not deteriorate by more than 5%
-        // (half of Alice's shares with 10% fee on half her assets)
-        uint256 maxDeteriorationBps = 500; // 5%
-        if (rateAfter < rateBefore) {
-            uint256 deterioration = rateBefore - rateAfter;
-            uint256 maxDeterioration = (rateBefore * maxDeteriorationBps) / 10000;
-            assertLe(deterioration, maxDeterioration, "Rate deterioration should be bounded");
-        }
+        // Rate should not deteriorate (it may improve slightly due to the fix)
+        // Allow for 0.1% tolerance due to rounding
+        uint256 maxDiff = rateBefore / 1000;
+        assertGe(rateAfter + maxDiff, rateBefore, "Exchange rate should not deteriorate");
 
-        // Users still receive proportional value despite rate change
+        // Alice still receives reasonable assets
         assertGt(assetsReceived, 400e18, "Alice should receive reasonable assets for her shares");
     }
 
@@ -371,5 +377,142 @@ contract UniversalTokenWrapperWithdrawSecurity is Test {
         uint256 maxDiff = rateBefore / 1000; // 0.1%
 
         assertLe(rateDiff, maxDiff, "Fuzz: Exchange rate should remain stable");
+    }
+
+    /// @notice Test that redeem() attack from 4_xx.md is prevented
+    /// @dev Verifies that additional shares are burned to prevent exchange rate dilution
+    function testRedeemUnderBurnAttackPrevented() public {
+        // Scenario from 4_xx.md: Partial exit with percentage sender fee
+        // A=S=1000, 5% sender fee, attacker redeems 100 shares
+        // Before fix: burns 100 shares, transfers 100 assets, wrapper loses 105 → ER degrades to ~0.9944
+        // After fix: burns ~105 shares to maintain ER
+
+        // Setup with 5% sender fee
+        MockSenderChargedFeeToken attackToken = new MockSenderChargedFeeToken("Attack", "ATK", 18);
+        attackToken.setSenderFeeBps(500); // 5%
+        UniversalTokenWrapper attackWrapper = new UniversalTokenWrapper(
+            address(attackToken),
+            "Wrapped ATK",
+            "wATK"
+        );
+
+        // Mint and setup
+        attackToken.mint(alice, 2000e18);
+        attackToken.mint(bob, 2000e18);
+
+        vm.prank(alice);
+        attackToken.approve(address(attackWrapper), type(uint256).max);
+        vm.prank(bob);
+        attackToken.approve(address(attackWrapper), type(uint256).max);
+
+        // Both users deposit 1000 each
+        vm.prank(alice);
+        uint256 aliceShares = attackWrapper.deposit(1000e18, alice);
+
+        vm.prank(bob);
+        attackWrapper.deposit(1000e18, bob);
+
+        // Verify initial state: A≈S≈1000 (minus virtual shares)
+        uint256 totalAssetsBefore = attackWrapper.totalAssets();
+        uint256 totalSupplyBefore = attackWrapper.totalSupply();
+        uint256 exchangeRateBefore = (totalAssetsBefore * 1e18) / totalSupplyBefore;
+
+        console2.log("Initial total assets:", totalAssetsBefore);
+        console2.log("Initial total supply:", totalSupplyBefore);
+        console2.log("Initial exchange rate:", exchangeRateBefore);
+
+        // Alice redeems 100 shares
+        uint256 sharesToRedeem = 100e18;
+        uint256 aliceSharesBefore = attackWrapper.balanceOf(alice);
+
+        vm.prank(alice);
+        uint256 assetsReceived = attackWrapper.redeem(sharesToRedeem, alice, alice);
+
+        uint256 aliceSharesAfter = attackWrapper.balanceOf(alice);
+        uint256 sharesBurned = aliceSharesBefore - aliceSharesAfter;
+
+        uint256 totalAssetsAfter = attackWrapper.totalAssets();
+        uint256 totalSupplyAfter = attackWrapper.totalSupply();
+        uint256 exchangeRateAfter = (totalAssetsAfter * 1e18) / totalSupplyAfter;
+
+        console2.log("Shares requested to burn:", sharesToRedeem);
+        console2.log("Shares actually burned:", sharesBurned);
+        console2.log("Assets received by Alice:", assetsReceived);
+        console2.log("Total assets after:", totalAssetsAfter);
+        console2.log("Total supply after:", totalSupplyAfter);
+        console2.log("Exchange rate after:", exchangeRateAfter);
+
+        // CRITICAL: More shares should have been burned than requested (due to 5% fee)
+        // Expected: ~105e18 shares burned (100e18 + 5%)
+        assertGt(sharesBurned, sharesToRedeem, "Should burn more shares than requested");
+        assertApproxEqRel(sharesBurned, 105e18, 0.01e18, "Should burn ~105 shares for 5% fee");
+
+        // CRITICAL: Exchange rate should be preserved
+        // Allow 0.1% tolerance for rounding
+        uint256 rateDiff = exchangeRateAfter > exchangeRateBefore
+            ? exchangeRateAfter - exchangeRateBefore
+            : exchangeRateBefore - exchangeRateAfter;
+        uint256 maxDiff = exchangeRateBefore / 1000; // 0.1%
+
+        assertLe(rateDiff, maxDiff, "Exchange rate should not deteriorate");
+
+        // Bob's shares should still be worth their original value
+        uint256 bobShares = attackWrapper.balanceOf(bob);
+        uint256 bobValue = attackWrapper.convertToAssets(bobShares);
+
+        console2.log("Bob's remaining shares:", bobShares);
+        console2.log("Bob's share value:", bobValue);
+
+        // Bob should not lose value due to Alice's redeem
+        // Allow small rounding error
+        assertApproxEqRel(bobValue, 1000e18, 0.01e18, "Bob should not suffer principal loss");
+    }
+
+    /// @notice Test repeated small redeems with fixed sender fee
+    /// @dev From 4_xx.md: Repeated minimal redeems should not erode exchange rate
+    function testRepeatedSmallRedeemsWithFixedFee() public {
+        // Setup with 1% fixed sender fee
+        MockSenderChargedFeeToken feeToken2 = new MockSenderChargedFeeToken("Fee2", "FEE2", 18);
+        feeToken2.setSenderFeeBps(100); // 1%
+        UniversalTokenWrapper wrapper2 = new UniversalTokenWrapper(address(feeToken2), "wFEE2", "wFEE2");
+
+        // Mint tokens
+        feeToken2.mint(alice, 10000e18);
+        feeToken2.mint(bob, 10000e18);
+
+        vm.prank(alice);
+        feeToken2.approve(address(wrapper2), type(uint256).max);
+        vm.prank(bob);
+        feeToken2.approve(address(wrapper2), type(uint256).max);
+
+        // Both deposit
+        vm.prank(alice);
+        wrapper2.deposit(1000e18, alice);
+
+        vm.prank(bob);
+        wrapper2.deposit(1000e18, bob);
+
+        uint256 initialRate = (wrapper2.totalAssets() * 1e18) / wrapper2.totalSupply();
+
+        // Alice performs 10 small redeems
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(alice);
+            wrapper2.redeem(10e18, alice, alice);
+        }
+
+        uint256 finalRate = (wrapper2.totalAssets() * 1e18) / wrapper2.totalSupply();
+
+        console2.log("Initial rate:", initialRate);
+        console2.log("Final rate after 10 redeems:", finalRate);
+
+        // Exchange rate should remain stable
+        uint256 rateDiff = finalRate > initialRate ? finalRate - initialRate : initialRate - finalRate;
+        uint256 maxDiff = initialRate / 1000; // 0.1%
+
+        assertLe(rateDiff, maxDiff, "Exchange rate should not erode with repeated redeems");
+
+        // Bob should not lose value
+        uint256 bobValue = wrapper2.convertToAssets(wrapper2.balanceOf(bob));
+        assertApproxEqRel(bobValue, 1000e18, 0.01e18, "Bob should not lose value");
     }
 }
