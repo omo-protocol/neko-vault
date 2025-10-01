@@ -66,6 +66,7 @@ contract BatchUpdateAtomicity is Test {
         uint256 expiry,
         uint256 signerKey
     ) internal view returns (bytes memory) {
+    
         // Include domain separation to prevent cross-chain/cross-instance replay
         bytes32 batchHash = keccak256(abi.encode(
             strategyIds,
@@ -76,6 +77,7 @@ contract BatchUpdateAtomicity is Test {
             block.chainid,
             address(valuer)
         ));
+        
         bytes32 messageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, messageHash);
         return abi.encodePacked(r, s, v);
