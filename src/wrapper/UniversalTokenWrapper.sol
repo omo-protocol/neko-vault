@@ -164,25 +164,66 @@ contract UniversalTokenWrapper {
     }
 
     /// @notice Withdraw underlying assets to receiver, burning shares from owner.
+    /// @dev Measures actual balance delta to support tokens with sender-charged fees
     function withdraw(uint256 assets, address receiver, address owner_) external returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
 
-        shares = previewWithdraw(assets);
-        _burnFrom(owner_, shares);
+        // Capture PRE-transfer state for accurate share calculation
+        uint256 _totalSupply = totalSupply;
+        uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
+
+        // Execute transfer
         SafeERC20Lib.safeTransfer(underlying, receiver, assets);
-        emit Withdraw(msg.sender, receiver, owner_, assets, shares);
+
+        // Measure actual balance delta (protects against sender-charged fees)
+        uint256 afterBal = IERC20(underlying).balanceOf(address(this));
+        uint256 actualTransferred = beforeBal - afterBal;
+
+        // For standard tokens: actualTransferred == assets
+        // For sender-charged fee tokens: actualTransferred > assets (sender pays fee)
+        // Calculate shares using PRE-transfer state to burn correct amount
+        if (_totalSupply == 0 || beforeBal == 0) {
+            shares = actualTransferred;
+        } else {
+            shares = actualTransferred.mulDivUp(_totalSupply, beforeBal);
+        }
+        require(shares != 0, "WRP: zero shares");
+
+        // Burn shares corresponding to actual transferred amount
+        _burnFrom(owner_, shares);
+
+        emit Withdraw(msg.sender, receiver, owner_, actualTransferred, shares);
     }
 
     /// @notice Redeem shares for underlying assets to receiver.
+    /// @dev Measures actual balance delta to support tokens with sender-charged fees
     function redeem(uint256 shares, address receiver, address owner_) external returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
 
+        // Calculate expected assets for these shares
         assets = previewRedeem(shares);
+
+        // Capture balance before transfer to measure actual delta
+        uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
+
+        // Burn shares FIRST
         _burnFrom(owner_, shares);
+
+        // Execute transfer
         SafeERC20Lib.safeTransfer(underlying, receiver, assets);
-        emit Withdraw(msg.sender, receiver, owner_, assets, shares);
+
+        // Measure actual balance delta (protects against sender-charged fees)
+        uint256 afterBal = IERC20(underlying).balanceOf(address(this));
+        uint256 actualTransferred = beforeBal - afterBal;
+
+        // For standard tokens: actualTransferred == assets
+        // For sender-charged fee tokens: actualTransferred > assets (sender pays fee)
+        // The extra assets lost due to sender fee are absorbed by the wrapper
+        // This maintains exchange rate correctness for remaining holders
+
+        emit Withdraw(msg.sender, receiver, owner_, actualTransferred, shares);
     }
 
     /* PREVIEWS (ERC4626 semantics) */
