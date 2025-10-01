@@ -634,7 +634,16 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 expiry,
         uint256 privateKey
     ) internal view returns (bytes memory) {
-        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry));
+        // Include domain separation to prevent cross-chain/cross-instance replay
+        bytes32 batchHash = keccak256(abi.encode(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            block.chainid,
+            address(valuer)
+        ));
 
         bytes32 ethSignedHash = keccak256(abi.encodePacked(
             "\x19Ethereum Signed Message:\n32",
