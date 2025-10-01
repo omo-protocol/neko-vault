@@ -1158,12 +1158,13 @@ contract UniversalValuerOffchainComprehensive is Test {
             signer1Key
         );
 
-        // L-02 FIX: This should succeed (skip problematic updates) instead of reverting
+        // ATOMICITY FIX: Batch updates are now atomic - this should revert instead of skipping
+        vm.expectRevert(IUniversalValuerOffchain.UpdateTooFrequent.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
 
-        // Values should remain unchanged due to insufficient change + too frequent
-        assertEq(valuer.getValue(STRATEGY_A), 1000e18, "STRATEGY_A should remain unchanged");
-        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should remain unchanged");
+        // Values should remain unchanged due to atomic revert
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18, "STRATEGY_A should remain unchanged (atomic revert)");
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should remain unchanged (atomic revert)");
 
         // Now test with sufficient change (above push threshold)
         values[0] = 1250e18; // 25% change > 20% pushThreshold for STRATEGY_A
@@ -1279,7 +1280,9 @@ contract UniversalValuerOffchainComprehensive is Test {
      * @notice Test L-02 fix: Verify mixed validation scenarios in batch
      */
     function testBatchUpdateMixedValidationScenarios() public {
-        // L-05 FIX: Lower default confidence threshold to allow strategy configuration
+        // ATOMICITY FIX: Batch updates are now atomic - if ANY strategy fails validation, the ENTIRE batch reverts
+        // This test has been updated to reflect the security fix that prevents partial update attacks
+
         vm.startPrank(owner);
         valuer.setDefaultConfidenceThreshold(80);
 
@@ -1333,8 +1336,8 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.warp(block.timestamp + 3 minutes);
 
         // Mixed scenario: STRATEGY_A has sufficient change, STRATEGY_B doesn't
-        values[0] = 1250e18; // 25% change > 20% pushThreshold (should update)
-        values[1] = 2010e18; // 0.5% change < 10% pushThreshold (should skip)
+        values[0] = 1250e18; // 25% change > 20% pushThreshold (would pass individually)
+        values[1] = 2010e18; // 0.5% change < 10% pushThreshold (would fail individually)
         nonce = 2;
         expiry = block.timestamp + 1 hours;
 
@@ -1347,11 +1350,14 @@ contract UniversalValuerOffchainComprehensive is Test {
             signer1Key
         );
 
+        // ATOMICITY FIX: Since STRATEGY_B fails validation (insufficient change before interval),
+        // the ENTIRE batch now reverts instead of partially updating
+        vm.expectRevert(IUniversalValuerOffchain.UpdateTooFrequent.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
 
-        // STRATEGY_A should update, STRATEGY_B should remain unchanged
-        assertEq(valuer.getValue(STRATEGY_A), 1250e18, "STRATEGY_A should update due to sufficient change");
-        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should remain unchanged due to insufficient change");
+        // Both strategies should remain unchanged (atomic behavior)
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18, "STRATEGY_A should NOT update (atomic batch failed)");
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18, "STRATEGY_B should NOT update (validation failed)");
     }
 
     // L-03 FIX: Test cases for defaultConfidenceThreshold setter

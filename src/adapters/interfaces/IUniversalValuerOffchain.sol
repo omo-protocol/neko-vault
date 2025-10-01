@@ -79,6 +79,8 @@ interface IUniversalValuerOffchain {
 
     event PriceChangeBoundsSet(bytes32 indexed strategyId, uint256 maxChangeBps);
 
+    event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
+
     /* ERRORS */
 
     error NotAuthorized();
@@ -99,6 +101,7 @@ interface IUniversalValuerOffchain {
     error InvalidPriceChangeBounds();
     error PriceChangeExceedsBounds(uint256 changePercent, uint256 maxChange);
     error PushThresholdExceedsMaxChange(uint256 pushThreshold, uint256 maxChange);
+    error InitialValueExceedsMax(uint256 value, uint256 maxInitialValue);
     error StrategyNotConfigured();
 
     /* FUNCTIONS */
