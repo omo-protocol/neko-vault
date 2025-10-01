@@ -35,6 +35,13 @@ contract UniversalTokenWrapper {
     mapping(address account => uint256) public balanceOf;
     mapping(address owner => mapping(address spender => uint256)) public allowance;
 
+    /* REENTRANCY PROTECTION */
+
+    // Reentrancy guard state
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _status;
+
     /* EVENTS */
 
     event Deposit(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
@@ -52,6 +59,21 @@ contract UniversalTokenWrapper {
 
         // Underlying must expose decimals() (VaultV2 already relies on that on its IERC20).
         decimals = IERC20(_underlying).decimals();
+
+        // Initialize reentrancy guard
+        _status = _NOT_ENTERED;
+    }
+
+    /* MODIFIERS */
+
+    /// @notice Prevents reentrancy attacks by locking the contract during execution
+    /// @dev CRITICAL SECURITY FIX: Protects against re-entrant underlying tokens
+    ///      that could double-count deposits or corrupt virtual shares accounting
+    modifier nonReentrant() {
+        require(_status != _ENTERED, "WRP: reentrant call");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
     }
 
     /* VIEW */
@@ -118,7 +140,8 @@ contract UniversalTokenWrapper {
     /// @notice Deposit underlying and mint shares to receiver.
     /// @dev Supports fee-on-transfer by measuring actual received amount.
     ///      Uses virtual shares to prevent donation/inflation attacks.
-    function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
+    ///      Protected against reentrancy to prevent double-counting of deposits.
+    function deposit(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
 
@@ -157,7 +180,8 @@ contract UniversalTokenWrapper {
     /// @notice Mint shares to receiver by pulling enough underlying from caller.
     /// @dev If underlying is fee-on-transfer, slightly more assets may be required; this function reverts if not enough
     ///      was received to support the requested shares. Uses virtual shares to prevent donation attacks.
-    function mint(uint256 shares, address receiver) external returns (uint256 assets) {
+    ///      Protected against reentrancy to prevent double-counting of deposits.
+    function mint(uint256 shares, address receiver) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
 
@@ -196,8 +220,9 @@ contract UniversalTokenWrapper {
     }
 
     /// @notice Withdraw underlying assets to receiver, burning shares from owner.
-    /// @dev Measures actual balance delta to support tokens with sender-charged fees
-    function withdraw(uint256 assets, address receiver, address owner_) external returns (uint256 shares) {
+    /// @dev Measures actual balance delta to support tokens with sender-charged fees.
+    ///      Protected against reentrancy to prevent underflow DoS attacks.
+    function withdraw(uint256 assets, address receiver, address owner_) external nonReentrant returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
 
@@ -229,8 +254,9 @@ contract UniversalTokenWrapper {
     }
 
     /// @notice Redeem shares for underlying assets to receiver.
-    /// @dev Measures actual balance delta to support tokens with sender-charged fees
-    function redeem(uint256 shares, address receiver, address owner_) external returns (uint256 assets) {
+    /// @dev Measures actual balance delta to support tokens with sender-charged fees.
+    ///      Protected against reentrancy to prevent underflow DoS attacks.
+    function redeem(uint256 shares, address receiver, address owner_) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
 
