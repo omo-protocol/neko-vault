@@ -252,8 +252,17 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
-        // Verify signatures for batch
-        bytes32 batchHash = keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry));
+        // CRITICAL SECURITY FIX: Add domain separation to prevent cross-chain/cross-instance replay attacks
+        // Include block.chainid and address(this) to match single update path
+        bytes32 batchHash = keccak256(abi.encode(
+            strategyIds,
+            values,
+            confidences,
+            nonce,
+            expiry,
+            block.chainid,
+            address(this)
+        ));
         uint256 totalWeight = _verifyBatchSignatures(batchHash, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
