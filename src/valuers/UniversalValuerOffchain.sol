@@ -240,15 +240,17 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
-        // Update all values
+        // CRITICAL FIX: Make batch updates ATOMIC - validate ALL strategies first, then update
+        // This prevents partial updates that could be exploited for value manipulation attacks
+
+        // Phase 1: Validate ALL updates (reverts if ANY fails)
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
             ValueReport memory lastReport = latestReports[strategyId];
 
-            // Check nonce for each strategy
-            if (nonce <= lastReport.nonce) continue;
+            // Validate nonce to prevent replay - must be strictly increasing
+            if (nonce <= lastReport.nonce) revert StaleNonce();
 
-            // L-02 FIX: Add missing validation checks to match updateValue()
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
 
@@ -256,17 +258,22 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
                 // Only allow update if change exceeds threshold
                 if (changePercent < config.pushThreshold) {
-                    continue; // Skip this update instead of reverting the entire batch
+                    revert UpdateTooFrequent();
                 }
             }
 
-            // Validate price bounds (L-02 FIX: add price bounds validation)
+            // Validate price bounds
             if (lastReport.value > 0) {
                 _validatePriceBounds(strategyId, changePercent);
             }
 
             // Validate confidence meets minimum requirement for this strategy
             if (confidences[i] < config.minConfidence) revert LowConfidence();
+        }
+
+        // Phase 2: All validations passed - now update ALL strategies atomically
+        for (uint256 i = 0; i < strategyIds.length; i++) {
+            bytes32 strategyId = strategyIds[i];
 
             latestReports[strategyId] = ValueReport({
                 value: values[i],
