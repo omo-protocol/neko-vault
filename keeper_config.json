@@ -3,7 +3,7 @@
   "chain_id": 998,
   "valuer_address": "0x7FA9385bE102ac3EAc297483Dd6233D62b3e1496",
   "wrapper_address": "0x311dB0FDe558689550c68355783c95eFDfe25329",
-  "signer_private_key": "0x41f114318295542cf0b5121f85f1258855f5a6b015ad632dc823e3c0deab4828",
+  "signer_private_key": "0x1234567890123456789012345678901234567890123456789012345678901234",
   "mode": "loop",
   "strategies": [
     {

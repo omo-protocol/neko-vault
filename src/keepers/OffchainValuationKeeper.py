@@ -8,12 +8,19 @@ Refined to:
 - Submit updateValue with monotonically increasing nonce and TTL expiry
 - Support modes:
   * underlying_balance: read underlying (rebasing) balance at escrow and convert to wrapper shares
-  * pt_khype_loop: example stub that converts a computed underlying net to wrapper shares
+  * pt_khype_loop: production implementation for leveraged PT strategies
+  * holdings: sum multiple token holdings with signs (assets +1, liabilities -1)
 
 Important:
 - The on-chain valuer adds idle wrapper balance itself (IERC20(asset).balanceOf(escrow)) in getTotalValue.
   Do NOT include idle wrapper balance in the off-chain reported value to avoid double-counting.
 - strategyId is computed as keccak256(text_id), matching the docs.
+
+Security:
+- CRITICAL: Both 'underlying_balance' and 'holdings' modes validate against double counting
+- underlying_balance: Rejects configurations where underlying == wrapper
+- holdings: Rejects holdings arrays that include the wrapper asset
+- These validations prevent the idle escrow balance from being counted twice in getTotalValue()
 """
 
 import json
@@ -441,7 +448,42 @@ class OffchainValuationKeeper:
         Mode: 'underlying_balance'
         - Read escrow's balance of the underlying (rebasing) token
         - Convert to wrapper shares via convertToShares
+
+        ⚠️  CRITICAL SECURITY: Only use when underlying ≠ wrapper!
+            Valid example: stETH (underlying) → wstETH (wrapper)
+            Invalid example: kHYPE (underlying) == kHYPE (wrapper) → DOUBLE COUNTING
+
+            The on-chain getTotalValue() adds idle wrapper balance automatically.
+            If you report the wrapper balance here, it gets counted twice.
         """
+        # SECURITY FIX: Prevent double counting when underlying == wrapper
+        # Use case-insensitive comparison to handle checksum variations
+        underlying_normalized = s.underlying.lower()
+        wrapper_normalized = self.wrapper_address.lower()
+
+        if underlying_normalized == wrapper_normalized:
+            raise RuntimeError(
+                f"\n{'='*70}\n"
+                f"⚠️  DOUBLE COUNTING VULNERABILITY DETECTED\n"
+                f"{'='*70}\n"
+                f"Strategy: {s.id_text}\n"
+                f"Mode: underlying_balance\n"
+                f"Problem: underlying ({s.underlying}) == wrapper ({self.wrapper_address})\n"
+                f"\n"
+                f"This causes the escrow's idle balance to be counted TWICE:\n"
+                f"  1. Once in your strategy value (from balanceOf)\n"
+                f"  2. Once in getTotalValue() idle assets (automatic)\n"
+                f"\n"
+                f"Solutions:\n"
+                f"  A. Use 'pt_khype_loop' mode for leveraged PT strategies\n"
+                f"  B. Use 'holdings' mode with explicit token list (excluding wrapper)\n"
+                f"  C. Use different underlying token (e.g., stETH with wstETH wrapper)\n"
+                f"\n"
+                f"The 'underlying_balance' mode is designed for rebasing tokens where\n"
+                f"underlying ≠ wrapper (e.g., stETH → wstETH conversions).\n"
+                f"{'='*70}\n"
+            )
+
         underlying_bal = self._read_underlying_balance(s.underlying, s.escrow)
         shares = self._convert_underlying_to_wrapper_shares(underlying_bal)
         logger.debug(f"[{s.id_text}] underlying_balance: underlying={underlying_bal}, shares={shares}")
@@ -537,10 +579,31 @@ class OffchainValuationKeeper:
         - Sum up all holdings with their signs (+1 for assets, -1 for liabilities)
         - Supports multiple token types (erc20, pt, etc.)
         - Convert total underlying to wrapper shares
+
+        ⚠️  CRITICAL SECURITY: Do NOT include wrapper asset in holdings array!
+            The on-chain getTotalValue() adds idle wrapper balance automatically.
+            Including it here causes double counting.
+
+            Valid example:
+            holdings: [
+                {"token": "PT-kHYPE", "sign": 1},      # Collateral
+                {"token": "borrowed-kHYPE", "sign": -1}  # Debt
+            ]
+            # Note: kHYPE wrapper is NOT listed - added automatically by getTotalValue()
+
+            Invalid example (causes double counting):
+            holdings: [
+                {"token": "PT-kHYPE", "sign": 1},
+                {"token": "kHYPE", "sign": 1},  # ❌ WRONG - this is the wrapper!
+                {"token": "borrowed-kHYPE", "sign": -1}
+            ]
         """
         try:
             holdings = s.extras.get('holdings', []) if s.extras else []
             total_underlying = 0
+
+            # SECURITY FIX: Validate holdings don't include wrapper asset
+            wrapper_normalized = self.wrapper_address.lower()
 
             for holding in holdings:
                 holding_type = holding.get('type', 'erc20')
@@ -549,6 +612,38 @@ class OffchainValuationKeeper:
 
                 if not token_addr:
                     continue
+
+                # Normalize token address for comparison
+                token_normalized = Web3.to_checksum_address(token_addr).lower()
+
+                # Check if this holding is the wrapper asset
+                if token_normalized == wrapper_normalized:
+                    raise RuntimeError(
+                        f"\n{'='*70}\n"
+                        f"⚠️  DOUBLE COUNTING VULNERABILITY DETECTED\n"
+                        f"{'='*70}\n"
+                        f"Strategy: {s.id_text}\n"
+                        f"Mode: holdings\n"
+                        f"Problem: Holdings array includes wrapper asset\n"
+                        f"  Wrapper: {self.wrapper_address}\n"
+                        f"  Holding: {token_addr} (sign={sign})\n"
+                        f"\n"
+                        f"This causes the escrow's idle balance to be counted TWICE:\n"
+                        f"  1. Once in your holdings calculation (from balanceOf)\n"
+                        f"  2. Once in getTotalValue() idle assets (automatic)\n"
+                        f"\n"
+                        f"Solution: REMOVE wrapper asset from holdings array\n"
+                        f"  getTotalValue() automatically adds: IERC20(asset).balanceOf(escrow)\n"
+                        f"  You should only list tokens deployed in external protocols.\n"
+                        f"\n"
+                        f"Correct holdings configuration:\n"
+                        f"  holdings: [\n"
+                        f"    {{\"token\": \"PT-Token\", \"sign\": 1}},    # Collateral in protocol\n"
+                        f"    {{\"token\": \"Borrowed\", \"sign\": -1}}    # Debt in protocol\n"
+                        f"  ]\n"
+                        f"  # Idle wrapper balance is added automatically - don't list it!\n"
+                        f"{'='*70}\n"
+                    )
 
                 # Get token balance
                 token, _ = self._erc20(token_addr)
@@ -561,6 +656,10 @@ class OffchainValuationKeeper:
 
             # Ensure non-negative
             if total_underlying < 0:
+                logger.warning(
+                    f"[{s.id_text}] Negative holdings total ({total_underlying}), "
+                    f"clamping to 0 (strategy may be underwater)"
+                )
                 total_underlying = 0
 
             # Convert to wrapper shares
@@ -568,8 +667,11 @@ class OffchainValuationKeeper:
             logger.debug(f"[{s.id_text}] holdings total: underlying={total_underlying}, shares={shares}")
             return shares
 
+        except RuntimeError:
+            # Re-raise validation errors (don't catch our own security checks)
+            raise
         except Exception as e:
-            logger.error(f"Error in holdings valuation: {e}")
+            logger.error(f"Error in holdings valuation: {e}", exc_info=True)
             return 0
 
     def value_strategy_in_shares(self, s: StrategyConfig) -> int:
