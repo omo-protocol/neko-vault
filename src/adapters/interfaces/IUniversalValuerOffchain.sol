@@ -85,6 +85,7 @@ interface IUniversalValuerOffchain {
 
     error NotAuthorized();
     error StaleNonce();
+    error NonceGapTooLarge(); // L-02 FIX: Nonce jumped too far ahead
     error UpdateTooFrequent();
     error InsufficientSignatures();
     error ValueTooStale();
@@ -102,6 +103,7 @@ interface IUniversalValuerOffchain {
     error PriceChangeExceedsBounds(uint256 changePercent, uint256 maxChange);
     error PushThresholdExceedsMaxChange(uint256 pushThreshold, uint256 maxChange);
     error InitialValueExceedsMax(uint256 value, uint256 maxInitialValue);
+    error UpdateIntervalExceedsStaleness(); // L-03 FIX: minUpdateInterval must be < maxStaleness
     error StrategyNotConfigured();
 
     /* FUNCTIONS */

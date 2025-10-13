@@ -180,6 +180,7 @@ contract UniversalTokenWrapper {
     /// @dev If underlying is fee-on-transfer, slightly more assets may be required; this function reverts if not enough
     ///      was received to support the requested shares. Uses virtual shares to prevent donation attacks.
     ///      Protected against reentrancy to prevent double-counting of deposits.
+    ///      SECURITY FIX: On first mint, requests assets for both requested shares AND virtual shares.
     function mint(uint256 shares, address receiver) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
@@ -188,7 +189,13 @@ contract UniversalTokenWrapper {
         uint256 _totalSupply = totalSupply;
         uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
 
-        assets = previewMint(shares);
+        // CRITICAL FIX: On first mint, we must request enough assets to cover both
+        // the user's requested shares AND the VIRTUAL_SHARES that will be minted
+        if (_totalSupply == 0 || beforeBal == 0) {
+            assets = previewMint(shares + VIRTUAL_SHARES);
+        } else {
+            assets = previewMint(shares);
+        }
         SafeERC20Lib.safeTransferFrom(underlying, msg.sender, address(this), assets);
         uint256 received = IERC20(underlying).balanceOf(address(this)) - beforeBal;
 

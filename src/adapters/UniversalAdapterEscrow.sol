@@ -370,10 +370,23 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /// @notice Get idle assets that are not allocated to any strategy
-    /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
-    /// @return idleAssets Amount of assets sitting idle in the adapter
+    /// @dev L-04 FIX: Returns truly idle assets by subtracting allocated-but-not-executed assets
+    ///      When allocate() is called with executeNow=false, assets remain in adapter but are tracked
+    ///      in totalAllocations. This function excludes those allocated assets to show only genuinely
+    ///      idle assets available for new allocations.
+    /// @return idleAssets Amount of assets sitting idle in the adapter (not allocated to any strategy)
     function getIdleAssets() external view returns (uint256 idleAssets) {
-        return IERC20(asset).balanceOf(address(this));
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+
+        // L-04 SECURITY FIX: Subtract allocated assets to return truly idle assets
+        // totalAllocations tracks assets that are allocated to strategies (whether executed or not)
+        // Truly idle assets = balance - allocated assets
+        if (balance > totalAllocations) {
+            return balance - totalAllocations;
+        }
+
+        // Safety: if balance < totalAllocations (e.g., due to external transfers), return 0
+        return 0;
     }
 
     /* INTERNAL FUNCTIONS */

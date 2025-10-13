@@ -18,6 +18,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     uint256 private constant SIGNER_TIMELOCK = 24 hours; // 24-hour timelock for signer changes
     uint256 private constant MAX_SIGNATURE_AGE = 1 hours; // 1-hour signature expiry
     uint256 private constant MAX_PRICE_CHANGE_BPS = 5000; // 50% max price change per update
+    uint256 private constant MAX_NONCE_GAP = 1000; // L-02 FIX: Maximum allowed nonce jump to prevent lockout
 
     /* IMMUTABLES */
 
@@ -85,6 +86,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         // Validate nonce to prevent replay
         if (nonce <= lastReport.nonce) revert StaleNonce();
+
+        // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
+        // This protects against setting nonce to max value which would brick emergencyUpdate
+        // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
+        if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
 
         // Validate signature expiry
         if (expiry < block.timestamp) revert SignatureExpired();
@@ -278,6 +284,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             // Validate nonce to prevent replay - must be strictly increasing
             if (nonce <= lastReport.nonce) revert StaleNonce();
 
+            // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
+            // This protects against setting nonce to max value which would brick emergencyUpdate
+            // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
+            if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
+
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
 
@@ -379,6 +390,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (minConfidence < defaultConfidenceThreshold || minConfidence > 100) revert LowConfidence();
 
+        // L-03 SECURITY FIX: Ensure minUpdateInterval < maxStaleness to prevent configuration conflicts
+        // If minUpdateInterval >= maxStaleness, the value becomes stale before it can be updated,
+        // creating a window where the strategy is unusable (stale but can't update yet)
+        if (minUpdateInterval >= maxStaleness) revert UpdateIntervalExceedsStaleness();
+
         // M-08 FIX: Ensure pushThreshold doesn't exceed maxPriceChangeBps to prevent stuck strategies
         uint256 maxChange = maxPriceChangeBps[strategyId];
         if (maxChange == 0) {
@@ -414,7 +430,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @notice Set price change bounds for a strategy
+    /// @dev L-01 FIX: Enforce MAX_PRICE_CHANGE_BPS as absolute upper limit for consistent bounds
     function setPriceChangeBounds(bytes32 strategyId, uint256 maxChangeBps) external onlyOwner {
+        // L-01 SECURITY FIX: Enforce that maxChangeBps cannot exceed MAX_PRICE_CHANGE_BPS (50%)
+        // This maintains semantic consistency - MAX_PRICE_CHANGE_BPS is truly the maximum allowed
+        // Without this check, the "MAX" designation would be misleading
+        if (maxChangeBps > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (maxChangeBps > BASIS_POINTS) revert InvalidPriceChangeBounds();
 
         // M-08 FIX: Ensure new price bounds don't conflict with existing pushThreshold

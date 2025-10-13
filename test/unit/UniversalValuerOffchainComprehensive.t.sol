@@ -144,6 +144,113 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertEq(valuer.getValue(STRATEGY_A), 1000e18);
     }
 
+    /**
+     * @notice Test L-02 fix: Nonce gap validation prevents excessive nonce jumps
+     * @dev This validates the security fix ensuring nonce cannot jump too far ahead
+     */
+    function testUpdateValueNonceGapWithinLimit() public {
+        // L-02 SECURITY FIX: Test normal nonce progression within MAX_NONCE_GAP (1000)
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Second update with nonce 1001 (exactly MAX_NONCE_GAP away) - should succeed
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, 1001, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, 1001, block.timestamp + 1 hours, signatures2);
+
+        IUniversalValuerOffchain.ValueReport memory report = valuer.getReport(STRATEGY_A);
+        assertEq(report.nonce, 1001, "Nonce should be updated to 1001");
+        assertEq(valuer.getValue(STRATEGY_A), 1100e18);
+    }
+
+    /**
+     * @notice Test L-02 fix: Nonce gap exceeding MAX_NONCE_GAP should revert
+     * @dev Prevents setting nonce to max value which would brick emergencyUpdate
+     */
+    function testUpdateValueNonceGapExceedsLimit() public {
+        // L-02 SECURITY FIX: Test that nonce cannot jump more than MAX_NONCE_GAP (1000)
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try update with nonce 1002 (MAX_NONCE_GAP + 1) - should revert
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, 1002, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, 1002, block.timestamp + 1 hours, signatures2);
+
+        // Value should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+        IUniversalValuerOffchain.ValueReport memory report = valuer.getReport(STRATEGY_A);
+        assertEq(report.nonce, 1, "Nonce should still be 1");
+    }
+
+    /**
+     * @notice Test L-02 fix: Prevent nonce from being set to max value
+     * @dev Setting nonce to type(uint256).max would cause emergencyUpdate to overflow
+     */
+    function testUpdateValueNonceMaxValue() public {
+        // L-02 SECURITY FIX: Setting nonce to type(uint256).max would brick emergencyUpdate
+        // because emergencyUpdate does: nonce + 1, which would overflow
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try to set nonce to type(uint256).max - should revert due to gap check
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, type(uint256).max, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, type(uint256).max, block.timestamp + 1 hours, signatures2);
+
+        // Value should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+    }
+
+    /**
+     * @notice Test L-02 fix: Batch update nonce gap validation
+     * @dev Same nonce gap validation should apply to batch updates
+     */
+    function testBatchUpdateNonceGapExceedsLimit() public {
+        // L-02 SECURITY FIX: Batch updates should also validate nonce gap
+
+        // First update for both strategies
+        bytes32[] memory strategyIds1 = new bytes32[](2);
+        strategyIds1[0] = STRATEGY_A;
+        strategyIds1[1] = STRATEGY_B;
+
+        uint256[] memory values1 = new uint256[](2);
+        values1[0] = 1000e18;
+        values1[1] = 2000e18;
+
+        uint256[] memory confidences1 = new uint256[](2);
+        confidences1[0] = 95;
+        confidences1[1] = 95;
+
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signBatch(strategyIds1, values1, confidences1, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.batchUpdateValues(strategyIds1, values1, confidences1, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try batch update with nonce gap > MAX_NONCE_GAP - should revert
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signBatch(strategyIds1, values1, confidences1, 1002, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.batchUpdateValues(strategyIds1, values1, confidences1, 1002, block.timestamp + 1 hours, signatures2);
+
+        // Values should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18);
+    }
+
     function testUpdateValueExpiredSignature() public {
         uint256 expiry = block.timestamp - 1; // Already expired
         bytes[] memory signatures = new bytes[](1);
@@ -375,6 +482,38 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         valuer.setPriceChangeBounds(STRATEGY_A, 2000);
         assertEq(valuer.maxPriceChangeBps(STRATEGY_A), 2000);
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test L-01 fix: setPriceChangeBounds should enforce MAX_PRICE_CHANGE_BPS as absolute upper limit
+     * @dev This validates the security fix ensuring maxChangeBps cannot exceed MAX_PRICE_CHANGE_BPS (50%)
+     */
+    function testSetPriceChangeBoundsExceedsMaximum() public {
+        vm.startPrank(owner);
+
+        // L-01 SECURITY FIX: Attempting to set maxChangeBps above MAX_PRICE_CHANGE_BPS (5000 = 50%) should revert
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 5001); // Just above 50% limit
+
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 7000); // 70% - should not be allowed
+
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 10000); // 100% - BASIS_POINTS but above MAX_PRICE_CHANGE_BPS
+
+        // Setting exactly at MAX_PRICE_CHANGE_BPS should succeed
+        vm.expectEmit(true, true, true, true);
+        emit PriceChangeBoundsSet(STRATEGY_A, 5000);
+        valuer.setPriceChangeBounds(STRATEGY_A, 5000); // Exactly 50% - should succeed
+        assertEq(valuer.maxPriceChangeBps(STRATEGY_A), 5000);
+
+        // Setting below MAX_PRICE_CHANGE_BPS should also succeed
+        vm.expectEmit(true, true, true, true);
+        emit PriceChangeBoundsSet(STRATEGY_B, 3000);
+        valuer.setPriceChangeBounds(STRATEGY_B, 3000); // 30% - should succeed
+        assertEq(valuer.maxPriceChangeBps(STRATEGY_B), 3000);
 
         vm.stopPrank();
     }
@@ -1607,6 +1746,64 @@ contract UniversalValuerOffchainComprehensive is Test {
             1000,
             101 // Above 100%
         );
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test L-03 fix: minUpdateInterval must be less than maxStaleness
+     * @dev This validates the security fix preventing configuration conflicts where values become stale before they can be updated
+     */
+    function testConfigureStrategyUpdateIntervalExceedsStaleness() public {
+        vm.startPrank(owner);
+
+        // Case 1: minUpdateInterval = maxStaleness (should revert)
+        vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            12 hours,  // minUpdateInterval
+            12 hours,  // maxStaleness - equal to minUpdateInterval
+            1000,
+            95
+        );
+
+        // Case 2: minUpdateInterval > maxStaleness (should revert)
+        vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            20 hours,  // minUpdateInterval
+            12 hours,  // maxStaleness - less than minUpdateInterval
+            1000,
+            95
+        );
+
+        // Case 3: Edge case - minUpdateInterval just 1 second less than maxStaleness (should succeed)
+        valuer.configureStrategy(
+            STRATEGY_A,
+            12 hours - 1,  // minUpdateInterval (just under maxStaleness)
+            12 hours,      // maxStaleness
+            1000,
+            95
+        );
+
+        // Verify the configuration was set correctly
+        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) =
+            valuer.updateConfigs(STRATEGY_A);
+        assertEq(minInterval, 12 hours - 1, "Should set minUpdateInterval");
+        assertEq(maxStale, 12 hours, "Should set maxStaleness");
+
+        // Case 4: Valid configuration with minUpdateInterval significantly less than maxStaleness
+        valuer.configureStrategy(
+            STRATEGY_B,
+            1 hours,   // minUpdateInterval
+            24 hours,  // maxStaleness - much greater than minUpdateInterval
+            1000,
+            95
+        );
+
+        (minInterval, maxStale, pushThresh, minConf) = valuer.updateConfigs(STRATEGY_B);
+        assertEq(minInterval, 1 hours, "Should set minUpdateInterval for STRATEGY_B");
+        assertEq(maxStale, 24 hours, "Should set maxStaleness for STRATEGY_B");
 
         vm.stopPrank();
     }

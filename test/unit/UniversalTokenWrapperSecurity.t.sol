@@ -72,6 +72,30 @@ contract UniversalTokenWrapperSecurityTest is Test {
         assertGt(bobShares, 0, "Small deposits should still mint non-zero shares");
     }
 
+    function testFirstMintWithVirtualShares() public {
+        // SECURITY FIX TEST: First mint should properly account for VIRTUAL_SHARES
+        // This tests the fix for the vulnerability where first mint would fail
+        // because previewMint didn't include VIRTUAL_SHARES in the calculation
+
+        uint256 VIRTUAL_SHARES = 1000;
+        uint256 sharesToMint = 1100; // More than VIRTUAL_SHARES
+
+        // Alice is the first minter
+        vm.prank(alice);
+        uint256 assetsSpent = wrapper.mint(sharesToMint, alice);
+
+        // The fix ensures that on first mint, we request assets for (shares + VIRTUAL_SHARES)
+        // So assetsSpent should be (1100 + 1000) = 2100 for the first mint
+        assertEq(assetsSpent, sharesToMint + VIRTUAL_SHARES, "First mint should request assets for shares + virtual shares");
+        assertEq(wrapper.balanceOf(alice), sharesToMint, "Alice should receive requested shares");
+
+        // Verify virtual shares were minted to dead address
+        assertEq(wrapper.balanceOf(address(1)), VIRTUAL_SHARES, "Virtual shares should be locked in dead address");
+
+        // Verify total supply
+        assertEq(wrapper.totalSupply(), sharesToMint + VIRTUAL_SHARES, "Total supply should include virtual shares");
+    }
+
     function testMintFunctionWorksAfterFirstDeposit() public {
         // Alice deposits first
         vm.prank(alice);
