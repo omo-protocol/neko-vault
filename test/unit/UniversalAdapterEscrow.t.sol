@@ -903,8 +903,9 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(int256(assetAmount), change, "Change should equal full asset amount");
         assertEq(ids[0], STRATEGY_1, "Strategy ID should be returned");
 
-        // Assets remain in adapter but are allocated to strategy (available for use)
-        assertEq(adapter.getIdleAssets(), assetAmount, "Assets remain available for strategy execution");
+        // L-04 FIX: Assets are allocated, so getIdleAssets should return 0 (not idle anymore)
+        assertEq(adapter.getIdleAssets(), 0, "Allocated assets are not idle");
+        assertEq(adapter.totalAllocations(), assetAmount, "Total allocations should track allocated amount");
 
         // The key difference from old architecture: assets are tracked and available, not lost
         assertTrue(adapter.getAllocation(STRATEGY_1) > 0, "Assets are allocated and tracked for strategy use");
@@ -926,6 +927,195 @@ contract UniversalAdapterEscrowTest is Test {
         // Should be included in realAssets
         uint256 totalAssets = adapter.realAssets();
         assertGe(totalAssets, idleAmount, "Real assets should include idle assets");
+    }
+
+    /* L-04 FIX TESTS */
+
+    function testL04GetIdleAssetsBeforeAllocation() public {
+        // L-04 FIX: Test that getIdleAssets correctly returns assets before allocation
+
+        // Transfer assets to adapter
+        uint256 amount = 500e6;
+        asset.mint(address(adapter), amount);
+
+        // Before allocation, all assets are idle
+        assertEq(adapter.getIdleAssets(), amount, "All assets should be idle before allocation");
+        assertEq(adapter.totalAllocations(), 0, "No allocations should exist");
+    }
+
+    function testL04GetIdleAssetsAfterPartialAllocation() public {
+        // L-04 FIX: Test getIdleAssets after partial allocation
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Transfer 1000e6 to adapter
+        uint256 totalAssets = 1000e6;
+        asset.mint(address(adapter), totalAssets);
+
+        // Initially all assets are idle
+        assertEq(adapter.getIdleAssets(), totalAssets, "All assets should be idle initially");
+
+        // Allocate 600e6 to strategy
+        uint256 allocatedAmount = 600e6;
+        bytes memory allocateData = abi.encode(STRATEGY_1, allocatedAmount, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocateData, allocatedAmount, bytes4(0), address(0));
+
+        // L-04 FIX: Only unallocated assets (1000 - 600 = 400) should be considered idle
+        uint256 expectedIdle = totalAssets - allocatedAmount;
+        assertEq(adapter.getIdleAssets(), expectedIdle, "Only unallocated assets should be idle");
+        assertEq(adapter.totalAllocations(), allocatedAmount, "Total allocations should match allocated amount");
+    }
+
+    function testL04GetIdleAssetsAfterFullAllocation() public {
+        // L-04 FIX: Test getIdleAssets after full allocation
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Transfer assets to adapter
+        uint256 amount = 800e6;
+        asset.mint(address(adapter), amount);
+
+        // Allocate all assets to strategy
+        bytes memory allocateData = abi.encode(STRATEGY_1, amount, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocateData, amount, bytes4(0), address(0));
+
+        // L-04 FIX: No idle assets remain after full allocation
+        assertEq(adapter.getIdleAssets(), 0, "No assets should be idle after full allocation");
+        assertEq(adapter.totalAllocations(), amount, "Total allocations should match allocated amount");
+    }
+
+    function testL04GetIdleAssetsWithMultipleStrategies() public {
+        // L-04 FIX: Test getIdleAssets with allocations across multiple strategies
+
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.setStrategy(STRATEGY_2, agent, "", 1000e6);
+        vm.stopPrank();
+
+        // Transfer 1500e6 to adapter
+        uint256 totalAssets = 1500e6;
+        asset.mint(address(adapter), totalAssets);
+
+        // Initially all assets are idle
+        assertEq(adapter.getIdleAssets(), totalAssets, "All assets should be idle initially");
+
+        // Allocate 500e6 to STRATEGY_1
+        bytes memory allocData1 = abi.encode(STRATEGY_1, 500e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocData1, 500e6, bytes4(0), address(0));
+
+        // 1000e6 should still be idle
+        assertEq(adapter.getIdleAssets(), 1000e6, "1000e6 should remain idle");
+
+        // Allocate 700e6 to STRATEGY_2
+        bytes memory allocData2 = abi.encode(STRATEGY_2, 700e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocData2, 700e6, bytes4(0), address(0));
+
+        // L-04 FIX: Only 300e6 (1500 - 500 - 700) should be idle
+        assertEq(adapter.getIdleAssets(), 300e6, "300e6 should remain idle");
+        assertEq(adapter.totalAllocations(), 1200e6, "Total allocations should be 1200e6");
+    }
+
+    function testL04GetIdleAssetsAfterDeallocate() public {
+        // L-04 FIX: Test getIdleAssets after deallocation
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Transfer and allocate
+        uint256 amount = 1000e6;
+        asset.mint(address(adapter), amount);
+        bytes memory allocData = abi.encode(STRATEGY_1, amount, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocData, amount, bytes4(0), address(0));
+
+        // All assets allocated, none idle
+        assertEq(adapter.getIdleAssets(), 0, "No idle assets after full allocation");
+
+        // Deallocate 400e6
+        bytes memory deallocData = abi.encode(STRATEGY_1, 400e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.deallocate(deallocData, 400e6, bytes4(0), address(0));
+
+        // L-04 FIX: After deallocation, 400e6 should be idle again
+        assertEq(adapter.getIdleAssets(), 400e6, "400e6 should be idle after deallocation");
+        assertEq(adapter.totalAllocations(), 600e6, "600e6 should remain allocated");
+    }
+
+    function testL04GetIdleAssetsWithProfits() public {
+        // L-04 FIX: Test getIdleAssets when strategy generates profits
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        // Transfer and allocate 500e6
+        uint256 initialAmount = 500e6;
+        asset.mint(address(adapter), initialAmount);
+        bytes memory allocData = abi.encode(STRATEGY_1, initialAmount, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocData, initialAmount, bytes4(0), address(0));
+
+        // All assets allocated, none idle
+        assertEq(adapter.getIdleAssets(), 0, "No idle assets after allocation");
+
+        // Simulate profits: mint additional 200e6 to adapter
+        uint256 profits = 200e6;
+        asset.mint(address(adapter), profits);
+
+        // L-04 FIX: Profits are idle (not allocated to any strategy)
+        assertEq(adapter.getIdleAssets(), profits, "Profits should be idle");
+        assertEq(adapter.totalAllocations(), initialAmount, "Allocations unchanged by profits");
+
+        // Total balance is initial + profits
+        assertEq(asset.balanceOf(address(adapter)), initialAmount + profits, "Total balance includes profits");
+    }
+
+    function testL04GetIdleAssetsAccuracy() public {
+        // L-04 FIX: Comprehensive test of getIdleAssets accuracy
+
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.setStrategy(STRATEGY_2, agent, "", 1000e6);
+        vm.stopPrank();
+
+        // Scenario: Complex series of allocations, deallocations, and external transfers
+
+        // Step 1: Transfer 2000e6 to adapter
+        asset.mint(address(adapter), 2000e6);
+        assertEq(adapter.getIdleAssets(), 2000e6, "Step 1: All assets idle");
+
+        // Step 2: Allocate 800e6 to STRATEGY_1
+        bytes memory alloc1 = abi.encode(STRATEGY_1, 800e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(alloc1, 800e6, bytes4(0), address(0));
+        assertEq(adapter.getIdleAssets(), 1200e6, "Step 2: 1200e6 idle after first allocation");
+
+        // Step 3: Allocate 900e6 to STRATEGY_2
+        bytes memory alloc2 = abi.encode(STRATEGY_2, 900e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(alloc2, 900e6, bytes4(0), address(0));
+        assertEq(adapter.getIdleAssets(), 300e6, "Step 3: 300e6 idle after second allocation");
+
+        // Step 4: External transfer of 500e6 profits
+        asset.mint(address(adapter), 500e6);
+        assertEq(adapter.getIdleAssets(), 800e6, "Step 4: 800e6 idle after profits");
+
+        // Step 5: Deallocate 300e6 from STRATEGY_1
+        bytes memory dealloc1 = abi.encode(STRATEGY_1, 300e6, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.deallocate(dealloc1, 300e6, bytes4(0), address(0));
+        assertEq(adapter.getIdleAssets(), 1100e6, "Step 5: 1100e6 idle after deallocation");
+
+        // Step 6: Verify internal consistency
+        uint256 balance = asset.balanceOf(address(adapter));
+        uint256 totalAlloc = adapter.totalAllocations();
+        uint256 idleAssets = adapter.getIdleAssets();
+        assertEq(balance, totalAlloc + idleAssets, "Balance should equal allocations + idle");
     }
 
     function testDeallocateSmartBalanceFirst() public {
