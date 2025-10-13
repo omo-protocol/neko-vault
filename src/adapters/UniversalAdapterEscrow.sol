@@ -145,6 +145,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /// @inheritdoc IAdapter
+    /// @notice Deallocate assets from a strategy
+    /// @param data Encoded data: (bytes32 strategyId, uint256 minAmountOut, bool ignored, Call[] withdrawCalls)
+    ///             - minAmountOut: Minimum amount to receive (slippage protection). Set to 0 to disable check.
+    ///             - ignored: Previously used for executeNow, now ignored for backward compatibility
+    /// @dev SECURITY FIX: minAmountOut parameter enables slippage protection for liquidity adapter withdrawals
+    ///      This prevents MEV sandwich attacks when adapter executes DEX swaps during deallocate.
+    ///      Set minAmountOut = 0 to disable slippage check (backward compatible).
     function deallocate(
         bytes memory data,
         uint256 assets,
@@ -153,8 +160,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
-        // Decode deallocation data - SAME format as allocate for vault compatibility
-        (bytes32 strategyId, , , Call[] memory withdrawCalls) =
+        // Decode deallocation data with slippage protection parameter
+        (bytes32 strategyId, uint256 minAmountOut, , Call[] memory withdrawCalls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
         // IMPORTANT: No allocation validation here - users should be able to withdraw
@@ -217,6 +224,14 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
                 // If we don't have enough, vault's transferFrom will revert with insufficient balance
             }
+        }
+
+        // SECURITY FIX: Slippage protection for liquidity adapter withdrawals
+        // Prevents MEV sandwich attacks when withdrawal involves DEX swaps
+        // minAmountOut = 0 disables check (backward compatible)
+        // Force deallocate bypasses slippage check as it doesn't execute withdrawal calls
+        if (caller != FORCE_DEALLOCATE_SELECTOR && minAmountOut > 0 && actualAmount < minAmountOut) {
+            revert SlippageTooHigh();
         }
 
         // Update allocation - handle case where actualAmount exceeds tracked allocation

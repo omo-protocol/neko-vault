@@ -56,6 +56,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error CannotSweepAsset();
     error CallFailed(uint256 index, bytes returnData);
     error InvalidAmount();
+    error SlippageTooHigh();
 
     /* EXTERNAL FUNCTIONS */
 

@@ -85,8 +85,9 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Try to deallocate 500 (more than adapter balance of 200)
         // Before fix: Would revert due to protocol failure
         // After fix: Returns whatever balance we have (200)
+        // Note: Set minAmountOut = 0 to disable slippage check (we expect only 200)
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(300e18);
-        bytes memory deallocateData = abi.encode(strategyId, 500e18, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls); // minAmountOut = 0
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 500e18, bytes4(0x4b219d16), address(0));
@@ -117,9 +118,9 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Protocol has funds and will succeed
         protocol.setShouldFail(false);
 
-        // Deallocate 500
+        // Deallocate 500 (minAmountOut = 0 to disable slippage check for this test)
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(300e18);
-        bytes memory deallocateData = abi.encode(strategyId, 500e18, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 500e18, bytes4(0x4b219d16), address(0));
