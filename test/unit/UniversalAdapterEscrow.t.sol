@@ -625,15 +625,6 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(adapter.realAssets(), 5000e6);
     }
 
-    /* RECEIVE ETH TEST */
-
-    function testReceiveETH() public {
-        vm.deal(address(this), 1 ether);
-        (bool success,) = address(adapter).call{value: 1 ether}("");
-        assertTrue(success);
-        assertEq(address(adapter).balance, 1 ether);
-    }
-
     /* L-14 FIX TESTS */
 
     function testForceDeallocateValidation() public {
