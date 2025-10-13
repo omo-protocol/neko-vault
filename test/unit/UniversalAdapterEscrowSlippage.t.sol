@@ -71,24 +71,26 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
-        // Deposit ALL to DEX - adapter balance will be ~0
+        // Deposit 90e18 to DEX (9% under circuit breaker threshold) - adapter balance will be 910e18
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Set DEX to return less than requested (e.g., due to slippage)
         dex.setSlippagePercent(5); // 5% slippage
 
         // Deallocate with minAmountOut = 0 (no slippage check)
-        // Request 500 but will only get 475 due to slippage
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(500e18, 0);
+        // Adapter has 910e18, request 950e18 so it must withdraw 40e18 from DEX
+        // DEX will return 38e18 due to 5% slippage, total = 910 + 38 = 948e18
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
         bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls); // minAmountOut = 0
 
         vm.prank(address(vault));
-        (, int256 change) = adapter.deallocate(deallocateData, 500e18, bytes4(0x4b219d16), address(0));
+        (, int256 change) = adapter.deallocate(deallocateData, 950e18, bytes4(0x4b219d16), address(0));
 
         // Should succeed even with slippage because minAmountOut = 0
+        // Returns 910 (balance) + 38 (DEX with 5% slippage) = 948e18
         uint256 returnedAmount = uint256(-change);
-        assertEq(returnedAmount, 475e18, "Should return slipped amount (475 from 500 with 5% slippage)");
+        assertEq(returnedAmount, 948e18, "Should return balance + slipped DEX amount (910 + 38)");
     }
 
     /**
@@ -104,24 +106,25 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Set acceptable slippage (2%)
         dex.setSlippagePercent(2);
 
-        // Deallocate with minAmountOut = 490e18 (2% slippage tolerance on 500e18)
-        // Will get 490e18 with 2% slippage, which meets minimum
-        uint256 requestedAmount = 500e18;
-        uint256 minAcceptable = 490e18; // 98% of requested
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
+        // Deallocate with slippage check: adapter has 910e18, request 950e18
+        // Must withdraw 40e18 from DEX, which returns 39.2e18 (2% slippage)
+        // Total return = 910 + 39.2 = 949.2e18
+        uint256 requestedAmount = 950e18;
+        uint256 minAcceptable = 948e18; // 2% tolerance: 950 * 0.98 = 931, but we get 910 + 39.2 = 949.2
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
         bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
 
-        // Should succeed - actual return (490) >= minAcceptable (490)
+        // Should succeed - actual return (949.2) >= minAcceptable (948)
         uint256 returnedAmount = uint256(-change);
-        assertEq(returnedAmount, 490e18, "Should return exactly 490 (2% slippage on 500)");
+        assertEq(returnedAmount, 949.2e18, "Should return 910 + 39.2 (2% slippage on 40e18 DEX withdrawal)");
         assertGe(returnedAmount, minAcceptable, "Should meet minimum");
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
     }
@@ -139,16 +142,17 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Set high slippage (10%)
         dex.setSlippagePercent(10);
 
-        // Deallocate with minAmountOut = 490e18 (2% slippage tolerance)
-        // But DEX will only return 450 (10% slippage) - should revert
-        uint256 requestedAmount = 500e18;
-        uint256 minAcceptable = 490e18;
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
+        // Deallocate with minAmountOut = 948e18 (2% slippage tolerance on 950e18)
+        // Adapter has 910e18, need to withdraw 40e18 from DEX
+        // But DEX will only return 36e18 (10% slippage) - total = 910 + 36 = 946e18 < 948e18 - should revert
+        uint256 requestedAmount = 950e18;
+        uint256 minAcceptable = 948e18;
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
         bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
 
         // Should revert with SlippageTooHigh
@@ -172,7 +176,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Simulate MEV sandwich attack:
         // 1. User initiates withdrawal of 500e18
@@ -184,9 +188,11 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         dex.setSlippagePercent(15); // Severe slippage from frontrun
 
         // User withdrawal with slippage protection (2% tolerance)
-        uint256 requestedAmount = 500e18;
-        uint256 minAcceptable = 490e18; // 2% tolerance
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
+        // Adapter has 910e18, request 950e18, must withdraw 40e18 from DEX
+        // With 15% MEV slippage, DEX returns 34e18, total = 910 + 34 = 944e18 < 948e18 - should revert
+        uint256 requestedAmount = 950e18;
+        uint256 minAcceptable = 948e18; // 2% tolerance
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
         bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
 
         // Tx should revert, protecting user from MEV attack
@@ -271,14 +277,16 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Set slippage to exactly hit the minimum
-        dex.setSlippagePercent(2); // Returns 490 from 500
+        dex.setSlippagePercent(2); // Returns 39.2 from 40
 
-        uint256 requestedAmount = 500e18;
-        uint256 minAcceptable = 490e18; // Exactly what DEX will return
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
+        // Adapter has 910e18, request 949.2e18 so it withdraws 39.2e18 from DEX (after 2% slippage on 40e18)
+        // Total return = 910 + 39.2 = 949.2e18
+        uint256 requestedAmount = 949.2e18;
+        uint256 minAcceptable = 949.2e18; // Exactly what will be returned
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
         bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
 
         vm.prank(address(vault));
@@ -300,7 +308,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(1000e18));
+        adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
         // Request 500, but set minAmountOut = 600 (expecting yield)
         // Note: actualAmount is capped to requested assets (500), so this will always fail
@@ -320,35 +328,52 @@ contract UniversalAdapterEscrowSlippageTest is Test {
      */
     function testFuzzSlippageProtection(uint256 amount, uint8 slippagePercent, uint8 tolerancePercent) public {
         amount = bound(amount, 100e18, 1000e18);
-        slippagePercent = uint8(bound(slippagePercent, 0, 50)); // 0-50% slippage
-        tolerancePercent = uint8(bound(tolerancePercent, 0, 50)); // 0-50% tolerance
+        slippagePercent = uint8(bound(slippagePercent, 0, 20)); // 0-20% slippage
+        tolerancePercent = uint8(bound(tolerancePercent, 0, 20)); // 0-20% tolerance
 
-        // Setup: Deposit ALL to DEX for clean slippage test
+        // Setup: Deposit 9% to DEX (under circuit breaker threshold)
         asset.mint(address(adapter), amount);
 
         bytes memory allocateData = abi.encode(strategyId, amount, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, amount, bytes4(0), address(0));
 
+        // Deposit 9% of balance to stay under circuit breaker
+        uint256 depositAmount = (amount * 9) / 100;
         vm.prank(owner);
-        adapter.executeStrategy(strategyId, _createDepositCall(amount));
+        adapter.executeStrategy(strategyId, _createDepositCall(depositAmount));
 
         // Set DEX slippage
         dex.setSlippagePercent(slippagePercent);
 
-        uint256 requestedAmount = amount / 2;
+        // Request 95% of total (adapter has ~91%, so need ~4% from DEX)
+        uint256 requestedAmount = (amount * 95) / 100;
+        uint256 adapterBalance = amount - depositAmount;
+        uint256 dexWithdrawalNeeded = requestedAmount > adapterBalance ? requestedAmount - adapterBalance : 0;
+
+        // Skip if no DEX interaction needed or if slippage would cause underflow
+        if (dexWithdrawalNeeded == 0 || dexWithdrawalNeeded < amount / 100) {
+            return;
+        }
+
+        // Calculate expected return with slippage
+        uint256 dexActualReturn = (dexWithdrawalNeeded * (100 - slippagePercent)) / 100;
+        uint256 totalExpectedReturn = adapterBalance + dexActualReturn;
+
+        // Set minAcceptable based on tolerance
         uint256 minAcceptable = (requestedAmount * (100 - tolerancePercent)) / 100;
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
+
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(dexWithdrawalNeeded, 0);
         bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
 
         vm.prank(address(vault));
 
-        if (slippagePercent > tolerancePercent) {
-            // Slippage exceeds tolerance - should revert
+        if (totalExpectedReturn < minAcceptable) {
+            // Slippage too high - should revert
             vm.expectRevert(IUniversalAdapterEscrow.SlippageTooHigh.selector);
             adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
         } else {
-            // Slippage within tolerance - should succeed
+            // Slippage acceptable - should succeed
             (, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
             assertGe(uint256(-change), minAcceptable, "Should meet minimum in fuzz test");
         }

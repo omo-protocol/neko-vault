@@ -57,6 +57,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error CallFailed(uint256 index, bytes returnData);
     error InvalidAmount();
     error SlippageTooHigh();
+    error ExcessiveBalanceLoss();
 
     /* EXTERNAL FUNCTIONS */
 

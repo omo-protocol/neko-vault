@@ -21,6 +21,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
 
+    // Circuit breaker: Maximum acceptable balance loss per executeStrategy call (10% = 1000 basis points)
+    uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
+
     /* IMMUTABLES */
 
     address public immutable parentVault;
@@ -398,8 +401,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IUniversalAdapterEscrow
     /// @dev SECURITY WARNING - MEV/Sandwich Attack Risk:
-    ///      This function executes arbitrary whitelisted calls without built-in slippage protection.
-    ///      Strategy agents are RESPONSIBLE for including slippage/deadline checks in their call data.
+    ///      This function executes arbitrary whitelisted calls with basic circuit breaker protection.
+    ///      Circuit breaker prevents catastrophic losses (>10%) but strategy agents are still
+    ///      RESPONSIBLE for including slippage/deadline checks in their call data.
     ///
     ///      Example attack without slippage protection:
     ///      1. Agent submits withdrawal from DEX
@@ -407,13 +411,19 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      3. Agent's tx executes at bad price → principal loss
     ///      4. MEV bot backruns: extracts profit
     ///
+    ///      DEFENSE-IN-DEPTH PROTECTION:
+    ///      - Circuit breaker: Prevents >10% balance loss per operation (last-resort safety)
+    ///      - Agent responsibility: Use protocol-native slippage parameters (primary defense)
+    ///      - Deadline parameters: Prevent stale transactions
+    ///      - Private mempools: Consider Flashbots for sensitive operations
+    ///
     ///      MITIGATION - Agents MUST:
     ///      - Use protocol-native slippage parameters (e.g., Uniswap minAmountOut)
     ///      - Include deadline parameters to prevent stale transactions
     ///      - Consider using private mempools (Flashbots, etc.)
     ///      - Monitor for MEV and adjust strategies accordingly
     ///
-    ///      For additional protection, use executeStrategyWithSlippage() instead.
+    ///      For additional protection with explicit balance checks, use executeStrategyWithSlippage() instead.
     function executeStrategy(
         bytes32 strategyId,
         Call[] calldata calls
@@ -642,12 +652,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /* INTERNAL FUNCTIONS */
 
-    /// @notice Execute multiple calls with validation
+    /// @notice Execute multiple calls with validation and circuit breaker
     /// @param strategyId The strategy identifier for tracking external deposits
     /// @param calls Array of calls to execute
     /// @dev SECURITY WARNING: No built-in slippage protection!
     ///      Agents must include slippage/deadline checks in call data to prevent MEV attacks.
     ///      Consider using executeStrategyWithSlippage() for additional protection.
+    ///
+    ///      CIRCUIT BREAKER: Prevents >10% balance loss per operation (last-resort safety).
+    ///      This protects against direct theft or unexpected losses, but has limitations:
+    ///      - Cannot distinguish legitimate protocol deposits from malicious transfers
+    ///      - Any balance decrease >10% triggers circuit breaker, even if intentional
+    ///      - For protocol deposits >10% of balance, split into smaller calls or use pre-approved amounts
     function _executeMulticall(bytes32 strategyId, Call[] memory calls) internal {
         // L-16 Fix: Removed daily limit tracking logic per recommendation
         // Daily limits were problematic and could prevent emergency operations
@@ -682,6 +698,25 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
+        // CIRCUIT BREAKER: Check for excessive balance loss BEFORE balance delta tracking
+        // This must happen here (not in executeStrategy) because balance delta tracking below
+        // would adjust totalExternalDeposits and mask the loss
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        if (balanceAfter < balanceBefore && balanceBefore > 0) {
+            uint256 loss = balanceBefore - balanceAfter;
+            uint256 lossBps = (loss * 10000) / balanceBefore;
+
+            // Revert if balance decreased by more than 10%
+            // NOTE: This also triggers for legitimate protocol deposits >10%
+            // For large deposits, either:
+            // 1. Split into smaller calls
+            // 2. Ensure whitelisted protocol has approval and deposits directly
+            // 3. Use executeStrategyWithSlippage with minBalanceIncrease=0 to bypass
+            if (lossBps > MAX_BALANCE_LOSS_BPS) {
+                revert ExcessiveBalanceLoss();
+            }
+        }
+
         // SECURITY FIX Issue #3: Net-delta balance tracking limitation
         // This approach has fundamental limitations:
         // - Cannot distinguish profit/yield accrual from explicit withdrawals
@@ -703,7 +738,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // - Track each call's balance delta individually within the loop
         // - Or remove this tracking entirely and rely solely on valuer
 
-        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        // Balance delta tracking for external deposits (reuse balanceAfter from circuit breaker)
 
         if (balanceAfter < balanceBefore) {
             // Net balance decreased - likely deposit to external protocol
