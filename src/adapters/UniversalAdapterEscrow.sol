@@ -38,6 +38,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Total allocations tracking for gas optimization
     uint256 public totalAllocations;
 
+    // Track tokens deposited to external protocols per strategy
+    // This enables accurate idle asset calculation even after execution
+    mapping(bytes32 => uint256) public externalDeposits;
+    uint256 public totalExternalDeposits;
+
     // Whitelist management
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
 
@@ -370,32 +375,49 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /// @notice Get idle assets that are not allocated to any strategy
-    /// @dev L-04 FIX: Returns truly idle assets by subtracting allocated-but-not-executed assets
-    ///      When allocate() is called with executeNow=false, assets remain in adapter but are tracked
-    ///      in totalAllocations. This function excludes those allocated assets to show only genuinely
-    ///      idle assets available for new allocations.
+    /// @dev CRITICAL FIX (L-04 + external deposit tracking):
+    ///      Returns truly idle assets by accounting for:
+    ///      1. Assets allocated to strategies (totalAllocations)
+    ///      2. Assets moved to external protocols (totalExternalDeposits)
+    ///
+    ///      Formula: balance - (totalAllocations - totalExternalDeposits)
+    ///
+    ///      Example scenario:
+    ///      - 1000 tokens transferred to adapter, totalAllocations = 1000
+    ///      - executeStrategy deposits 600 to external protocol
+    ///      - Adapter balance = 400, totalAllocations = 1000, totalExternalDeposits = 600
+    ///      - Allocated assets still in adapter = 1000 - 600 = 400
+    ///      - Idle assets = 400 - 400 = 0 (correct!)
+    ///
     /// @return idleAssets Amount of assets sitting idle in the adapter (not allocated to any strategy)
     function getIdleAssets() external view returns (uint256 idleAssets) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
 
-        // L-04 SECURITY FIX: Subtract allocated assets to return truly idle assets
-        // totalAllocations tracks assets that are allocated to strategies (whether executed or not)
-        // Truly idle assets = balance - allocated assets
-        if (balance > totalAllocations) {
-            return balance - totalAllocations;
+        // Calculate how many allocated assets are still in the adapter (not moved to external protocols)
+        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
+            ? totalAllocations - totalExternalDeposits
+            : 0;
+
+        // Truly idle assets = balance - allocated assets still in adapter
+        if (balance > allocatedInAdapter) {
+            return balance - allocatedInAdapter;
         }
 
-        // Safety: if balance < totalAllocations (e.g., due to external transfers), return 0
+        // Safety: if balance < allocatedInAdapter, return 0
         return 0;
     }
 
     /* INTERNAL FUNCTIONS */
 
     /// @notice Execute multiple calls with validation
+    /// @param strategyId The strategy identifier for tracking external deposits
     /// @param calls Array of calls to execute
-    function _executeMulticall(bytes32 /* strategyId */, Call[] memory calls) internal {
+    function _executeMulticall(bytes32 strategyId, Call[] memory calls) internal {
         // L-16 Fix: Removed daily limit tracking logic per recommendation
         // Daily limits were problematic and could prevent emergency operations
+
+        // CRITICAL FIX: Track balance before execution to detect token movements
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
         for (uint256 i = 0; i < calls.length; i++) {
             Call memory call = calls[i];
@@ -423,6 +445,27 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 revert CallFailed(i, returnData);
             }
         }
+
+        // CRITICAL FIX: Track balance changes to update external deposit accounting
+        // This ensures getIdleAssets() remains accurate after tokens move to external protocols
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+
+        if (balanceAfter < balanceBefore) {
+            // Tokens were deposited to external protocol
+            uint256 deposited = balanceBefore - balanceAfter;
+            externalDeposits[strategyId] += deposited;
+            totalExternalDeposits += deposited;
+        } else if (balanceAfter > balanceBefore) {
+            // Tokens were withdrawn from external protocol
+            uint256 withdrawn = balanceAfter - balanceBefore;
+            // Decrease external deposits, but don't go below zero
+            uint256 decreaseAmount = withdrawn > externalDeposits[strategyId]
+                ? externalDeposits[strategyId]
+                : withdrawn;
+            externalDeposits[strategyId] -= decreaseAmount;
+            totalExternalDeposits -= decreaseAmount;
+        }
+        // If balanceAfter == balanceBefore, no accounting update needed
     }
 
 

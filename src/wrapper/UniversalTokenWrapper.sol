@@ -228,6 +228,7 @@ contract UniversalTokenWrapper {
     /// @notice Withdraw underlying assets to receiver, burning shares from owner.
     /// @dev Measures actual balance delta to support tokens with sender-charged fees.
     ///      Protected against reentrancy to prevent underflow DoS attacks.
+    ///      SECURITY FIX: Handles positive rebases that occur during transfer.
     function withdraw(uint256 assets, address receiver, address owner_) external nonReentrant returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
@@ -241,10 +242,22 @@ contract UniversalTokenWrapper {
 
         // Measure actual balance delta (protects against sender-charged fees)
         uint256 afterBal = IERC20(underlying).balanceOf(address(this));
-        uint256 actualTransferred = beforeBal - afterBal;
+
+        // SECURITY FIX: Handle positive rebases that cause afterBal >= beforeBal
+        // If positive rebase occurs during transfer, wrapper gains value - treat as zero-cost withdrawal
+        uint256 actualTransferred;
+        if (afterBal >= beforeBal) {
+            // Positive rebase occurred (e.g., stETH rebase, on-transfer credits)
+            // The wrapper gained tokens during the transfer, so use requested amount
+            actualTransferred = assets;
+        } else {
+            // Normal case or sender-charged fee case
+            actualTransferred = beforeBal - afterBal;
+        }
 
         // For standard tokens: actualTransferred == assets
         // For sender-charged fee tokens: actualTransferred > assets (sender pays fee)
+        // For positive rebase tokens: actualTransferred == assets (wrapper benefits from rebase)
         // Calculate shares using PRE-transfer state to burn correct amount
         if (_totalSupply == 0 || beforeBal == 0) {
             shares = actualTransferred;
@@ -262,7 +275,8 @@ contract UniversalTokenWrapper {
     /// @notice Redeem shares for underlying assets to receiver.
     /// @dev Measures actual balance delta to support tokens with sender-charged fees.
     ///      Protected against reentrancy to prevent underflow DoS attacks.
-    ///      CRITICAL FIX: Burns additional shares if sender-charged fees cause higher actual outflow.
+    ///      SECURITY FIX: Burns additional shares if sender-charged fees cause higher actual outflow.
+    ///      SECURITY FIX: Handles positive rebases that occur during transfer.
     function redeem(uint256 shares, address receiver, address owner_) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
@@ -280,12 +294,23 @@ contract UniversalTokenWrapper {
         // Execute transfer
         SafeERC20Lib.safeTransfer(underlying, receiver, assets);
 
-        // Measure actual balance delta (captures sender-charged fees)
+        // Measure actual balance delta (captures sender-charged fees AND positive rebases)
         uint256 afterBal = IERC20(underlying).balanceOf(address(this));
-        uint256 actualTransferred = beforeBal - afterBal;
+
+        // SECURITY FIX: Handle positive rebases that cause afterBal >= beforeBal
+        uint256 actualTransferred;
+        if (afterBal >= beforeBal) {
+            // Positive rebase occurred during transfer - wrapper gained value
+            // Treat as requested amount for share burn calculation
+            actualTransferred = assets;
+        } else {
+            // Normal case or sender-charged fee case
+            actualTransferred = beforeBal - afterBal;
+        }
 
         // CRITICAL SECURITY FIX: For sender-charged fee tokens, actualTransferred > assets
         // We must burn additional shares to prevent exchange rate dilution
+        // Note: This only applies when actualTransferred > assets (not for positive rebases)
         if (actualTransferred > assets) {
             // Calculate how many shares SHOULD have been burned based on actual outflow
             // Use PRE-burn totalSupply to maintain correct exchange rate
