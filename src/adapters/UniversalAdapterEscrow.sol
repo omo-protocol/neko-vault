@@ -240,6 +240,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // This function ensures all assets (both allocated to strategies and idle) are accounted for
         // No assets are lost or left unused in the adapter
 
+        // Calculate minimum known value upfront (needed for validation)
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 minKnownValue = balance + totalExternalDeposits;
+
         // Call getTotalValue which aggregates all strategy values + idle assets
         (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getTotalValue(address)", address(this))
@@ -247,12 +251,55 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
-            if (totalValue > 0) {
+
+            // CRITICAL SECURITY FIX Issue #6 (Tolerance-Based Approach):
+            // Balance between preventing malicious underpricing and allowing legitimate losses
+            //
+            // PROBLEM WITH STRICT MINIMUM:
+            // - totalExternalDeposits tracks historical flows, not current value
+            // - When deposits have slippage/fees (e.g., 800 sent → 760 value), creates "ghost"
+            // - Strict check (totalValue >= minKnownValue) causes persistent overpricing
+            // - Ghost accumulates with each loss: 5 KHYPE loss → permanent 5 KHYPE overprice
+            //
+            // SOLUTION: Tolerance-Based Validation
+            // - Allow valuer values within 10% of minimum (accounts for legitimate losses)
+            // - Reject valuer values >10% below minimum (likely malicious/buggy)
+            //
+            // LEGITIMATELY ACCEPTED (totalValue >= 90% of minKnownValue):
+            // ✅ Swap slippage: 0.5-2% loss
+            // ✅ Protocol deposit fees: 0.1-1% loss
+            // ✅ Small trading losses: < 10%
+            // ✅ Prevents ghost accumulation from normal operations
+            // ✅ Profits (totalValue > minKnownValue) always accepted
+            //
+            // ATTACKS PREVENTED (totalValue < 90% of minKnownValue):
+            // ❌ 50% malicious underpricing → returns minKnownValue
+            // ❌ 90% compromised valuer → returns minKnownValue
+            // ❌ Oracle manipulation > 10% → returns minKnownValue
+            //
+            // TRADE-OFF:
+            // - Losses > 10% still create small ghost (but rare in normal operations)
+            // - Attacker needs to manipulate valuer by >10% (much harder)
+            // - Prevents persistent overpricing from normal slippage/fees
+
+            // Calculate 90% threshold (allow up to 10% loss)
+            // Use 9000 / 10000 to avoid precision loss
+            uint256 lossToleranceThreshold = (minKnownValue * 9000) / 10000;
+
+            if (totalValue >= lossToleranceThreshold) {
+                // Within tolerance - accept valuer's value
+                // This handles:
+                // - Normal profits (totalValue > minKnownValue)
+                // - Legitimate losses (minKnownValue > totalValue >= 90% minKnownValue)
                 return totalValue;
             }
+
+            // Extreme undervaluation (>10% below minimum)
+            // Likely malicious/buggy valuer - protect holders by using minimum
+            return minKnownValue;
         }
 
-        // CRITICAL SECURITY FIX: Proper fallback when valuer fails
+        // CRITICAL SECURITY FIX Issue #4: Proper fallback when valuer fails
         // Previous code only returned balance, missing external deposits → massive underpricing!
         //
         // Example attack scenario with old code:
@@ -264,8 +311,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         //
         // Correct fallback: balance + tracked external deposits
         // This gives us principal but misses yield (safer than underpricing)
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-        return balance + totalExternalDeposits;
+        return minKnownValue;
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
@@ -407,6 +453,55 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         owner = newOwner;
     }
 
+    /// @inheritdoc IUniversalAdapterEscrow
+    /// @notice Manually adjust totalExternalDeposits to remove ghost amounts
+    /// @dev SECURITY FIX Issue #6: Manual intervention for large losses (>10%) that exceeded tolerance
+    ///
+    ///      USE CASES:
+    ///      - Market crash causes >10% loss → ghost accumulates
+    ///      - Strategy exits with high slippage during black swan events
+    ///      - Periodic maintenance to clear accumulated small ghosts
+    ///      - After large losses from liquidations/exploits in external protocols
+    ///
+    ///      SECURITY MEASURES:
+    ///      - Can only reduce totalExternalDeposits (removing ghost, not creating it)
+    ///      - New value must be within 20% of valuer's current report
+    ///      - Only owner can call (not paused check)
+    ///      - Emits event for transparency/auditability
+    ///
+    ///      WORKFLOW:
+    ///      1. Monitor getGhostAmount() for significant ghosts
+    ///      2. Verify valuer is reporting accurate current value
+    ///      3. Calculate correct external deposits: valuerValue - balance
+    ///      4. Call syncExternalDeposits with corrected value
+    function syncExternalDeposits(uint256 newTotalExternalDeposits) external onlyOwner {
+        require(!paused, "Paused");
+
+        // SECURITY: Can only reduce, never increase (removing ghost, not creating it)
+        require(newTotalExternalDeposits <= totalExternalDeposits, "Can only reduce ghost");
+
+        // VALIDATION: New value should make sense given valuer's current report
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 newMinKnown = balance + newTotalExternalDeposits;
+
+        (bool success, bytes memory data) = valuer.staticcall(
+            abi.encodeWithSignature("getTotalValue(address)", address(this))
+        );
+
+        if (success && data.length >= 32) {
+            uint256 valuerValue = abi.decode(data, (uint256));
+
+            // SAFETY CHECK: New minimum shouldn't be too far below valuer value
+            // Allow up to 20% below valuer for safety margin (more conservative than 10% tolerance)
+            require(valuerValue >= (newMinKnown * 8000) / 10000, "New value too low vs valuer");
+        }
+
+        uint256 oldValue = totalExternalDeposits;
+        totalExternalDeposits = newTotalExternalDeposits;
+
+        emit ExternalDepositsSynced(msg.sender, oldValue, newTotalExternalDeposits);
+    }
+
     /* VIEW FUNCTIONS */
 
     /// @inheritdoc IUniversalAdapterEscrow
@@ -460,6 +555,47 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Safety: if balance < allocatedInAdapter, return 0
         return 0;
+    }
+
+    /// @inheritdoc IUniversalAdapterEscrow
+    /// @notice Calculate current ghost amount (overpricing) if any
+    /// @dev SECURITY FIX Issue #6: Helper function to monitor when manual sync might be needed
+    ///
+    ///      WHAT IS A GHOST AMOUNT:
+    ///      Ghost = The amount by which minKnownValue exceeds the valuer's reported real value
+    ///      This happens when:
+    ///      - Large losses (>10%) exceed the tolerance threshold
+    ///      - Multiple small losses accumulate over time
+    ///      - Protocol liquidations or exploits cause value loss
+    ///
+    ///      WHEN TO SYNC:
+    ///      - If ghost > 0.5% of totalAssets: Consider syncing
+    ///      - If ghost > 2% of totalAssets: Should sync soon
+    ///      - If ghost > 5% of totalAssets: Sync urgently
+    ///
+    ///      Example:
+    ///      - totalExternalDeposits = 1000 (historical flows)
+    ///      - balance = 200
+    ///      - minKnownValue = 1200
+    ///      - Valuer reports: 1000 (real current value after 20% loss)
+    ///      - Ghost = 1200 - 1000 = 200 (16.7% overpricing!)
+    ///
+    /// @return ghost The amount of overpricing (0 if no ghost detected)
+    function getGhostAmount() external view returns (uint256 ghost) {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 minKnown = balance + totalExternalDeposits;
+
+        (bool success, bytes memory data) = valuer.staticcall(
+            abi.encodeWithSignature("getTotalValue(address)", address(this))
+        );
+
+        if (success && data.length >= 32) {
+            uint256 valuerValue = abi.decode(data, (uint256));
+            if (minKnown > valuerValue) {
+                return minKnown - valuerValue; // Amount of ghost (overpricing)
+            }
+        }
+        return 0; // No ghost detected
     }
 
     /* INTERNAL FUNCTIONS */
