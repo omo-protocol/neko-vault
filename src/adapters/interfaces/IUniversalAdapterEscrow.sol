@@ -41,6 +41,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     event PauseStatusChanged(bool paused);
     event AllocationUpdated(bytes32 indexed strategyId, uint256 newAmount, int256 change);
     event StrategyRemoved(bytes32 indexed strategyId);
+    event ExternalDepositsSynced(address indexed syncer, uint256 oldValue, uint256 newValue);
 
     /* ERRORS */
 
@@ -104,6 +105,10 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @param _paused Whether to pause the contract
     function setPaused(bool _paused) external;
 
+    /// @notice Manually sync totalExternalDeposits to remove ghost amounts
+    /// @param newTotalExternalDeposits The corrected external deposits value (must be <= current)
+    function syncExternalDeposits(uint256 newTotalExternalDeposits) external;
+
     /* VIEW FUNCTIONS */
 
     /// @notice Get strategy configuration
@@ -150,4 +155,9 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
     /// @return idleAssets Amount of assets sitting idle in the adapter
     function getIdleAssets() external view returns (uint256 idleAssets);
+
+    /// @notice Calculate current ghost amount (overpricing) if any
+    /// @dev Helper function to monitor when manual sync might be needed
+    /// @return ghost The amount by which minKnownValue exceeds valuer's reported value
+    function getGhostAmount() external view returns (uint256 ghost);
 }
