@@ -252,8 +252,20 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // Fallback: return at least the idle assets (ensures no assets are hidden)
-        return IERC20(asset).balanceOf(address(this));
+        // CRITICAL SECURITY FIX: Proper fallback when valuer fails
+        // Previous code only returned balance, missing external deposits → massive underpricing!
+        //
+        // Example attack scenario with old code:
+        // - 1000 total: 200 in adapter, 800 in external protocols
+        // - Valuer fails → returned only 200
+        // - New depositor deposits 200, gets 50% shares
+        // - But real value is 1200, so they only provided 16.7% of value
+        // - Existing holders diluted by 33%!
+        //
+        // Correct fallback: balance + tracked external deposits
+        // This gives us principal but misses yield (safer than underpricing)
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        return balance + totalExternalDeposits;
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
@@ -306,11 +318,54 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /* EXTERNAL FUNCTIONS - STRATEGY EXECUTION */
 
     /// @inheritdoc IUniversalAdapterEscrow
+    /// @dev SECURITY WARNING - MEV/Sandwich Attack Risk:
+    ///      This function executes arbitrary whitelisted calls without built-in slippage protection.
+    ///      Strategy agents are RESPONSIBLE for including slippage/deadline checks in their call data.
+    ///
+    ///      Example attack without slippage protection:
+    ///      1. Agent submits withdrawal from DEX
+    ///      2. MEV bot frontruns: manipulates pool price
+    ///      3. Agent's tx executes at bad price → principal loss
+    ///      4. MEV bot backruns: extracts profit
+    ///
+    ///      MITIGATION - Agents MUST:
+    ///      - Use protocol-native slippage parameters (e.g., Uniswap minAmountOut)
+    ///      - Include deadline parameters to prevent stale transactions
+    ///      - Consider using private mempools (Flashbots, etc.)
+    ///      - Monitor for MEV and adjust strategies accordingly
+    ///
+    ///      For additional protection, use executeStrategyWithSlippage() instead.
     function executeStrategy(
         bytes32 strategyId,
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         _executeMulticall(strategyId, calls);
+        emit StrategyExecuted(strategyId, msg.sender);
+    }
+
+    /// @notice Execute strategy calls with additional slippage protection
+    /// @param strategyId The strategy identifier
+    /// @param calls Array of calls to execute
+    /// @param minBalanceIncrease Minimum balance increase required (for withdrawals), 0 to skip check
+    /// @dev SECURITY FEATURE: Provides additional slippage protection on top of protocol-native checks
+    ///      This is NOT a substitute for proper slippage parameters in call data!
+    ///      Use this for withdrawals where you expect balance to increase.
+    ///      For deposits (balance decreases), set minBalanceIncrease to 0.
+    function executeStrategyWithSlippage(
+        bytes32 strategyId,
+        Call[] calldata calls,
+        uint256 minBalanceIncrease
+    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
+        _executeMulticall(strategyId, calls);
+
+        // Slippage check for withdrawals
+        if (minBalanceIncrease > 0) {
+            uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+            require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
+        }
+
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -412,6 +467,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @notice Execute multiple calls with validation
     /// @param strategyId The strategy identifier for tracking external deposits
     /// @param calls Array of calls to execute
+    /// @dev SECURITY WARNING: No built-in slippage protection!
+    ///      Agents must include slippage/deadline checks in call data to prevent MEV attacks.
+    ///      Consider using executeStrategyWithSlippage() for additional protection.
     function _executeMulticall(bytes32 strategyId, Call[] memory calls) internal {
         // L-16 Fix: Removed daily limit tracking logic per recommendation
         // Daily limits were problematic and could prevent emergency operations
