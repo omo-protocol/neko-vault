@@ -390,6 +390,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (minConfidence < defaultConfidenceThreshold || minConfidence > 100) revert LowConfidence();
 
+        // L-03 SECURITY FIX: Ensure minUpdateInterval < maxStaleness to prevent configuration conflicts
+        // If minUpdateInterval >= maxStaleness, the value becomes stale before it can be updated,
+        // creating a window where the strategy is unusable (stale but can't update yet)
+        if (minUpdateInterval >= maxStaleness) revert UpdateIntervalExceedsStaleness();
+
         // M-08 FIX: Ensure pushThreshold doesn't exceed maxPriceChangeBps to prevent stuck strategies
         uint256 maxChange = maxPriceChangeBps[strategyId];
         if (maxChange == 0) {

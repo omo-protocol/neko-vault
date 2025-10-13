@@ -1750,6 +1750,64 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
+    /**
+     * @notice Test L-03 fix: minUpdateInterval must be less than maxStaleness
+     * @dev This validates the security fix preventing configuration conflicts where values become stale before they can be updated
+     */
+    function testConfigureStrategyUpdateIntervalExceedsStaleness() public {
+        vm.startPrank(owner);
+
+        // Case 1: minUpdateInterval = maxStaleness (should revert)
+        vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            12 hours,  // minUpdateInterval
+            12 hours,  // maxStaleness - equal to minUpdateInterval
+            1000,
+            95
+        );
+
+        // Case 2: minUpdateInterval > maxStaleness (should revert)
+        vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
+        valuer.configureStrategy(
+            STRATEGY_A,
+            20 hours,  // minUpdateInterval
+            12 hours,  // maxStaleness - less than minUpdateInterval
+            1000,
+            95
+        );
+
+        // Case 3: Edge case - minUpdateInterval just 1 second less than maxStaleness (should succeed)
+        valuer.configureStrategy(
+            STRATEGY_A,
+            12 hours - 1,  // minUpdateInterval (just under maxStaleness)
+            12 hours,      // maxStaleness
+            1000,
+            95
+        );
+
+        // Verify the configuration was set correctly
+        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) =
+            valuer.updateConfigs(STRATEGY_A);
+        assertEq(minInterval, 12 hours - 1, "Should set minUpdateInterval");
+        assertEq(maxStale, 12 hours, "Should set maxStaleness");
+
+        // Case 4: Valid configuration with minUpdateInterval significantly less than maxStaleness
+        valuer.configureStrategy(
+            STRATEGY_B,
+            1 hours,   // minUpdateInterval
+            24 hours,  // maxStaleness - much greater than minUpdateInterval
+            1000,
+            95
+        );
+
+        (minInterval, maxStale, pushThresh, minConf) = valuer.updateConfigs(STRATEGY_B);
+        assertEq(minInterval, 1 hours, "Should set minUpdateInterval for STRATEGY_B");
+        assertEq(maxStale, 24 hours, "Should set maxStaleness for STRATEGY_B");
+
+        vm.stopPrank();
+    }
+
     function testConfigureStrategyWithCustomConfidenceThreshold() public {
         vm.startPrank(owner);
 
