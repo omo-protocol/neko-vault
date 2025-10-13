@@ -379,6 +379,38 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
+    /**
+     * @notice Test L-01 fix: setPriceChangeBounds should enforce MAX_PRICE_CHANGE_BPS as absolute upper limit
+     * @dev This validates the security fix ensuring maxChangeBps cannot exceed MAX_PRICE_CHANGE_BPS (50%)
+     */
+    function testSetPriceChangeBoundsExceedsMaximum() public {
+        vm.startPrank(owner);
+
+        // L-01 SECURITY FIX: Attempting to set maxChangeBps above MAX_PRICE_CHANGE_BPS (5000 = 50%) should revert
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 5001); // Just above 50% limit
+
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 7000); // 70% - should not be allowed
+
+        vm.expectRevert(IUniversalValuerOffchain.InvalidPriceChangeBounds.selector);
+        valuer.setPriceChangeBounds(STRATEGY_A, 10000); // 100% - BASIS_POINTS but above MAX_PRICE_CHANGE_BPS
+
+        // Setting exactly at MAX_PRICE_CHANGE_BPS should succeed
+        vm.expectEmit(true, true, true, true);
+        emit PriceChangeBoundsSet(STRATEGY_A, 5000);
+        valuer.setPriceChangeBounds(STRATEGY_A, 5000); // Exactly 50% - should succeed
+        assertEq(valuer.maxPriceChangeBps(STRATEGY_A), 5000);
+
+        // Setting below MAX_PRICE_CHANGE_BPS should also succeed
+        vm.expectEmit(true, true, true, true);
+        emit PriceChangeBoundsSet(STRATEGY_B, 3000);
+        valuer.setPriceChangeBounds(STRATEGY_B, 3000); // 30% - should succeed
+        assertEq(valuer.maxPriceChangeBps(STRATEGY_B), 3000);
+
+        vm.stopPrank();
+    }
+
     function testSetFallbackValue() public {
         uint256 fallbackValue = 500e18;
 

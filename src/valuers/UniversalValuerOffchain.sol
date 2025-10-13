@@ -414,7 +414,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @notice Set price change bounds for a strategy
+    /// @dev L-01 FIX: Enforce MAX_PRICE_CHANGE_BPS as absolute upper limit for consistent bounds
     function setPriceChangeBounds(bytes32 strategyId, uint256 maxChangeBps) external onlyOwner {
+        // L-01 SECURITY FIX: Enforce that maxChangeBps cannot exceed MAX_PRICE_CHANGE_BPS (50%)
+        // This maintains semantic consistency - MAX_PRICE_CHANGE_BPS is truly the maximum allowed
+        // Without this check, the "MAX" designation would be misleading
+        if (maxChangeBps > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (maxChangeBps > BASIS_POINTS) revert InvalidPriceChangeBounds();
 
         // M-08 FIX: Ensure new price bounds don't conflict with existing pushThreshold
