@@ -180,34 +180,34 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 actualAmount = assets;
                 // No external calls needed - we have sufficient balance
 
-            } else {//THIS WHEN ASSETS > ADAPTER BALANCE
-                // Scenario 2: Balance covers partially or 0 - use existing balance + withdraw difference
-                // We have adapterBalance available, need (assets - adapterBalance) more from protocol
-                uint256 currentValue = _getStrategyValue(strategyId);
-                uint256 balance = IERC20(asset).balanceOf(address(this));
-
-                uint256 missingAmount = assets - adapterBalance;
+            } else {
+                // Scenario 2: Insufficient balance - need to withdraw from protocol
+                // SECURITY FIX Issues #1 & #2: Removed restrictive valuer cap
 
                 // Execute withdrawal calls to get the missing amount from protocol
                 if (withdrawCalls.length > 0) {
                     _executeMulticall(strategyId, withdrawCalls);
                 }
 
-                uint256 newBalance = IERC20(asset).balanceOf(address(this));
-                uint256 actualWithdrawn = newBalance - balance;
+                uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
 
-                // We can provide: existing balance + what we actually withdrew
-                actualAmount = (actualWithdrawn > missingAmount ? missingAmount : actualWithdrawn) + balance;
+                // CRITICAL FIX: Cap actualAmount to requested assets to prevent accounting mismatch
+                // If protocol returns more than needed (e.g., balanceAfter=900, assets=800),
+                // we MUST cap to assets=800, otherwise:
+                // - Adapter returns change=-900
+                // - Vault decreases caps by 900
+                // - But vault only pulls 800 via transferFrom
+                // - Result: 100 token accounting loss!
 
-                // Cap to requested amount (in case we got more than needed)
+                actualAmount = balanceAfter;
+
+                // Cap to requested amount (prevents accounting mismatch)
                 if (actualAmount > assets) {
                     actualAmount = assets;
                 }
 
-                // Ensure we don't report more than what strategy actually had
-                if (actualAmount > currentValue) {
-                    actualAmount = currentValue;
-                }
+                // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
+                // If we don't have enough, vault's transferFrom will revert with insufficient balance
             }
         }
 
@@ -446,17 +446,38 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // CRITICAL FIX: Track balance changes to update external deposit accounting
-        // This ensures getIdleAssets() remains accurate after tokens move to external protocols
+        // SECURITY FIX Issue #3: Net-delta balance tracking limitation
+        // This approach has fundamental limitations:
+        // - Cannot distinguish profit/yield accrual from explicit withdrawals
+        // - Cannot distinguish losses/liquidations from explicit deposits
+        // - Complex multicalls with multiple operations lose granular information
+        //
+        // IMPACT ON getIdleAssets():
+        // - If profit accrues outside this function (direct protocol rewards), then later
+        //   withdrawals will incorrectly decrease externalDeposits
+        // - If multicall does deposit+withdraw in same tx, net change of 0 hides both operations
+        //
+        // MITIGATION:
+        // - Primary source of truth is the valuer's getValue() for each strategy
+        // - externalDeposits is best-effort approximation for getIdleAssets()
+        // - Allocators should periodically sync by deallocating/reallocating to reset state
+        //
+        // PROPER FIX would require:
+        // - Classify each whitelisted function as deposit/withdraw/neutral
+        // - Track each call's balance delta individually within the loop
+        // - Or remove this tracking entirely and rely solely on valuer
+
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
 
         if (balanceAfter < balanceBefore) {
-            // Tokens were deposited to external protocol
+            // Net balance decreased - likely deposit to external protocol
+            // NOTE: Could also be loss/fee, causing externalDeposits overcount
             uint256 deposited = balanceBefore - balanceAfter;
             externalDeposits[strategyId] += deposited;
             totalExternalDeposits += deposited;
         } else if (balanceAfter > balanceBefore) {
-            // Tokens were withdrawn from external protocol
+            // Net balance increased - likely withdrawal from external protocol
+            // NOTE: Could also be profit/yield, causing externalDeposits undercount
             uint256 withdrawn = balanceAfter - balanceBefore;
             // Decrease external deposits, but don't go below zero
             uint256 decreaseAmount = withdrawn > externalDeposits[strategyId]
@@ -465,7 +486,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             externalDeposits[strategyId] -= decreaseAmount;
             totalExternalDeposits -= decreaseAmount;
         }
-        // If balanceAfter == balanceBefore, no accounting update needed
+        // If balanceAfter == balanceBefore, no accounting update
+        // NOTE: This misses cases where deposit+withdrawal happened in same multicall
     }
 
 
