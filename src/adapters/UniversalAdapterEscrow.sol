@@ -753,5 +753,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
 
     /// @notice Receive ETH
-    receive() external payable {}
+    /// @dev COMMENTED OUT FOR NOW AS WE DON'T ACCEPT ETH
+    // receive() external payable {}
 }
