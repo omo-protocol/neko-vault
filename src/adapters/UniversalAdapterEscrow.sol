@@ -184,9 +184,17 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // Scenario 2: Insufficient balance - need to withdraw from protocol
                 // SECURITY FIX Issues #1 & #2: Removed restrictive valuer cap
 
-                // Execute withdrawal calls to get the missing amount from protocol
+                // SECURITY FIX Issue #7: Try-catch multicall to prevent revert-on-failure DoS
+                // If protocol withdrawal fails (no liquidity, paused, etc.), we can still
+                // return whatever balance we have instead of reverting entire deallocate
                 if (withdrawCalls.length > 0) {
-                    _executeMulticall(strategyId, withdrawCalls);
+                    try this.externalExecuteMulticall(strategyId, withdrawCalls) {
+                        // Success - balance increased from protocol withdrawal
+                    } catch {
+                        // Failure - protocol couldn't provide liquidity
+                        // Continue with current balance (partial fulfillment)
+                        // Vault's transferFrom will naturally limit to available balance
+                    }
                 }
 
                 uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
@@ -232,6 +240,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         change = -int256(actualAmount);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
+    }
+
+    /// @notice External wrapper for _executeMulticall to enable try-catch in deallocate
+    /// @dev SECURITY FIX Issue #7: Allows deallocate to gracefully handle protocol withdrawal failures
+    ///      This function is external to enable try-catch, but can only be called by this contract
+    /// @param strategyId The strategy identifier
+    /// @param calls Array of calls to execute
+    function externalExecuteMulticall(bytes32 strategyId, Call[] memory calls) external {
+        require(msg.sender == address(this), "Only self");
+        _executeMulticall(strategyId, calls);
     }
 
     /// @inheritdoc IAdapter
@@ -456,26 +474,35 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @inheritdoc IUniversalAdapterEscrow
     /// @notice Manually adjust totalExternalDeposits to remove ghost amounts
     /// @dev SECURITY FIX Issue #6: Manual intervention for large losses (>10%) that exceeded tolerance
+    ///      SECURITY FIX Issue #8: No pause check - owner can fix mispricing even during pause
     ///
     ///      USE CASES:
     ///      - Market crash causes >10% loss → ghost accumulates
     ///      - Strategy exits with high slippage during black swan events
     ///      - Periodic maintenance to clear accumulated small ghosts
     ///      - After large losses from liquidations/exploits in external protocols
+    ///      - CRITICAL: Fix mispricing during pause to enable accurate emergency operations
     ///
     ///      SECURITY MEASURES:
     ///      - Can only reduce totalExternalDeposits (removing ghost, not creating it)
     ///      - New value must be within 20% of valuer's current report
-    ///      - Only owner can call (not paused check)
+    ///      - Only owner can call (no pause restriction - intentional for emergency fixes)
     ///      - Emits event for transparency/auditability
+    ///
+    ///      WHY NO PAUSE CHECK:
+    ///      - During pause, realAssets() still returns (balance + totalExternalDeposits)
+    ///      - If totalExternalDeposits has ghost, it causes persistent overpricing
+    ///      - Owner needs ability to fix accounting during pause for accurate emergency operations
+    ///      - forceDeallocate and other emergency functions rely on accurate realAssets()
     ///
     ///      WORKFLOW:
     ///      1. Monitor getGhostAmount() for significant ghosts
     ///      2. Verify valuer is reporting accurate current value
     ///      3. Calculate correct external deposits: valuerValue - balance
-    ///      4. Call syncExternalDeposits with corrected value
+    ///      4. Call syncExternalDeposits with corrected value (works even when paused)
     function syncExternalDeposits(uint256 newTotalExternalDeposits) external onlyOwner {
-        require(!paused, "Paused");
+        // SECURITY FIX Issue #8: Removed pause check
+        // Owner must be able to fix accounting during pause for accurate emergency operations
 
         // SECURITY: Can only reduce, never increase (removing ghost, not creating it)
         require(newTotalExternalDeposits <= totalExternalDeposits, "Can only reduce ghost");
@@ -673,10 +700,21 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // Net balance increased - likely withdrawal from external protocol
             // NOTE: Could also be profit/yield, causing externalDeposits undercount
             uint256 withdrawn = balanceAfter - balanceBefore;
-            // Decrease external deposits, but don't go below zero
-            uint256 decreaseAmount = withdrawn > externalDeposits[strategyId]
-                ? externalDeposits[strategyId]
-                : withdrawn;
+
+            // SECURITY FIX Issue #9: Prevent desynchronization between per-strategy and aggregate
+            // Cap decrease to both per-strategy AND aggregate to prevent underflow
+            uint256 decreaseAmount = withdrawn;
+
+            // Cap to per-strategy external deposits
+            if (decreaseAmount > externalDeposits[strategyId]) {
+                decreaseAmount = externalDeposits[strategyId];
+            }
+
+            // Cap to total external deposits (prevents desync if aggregate is lower)
+            if (decreaseAmount > totalExternalDeposits) {
+                decreaseAmount = totalExternalDeposits;
+            }
+
             externalDeposits[strategyId] -= decreaseAmount;
             totalExternalDeposits -= decreaseAmount;
         }

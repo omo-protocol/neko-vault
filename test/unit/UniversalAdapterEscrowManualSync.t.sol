@@ -271,9 +271,10 @@ contract UniversalAdapterEscrowManualSyncTest is Test {
     }
 
     /**
-     * @notice Test sync reverts when paused
+     * @notice Test sync WORKS when paused (SECURITY FIX Issue #8)
+     * @dev syncExternalDeposits must work during pause to fix mispricing for emergency operations
      */
-    function testSyncRevertsWhenPaused() public {
+    function testSyncWorksWhenPaused() public {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
@@ -281,14 +282,27 @@ contract UniversalAdapterEscrowManualSyncTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
+        // Simulate external deposit
+        vm.prank(owner);
+        adapter.executeStrategy(
+            strategyId,
+            _createDepositCall(800e18)
+        );
+
+        // Simulate 20% loss
+        valuer.setReturnValue(800e18);
+
         // Pause adapter
         vm.prank(owner);
         adapter.setPaused(true);
 
-        // Try to sync (should revert)
+        // SECURITY FIX Issue #8: Sync should WORK during pause
+        // This allows owner to fix accounting for emergency operations like forceDeallocate
         vm.prank(owner);
-        vm.expectRevert("Paused");
-        adapter.syncExternalDeposits(0);
+        adapter.syncExternalDeposits(600e18); // Should succeed even when paused
+
+        assertEq(adapter.totalExternalDeposits(), 600e18, "Sync should work when paused");
+        assertEq(adapter.getGhostAmount(), 0, "Ghost should be removed even during pause");
     }
 
     /**
