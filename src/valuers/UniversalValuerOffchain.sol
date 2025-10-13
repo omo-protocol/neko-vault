@@ -18,6 +18,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     uint256 private constant SIGNER_TIMELOCK = 24 hours; // 24-hour timelock for signer changes
     uint256 private constant MAX_SIGNATURE_AGE = 1 hours; // 1-hour signature expiry
     uint256 private constant MAX_PRICE_CHANGE_BPS = 5000; // 50% max price change per update
+    uint256 private constant MAX_NONCE_GAP = 1000; // L-02 FIX: Maximum allowed nonce jump to prevent lockout
 
     /* IMMUTABLES */
 
@@ -85,6 +86,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         // Validate nonce to prevent replay
         if (nonce <= lastReport.nonce) revert StaleNonce();
+
+        // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
+        // This protects against setting nonce to max value which would brick emergencyUpdate
+        // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
+        if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
 
         // Validate signature expiry
         if (expiry < block.timestamp) revert SignatureExpired();
@@ -277,6 +283,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             // Validate nonce to prevent replay - must be strictly increasing
             if (nonce <= lastReport.nonce) revert StaleNonce();
+
+            // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
+            // This protects against setting nonce to max value which would brick emergencyUpdate
+            // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
+            if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
 
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);

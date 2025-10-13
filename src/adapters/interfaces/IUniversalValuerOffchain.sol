@@ -85,6 +85,7 @@ interface IUniversalValuerOffchain {
 
     error NotAuthorized();
     error StaleNonce();
+    error NonceGapTooLarge(); // L-02 FIX: Nonce jumped too far ahead
     error UpdateTooFrequent();
     error InsufficientSignatures();
     error ValueTooStale();

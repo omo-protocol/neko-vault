@@ -144,6 +144,113 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertEq(valuer.getValue(STRATEGY_A), 1000e18);
     }
 
+    /**
+     * @notice Test L-02 fix: Nonce gap validation prevents excessive nonce jumps
+     * @dev This validates the security fix ensuring nonce cannot jump too far ahead
+     */
+    function testUpdateValueNonceGapWithinLimit() public {
+        // L-02 SECURITY FIX: Test normal nonce progression within MAX_NONCE_GAP (1000)
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Second update with nonce 1001 (exactly MAX_NONCE_GAP away) - should succeed
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, 1001, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, 1001, block.timestamp + 1 hours, signatures2);
+
+        IUniversalValuerOffchain.ValueReport memory report = valuer.getReport(STRATEGY_A);
+        assertEq(report.nonce, 1001, "Nonce should be updated to 1001");
+        assertEq(valuer.getValue(STRATEGY_A), 1100e18);
+    }
+
+    /**
+     * @notice Test L-02 fix: Nonce gap exceeding MAX_NONCE_GAP should revert
+     * @dev Prevents setting nonce to max value which would brick emergencyUpdate
+     */
+    function testUpdateValueNonceGapExceedsLimit() public {
+        // L-02 SECURITY FIX: Test that nonce cannot jump more than MAX_NONCE_GAP (1000)
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try update with nonce 1002 (MAX_NONCE_GAP + 1) - should revert
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, 1002, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, 1002, block.timestamp + 1 hours, signatures2);
+
+        // Value should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+        IUniversalValuerOffchain.ValueReport memory report = valuer.getReport(STRATEGY_A);
+        assertEq(report.nonce, 1, "Nonce should still be 1");
+    }
+
+    /**
+     * @notice Test L-02 fix: Prevent nonce from being set to max value
+     * @dev Setting nonce to type(uint256).max would cause emergencyUpdate to overflow
+     */
+    function testUpdateValueNonceMaxValue() public {
+        // L-02 SECURITY FIX: Setting nonce to type(uint256).max would brick emergencyUpdate
+        // because emergencyUpdate does: nonce + 1, which would overflow
+
+        // First update with nonce 1
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try to set nonce to type(uint256).max - should revert due to gap check
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signValue(STRATEGY_A, 1100e18, 95, type(uint256).max, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.updateValue(STRATEGY_A, 1100e18, 95, type(uint256).max, block.timestamp + 1 hours, signatures2);
+
+        // Value should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+    }
+
+    /**
+     * @notice Test L-02 fix: Batch update nonce gap validation
+     * @dev Same nonce gap validation should apply to batch updates
+     */
+    function testBatchUpdateNonceGapExceedsLimit() public {
+        // L-02 SECURITY FIX: Batch updates should also validate nonce gap
+
+        // First update for both strategies
+        bytes32[] memory strategyIds1 = new bytes32[](2);
+        strategyIds1[0] = STRATEGY_A;
+        strategyIds1[1] = STRATEGY_B;
+
+        uint256[] memory values1 = new uint256[](2);
+        values1[0] = 1000e18;
+        values1[1] = 2000e18;
+
+        uint256[] memory confidences1 = new uint256[](2);
+        confidences1[0] = 95;
+        confidences1[1] = 95;
+
+        bytes[] memory signatures1 = new bytes[](1);
+        signatures1[0] = _signBatch(strategyIds1, values1, confidences1, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.batchUpdateValues(strategyIds1, values1, confidences1, 1, block.timestamp + 1 hours, signatures1);
+
+        // Try batch update with nonce gap > MAX_NONCE_GAP - should revert
+        bytes[] memory signatures2 = new bytes[](1);
+        signatures2[0] = _signBatch(strategyIds1, values1, confidences1, 1002, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.NonceGapTooLarge.selector);
+        valuer.batchUpdateValues(strategyIds1, values1, confidences1, 1002, block.timestamp + 1 hours, signatures2);
+
+        // Values should still be from first update
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18);
+    }
+
     function testUpdateValueExpiredSignature() public {
         uint256 expiry = block.timestamp - 1; // Already expired
         bytes[] memory signatures = new bytes[](1);
