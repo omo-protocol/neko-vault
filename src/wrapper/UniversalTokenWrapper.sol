@@ -88,11 +88,17 @@ contract UniversalTokenWrapper {
     }
 
     /// @notice Convert underlying assets to wrapper shares (rounding down).
+    /// @dev SECURITY FIX: On first deposit, accounts for VIRTUAL_SHARES that will be locked
     function convertToShares(uint256 assets) public view returns (uint256) {
         uint256 _totalAssets = totalAssets();
         uint256 _totalSupply = totalSupply;
 
-        if (_totalSupply == 0 || _totalAssets == 0) return assets;
+        if (_totalSupply == 0 || _totalAssets == 0) {
+            // First deposit will mint VIRTUAL_SHARES to dead address
+            // User receives assets - VIRTUAL_SHARES
+            if (assets <= VIRTUAL_SHARES) return 0;
+            return assets - VIRTUAL_SHARES;
+        }
         return assets.mulDivDown(_totalSupply, _totalAssets);
     }
 
@@ -140,6 +146,7 @@ contract UniversalTokenWrapper {
     /// @notice Deposit underlying and mint shares to receiver.
     /// @dev Supports fee-on-transfer by measuring actual received amount.
     ///      Uses virtual shares to prevent donation/inflation attacks.
+    ///      SECURITY FIX: Caps received at requested assets to prevent positive credit dilution.
     function deposit(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
         require(assets != 0, "WRP: zero assets");
         require(receiver != address(0), "WRP: recv=0");
@@ -149,7 +156,13 @@ contract UniversalTokenWrapper {
         uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
 
         SafeERC20Lib.safeTransferFrom(underlying, msg.sender, address(this), assets);
-        uint256 received = IERC20(underlying).balanceOf(address(this)) - beforeBal;
+        uint256 balanceDelta = IERC20(underlying).balanceOf(address(this)) - beforeBal;
+
+        // CRITICAL SECURITY FIX: Cap received at requested assets
+        // If token gives positive credits (balanceDelta > assets), those credits belong to ALL holders
+        // Depositor should only get shares for their actual contribution (assets)
+        // This prevents dilution of existing holders from positive rebases during transfer
+        uint256 received = balanceDelta > assets ? assets : balanceDelta;
 
         // Calculate shares using PRE-deposit totals to prevent value dilution
         if (_totalSupply == 0 || beforeBal == 0) {
@@ -181,6 +194,7 @@ contract UniversalTokenWrapper {
     ///      was received to support the requested shares. Uses virtual shares to prevent donation attacks.
     ///      Protected against reentrancy to prevent double-counting of deposits.
     ///      SECURITY FIX: On first mint, requests assets for both requested shares AND virtual shares.
+    ///      SECURITY FIX: Caps received at requested assets to prevent positive credit dilution.
     function mint(uint256 shares, address receiver) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
@@ -189,23 +203,24 @@ contract UniversalTokenWrapper {
         uint256 _totalSupply = totalSupply;
         uint256 beforeBal = IERC20(underlying).balanceOf(address(this));
 
-        // CRITICAL FIX: On first mint, we must request enough assets to cover both
-        // the user's requested shares AND the VIRTUAL_SHARES that will be minted
-        if (_totalSupply == 0 || beforeBal == 0) {
-            assets = previewMint(shares + VIRTUAL_SHARES);
-        } else {
-            assets = previewMint(shares);
-        }
+        // SECURITY FIX: previewMint now correctly accounts for VIRTUAL_SHARES on first mint
+        assets = previewMint(shares);
         SafeERC20Lib.safeTransferFrom(underlying, msg.sender, address(this), assets);
-        uint256 received = IERC20(underlying).balanceOf(address(this)) - beforeBal;
+        uint256 balanceDelta = IERC20(underlying).balanceOf(address(this)) - beforeBal;
+
+        // CRITICAL SECURITY FIX: Cap received at requested assets
+        // If token gives positive credits (balanceDelta > assets), those credits belong to ALL holders
+        // Minter should only get shares for their actual contribution (assets)
+        // This prevents dilution of existing holders from positive rebases during transfer
+        uint256 received = balanceDelta > assets ? assets : balanceDelta;
 
         // Recompute shares from actual received using PRE-deposit totals to ensure shares are fully covered
         uint256 maxShares;
         if (_totalSupply == 0 || beforeBal == 0) {
-            // CRITICAL SECURITY FIX: First mint includes virtual shares protection
+            // SECURITY FIX: First mint includes virtual shares protection
+            // maxShares = what we could mint with received assets (1:1 on first deposit)
             maxShares = received;
-            require(maxShares > VIRTUAL_SHARES, "WRP: first mint too small");
-            require(shares <= maxShares - VIRTUAL_SHARES, "WRP: insufficient recv");
+            require(maxShares >= shares + VIRTUAL_SHARES, "WRP: insufficient recv for first mint");
 
             // Mint virtual shares to dead address (permanently locked)
             _mint(DEAD_ADDRESS, VIRTUAL_SHARES);
@@ -277,6 +292,7 @@ contract UniversalTokenWrapper {
     ///      Protected against reentrancy to prevent underflow DoS attacks.
     ///      SECURITY FIX: Burns additional shares if sender-charged fees cause higher actual outflow.
     ///      SECURITY FIX: Handles positive rebases that occur during transfer.
+    ///      SECURITY FIX: Reverts if owner has insufficient shares to cover sender fees (prevents dilution).
     function redeem(uint256 shares, address receiver, address owner_) external nonReentrant returns (uint256 assets) {
         require(shares != 0, "WRP: zero shares");
         require(receiver != address(0), "WRP: recv=0");
@@ -325,20 +341,15 @@ contract UniversalTokenWrapper {
             if (requiredShares > shares) {
                 uint256 additionalShares = requiredShares - shares;
 
-                // Check if owner has enough shares for the additional burn
-                // If not, cap the burn to what's available
+                // CRITICAL SECURITY FIX: Check if owner has enough shares for the additional burn
+                // If not, REVERT to prevent exchange rate dilution
+                // Owner balance is post-first-burn, so they must have additionalShares remaining
                 uint256 ownerBalance = balanceOf[owner_];
-                if (additionalShares > ownerBalance) {
-                    // Can only burn what's available
-                    // NOTE: This may result in slight exchange rate dilution for sender-charged tokens
-                    // Users should use withdraw() instead of redeem() for complete exits with such tokens
-                    additionalShares = ownerBalance;
-                }
+                require(ownerBalance >= additionalShares, "WRP: insufficient shares for sender fee");
 
-                if (additionalShares > 0) {
-                    _burnFrom(owner_, additionalShares);
-                    shares += additionalShares; // Update total burned shares
-                }
+                // Burn additional shares to maintain exchange rate
+                _burnFrom(owner_, additionalShares);
+                shares += additionalShares; // Update total burned shares
             }
         }
 
@@ -351,11 +362,15 @@ contract UniversalTokenWrapper {
         return convertToShares(assets);
     }
 
+    /// @dev SECURITY FIX: On first mint, accounts for VIRTUAL_SHARES that will be minted
     function previewMint(uint256 shares) public view returns (uint256) {
         uint256 _totalAssets = totalAssets();
         uint256 _totalSupply = totalSupply;
 
-        if (_totalSupply == 0 || _totalAssets == 0) return shares;
+        if (_totalSupply == 0 || _totalAssets == 0) {
+            // First mint requires assets for both user shares AND virtual shares
+            return shares + VIRTUAL_SHARES;
+        }
         // assets = shares * totalAssets / totalSupply (round up)
         return shares.mulDivUp(_totalAssets, _totalSupply);
     }
