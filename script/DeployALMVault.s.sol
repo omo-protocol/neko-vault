@@ -13,6 +13,22 @@ import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdap
 /**
  * @title DeployUniversalAdapterEscrow
  * @notice Production deployment script for VaultV2 with UniversalAdapterEscrow
+ * @dev Uses existing VaultV2Factory if VAULT_FACTORY_ADDRESS is set, otherwise deploys new factory
+ *
+ * Required Environment Variables:
+ *   - PRIVATE_KEY: Deployer private key
+ *   - ASSET_ADDRESS: ERC20 asset address for the vault
+ *
+ * Optional Environment Variables:
+ *   - VAULT_FACTORY_ADDRESS: Address of existing VaultV2Factory (if not set, deploys new factory)
+ *
+ * Usage with existing factory:
+ *   PRIVATE_KEY=0x... ASSET_ADDRESS=0x... VAULT_FACTORY_ADDRESS=0x... \
+ *   forge script script/DeployALMVault.s.sol --rpc-url <RPC_URL> --broadcast -v
+ *
+ * Usage without existing factory (will deploy new factory):
+ *   PRIVATE_KEY=0x... ASSET_ADDRESS=0x... \
+ *   forge script script/DeployALMVault.s.sol --rpc-url <RPC_URL> --broadcast -v
  */
 contract DeployUniversalAdapterEscrow is Script {
     // Strategy IDs
@@ -46,9 +62,21 @@ contract DeployUniversalAdapterEscrow is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // Step 1: Deploy factories
-        VaultV2Factory vaultFactory = new VaultV2Factory();
-        console.log("\nVaultV2Factory deployed:", address(vaultFactory));
+        // Step 1: Get or deploy VaultV2Factory
+        VaultV2Factory vaultFactory;
+        address vaultFactoryAddress = vm.envOr("VAULT_FACTORY_ADDRESS", address(0));
+
+        if (vaultFactoryAddress != address(0)) {
+            // Use existing factory
+            vaultFactory = VaultV2Factory(vaultFactoryAddress);
+            console.log("\n[Using existing VaultV2Factory]");
+            console.log("VaultV2Factory:", address(vaultFactory));
+        } else {
+            // Deploy new factory
+            vaultFactory = new VaultV2Factory();
+            console.log("\n[Deployed new VaultV2Factory]");
+            console.log("VaultV2Factory:", address(vaultFactory));
+        }
 
         UniversalAdapterEscrowFactory adapterFactory = new UniversalAdapterEscrowFactory();
         console.log("AdapterFactory deployed:", address(adapterFactory));
@@ -109,9 +137,16 @@ contract DeployUniversalAdapterEscrow is Script {
         console.log("    DEPLOYMENT COMPLETE!");
         console.log("=================================================");
         console.log("\nDeployed Contracts:");
+        console.log("  VaultV2Factory:", address(vaultFactory), vaultFactoryAddress != address(0) ? "(existing)" : "(new)");
         console.log("  VaultV2:", address(vault));
         console.log("  UniversalAdapterEscrow:", address(adapter));
         console.log("  UniversalValuerOffchain:", address(valuer));
         console.log("\n[SUCCESS] Infrastructure deployed!");
+
+        if (vaultFactoryAddress == address(0)) {
+            console.log("\nNote: A new VaultV2Factory was deployed.");
+            console.log("To reuse this factory in future deployments, set:");
+            console.log("  export VAULT_FACTORY_ADDRESS=", address(vaultFactory));
+        }
     }
 }
