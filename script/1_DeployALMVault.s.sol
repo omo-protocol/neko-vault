@@ -86,7 +86,7 @@ contract DeployUniversalAdapterEscrow is Script {
 
         // Configure valuer
         valuer.initiateSignerChange(deployer, true, 100);
-        valuer.setRequiredWeight(100);
+        valuer.setRequiredWeight(90); // 90% of required weight
 
         // Step 3: Deploy VaultV2
         address vaultAddress = vaultFactory.createVaultV2(deployer, asset, salt);
