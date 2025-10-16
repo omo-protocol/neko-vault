@@ -88,6 +88,17 @@ contract DeployUniversalAdapterEscrow is Script {
         valuer.initiateSignerChange(deployer, true, 100);
         valuer.setRequiredWeight(90); // 90% of required weight
 
+        valuer.configureStrategy(
+            ALM_STRATEGY_ID,
+            60,        // minUpdateInterval: 1 minutes
+            3600,       // maxStaleness: 1 hour
+            500,        // pushThreshold: 5% change triggers update
+            95          // minConfidence: 95% (must be >= defaultConfidenceThreshold)
+        );
+
+        // Set price change bounds (50% max change)
+        valuer.setPriceChangeBounds(ALM_STRATEGY_ID, 5000);
+
         // Step 3: Deploy VaultV2
         address vaultAddress = vaultFactory.createVaultV2(deployer, asset, salt);
         VaultV2 vault = VaultV2(vaultAddress);
