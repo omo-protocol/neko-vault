@@ -32,19 +32,19 @@ import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdap
  */
 contract DeployUniversalAdapterEscrow is Script {
     // Strategy IDs
-    bytes32 constant ALM_STRATEGY_ID = keccak256("alm-whype-wsthype");
-    bytes idData = abi.encodePacked(ALM_STRATEGY_ID);
+    bytes32 constant PT_LOOP_STRATEGY_ID = keccak256("pt-khype-loop");
+    bytes idData = abi.encodePacked(PT_LOOP_STRATEGY_ID);
     uint256 constant RELATIVE_CAP = 1e18; // 100% of vault assets (1e18 = 100%)
     uint256 constant DAILY_LIMIT = 10000e18; // 10,000 tokens daily limit - this param alreadyed ignored in adapter
-    address constant ALLOCATOR = 0x6D6A66C90C65b21768D67E9c69F393b887203820; // config to worker wallet address
+    address asset = 0x5555555555555555555555555555555555555555; // WHYPE
+    address vaultFactoryAddress = 0x0000000000000000000000000000000000000000; // config to vault factory address
+    address constant ALLOCATOR = 0x0000000000000000000000000000000000000000; // config to worker wallet address
 
     function run() public {
         // Load private key
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        // Load required configuration
-        address asset = vm.envAddress("ASSET_ADDRESS");
         require(asset != address(0), "ASSET_ADDRESS must be set");
 
         console.log("\n=================================================");
@@ -55,7 +55,7 @@ contract DeployUniversalAdapterEscrow is Script {
 
         bytes32 salt = keccak256(abi.encodePacked(
             "vault-v2",
-            ALM_STRATEGY_ID,
+            PT_LOOP_STRATEGY_ID,
             deployer,
             asset
         ));
@@ -64,7 +64,6 @@ contract DeployUniversalAdapterEscrow is Script {
 
         // Step 1: Get or deploy VaultV2Factory
         VaultV2Factory vaultFactory;
-        address vaultFactoryAddress = vm.envOr("VAULT_FACTORY_ADDRESS", address(0));
 
         if (vaultFactoryAddress != address(0)) {
             // Use existing factory
@@ -124,7 +123,7 @@ contract DeployUniversalAdapterEscrow is Script {
 
         // Step 6: Configure adapter
         adapter.setStrategy(
-            ALM_STRATEGY_ID,
+            PT_LOOP_STRATEGY_ID,
             deployer, // strategyAgent
             "", // No pre-configured data
             DAILY_LIMIT // Daily limit
