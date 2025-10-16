@@ -93,7 +93,7 @@ contract DeployUniversalAdapterEscrow is Script {
             60,        // minUpdateInterval: 1 minutes
             3600,       // maxStaleness: 1 hour
             500,        // pushThreshold: 5% change triggers update
-            95          // minConfidence: 95% (must be >= defaultConfidenceThreshold)
+            90          // minConfidence: 90% (must be >= defaultConfidenceThreshold)
         );
 
         // Set price change bounds (50% max change)
