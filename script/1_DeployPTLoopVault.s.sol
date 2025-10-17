@@ -39,6 +39,8 @@ contract DeployUniversalAdapterEscrow is Script {
     address asset = 0x5555555555555555555555555555555555555555; // WHYPE
     address vaultFactoryAddress = 0x0000000000000000000000000000000000000000; // config to vault factory address
     address constant ALLOCATOR = 0x0000000000000000000000000000000000000000; // config to worker wallet address
+    address constant PERFORMANCE_FEE_RECIPIENT = 0x0000000000000000000000000000000000000000; // config to fee recipient address
+    uint256 constant PERFORMANCE_FEE = 0.2e18; // 20% performance fee (0.2e18 = 20%)
 
     function run() public {
         // Load private key
@@ -132,6 +134,20 @@ contract DeployUniversalAdapterEscrow is Script {
         vault.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (idData, RELATIVE_CAP)));
         vault.increaseRelativeCap(idData, RELATIVE_CAP);
 
+        // Set performance fee (if recipient is configured)
+        if (PERFORMANCE_FEE_RECIPIENT != address(0)) {
+            // Step 5a: Set Performance Fee Recipient
+            vault.submit(abi.encodeCall(IVaultV2.setPerformanceFeeRecipient, (PERFORMANCE_FEE_RECIPIENT)));
+            vault.setPerformanceFeeRecipient(PERFORMANCE_FEE_RECIPIENT);
+            console.log("Performance fee recipient set:", PERFORMANCE_FEE_RECIPIENT);
+
+            // Step 5b: Set Performance Fee
+            vault.submit(abi.encodeCall(IVaultV2.setPerformanceFee, (PERFORMANCE_FEE)));
+            vault.setPerformanceFee(PERFORMANCE_FEE);
+        } else {
+            console.log("Skipping performance fee configuration (recipient not set)");
+        }
+
         // Step 6: Configure adapter
         adapter.setStrategy(
             PT_LOOP_STRATEGY_ID,
@@ -151,6 +167,16 @@ contract DeployUniversalAdapterEscrow is Script {
         console.log("  VaultV2:", address(vault));
         console.log("  UniversalAdapterEscrow:", address(adapter));
         console.log("  UniversalValuerOffchain:", address(valuer));
+
+        console.log("\nVault Configuration:");
+        console.log("  Allocator:", ALLOCATOR);
+        console.log("  Performance Fee Recipient:", PERFORMANCE_FEE_RECIPIENT);
+        if (PERFORMANCE_FEE_RECIPIENT != address(0)) {
+            console.log("  Performance Fee:", PERFORMANCE_FEE / 1e16, "%");
+        } else {
+            console.log("  Performance Fee: Not configured (recipient not set)");
+        }
+
         console.log("\n[SUCCESS] Infrastructure deployed!");
 
         if (vaultFactoryAddress == address(0)) {
