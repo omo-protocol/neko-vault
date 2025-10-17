@@ -6,22 +6,20 @@ import "../src/adapters/UniversalAdapterEscrow.sol";
 
 /**
  * @title ConfigureAdapter
- * @notice Adapter strategy configuration script (Step 3 after vault configuration)
- * @dev This script should be run AFTER 2_ConfigureALMVault.s.sol
+ * @notice Adapter strategy configuration (Step 2d)
+ * @dev Run AFTER 2c_ConfigureFees.s.sol
  *
  * Required Environment Variables:
  *   - PRIVATE_KEY: Deployer/owner private key
- *   - ADAPTER_ADDRESS: Address of deployed UniversalAdapterEscrow
  *
  * Usage:
- *   PRIVATE_KEY=0x... ADAPTER_ADDRESS=0x... \
- *   forge script script/3_ConfigureAdapter.s.sol --rpc-url <RPC_URL> --broadcast -v
+ *   source .env && forge script script/2d_ConfigureAdapter.s.sol --rpc-url $RPC_URL --broadcast -v
  *
- * Note: This is separated from vault configuration to avoid nonce issues
+ * Transactions: 1 (adapter.setStrategy)
  */
 contract ConfigureAdapter is Script {
     // Strategy IDs (must match deployment script)
-    bytes32 constant ALM_STRATEGY_ID = keccak256("alm-whype-wsthype");
+    bytes32 constant ALM_STRATEGY_ID = keccak256("alm-whype-sthype");
     uint256 constant DAILY_LIMIT = 10000e18; // 10,000 tokens daily limit - this param already ignored in adapter
 
     // Configuration parameters (must match deployment script)
@@ -39,15 +37,16 @@ contract ConfigureAdapter is Script {
         UniversalAdapterEscrow adapter = UniversalAdapterEscrow(payable(adapterAddress));
 
         console.log("\n=================================================");
-        console.log("    ADAPTER STRATEGY CONFIGURATION");
+        console.log("    ADAPTER CONFIGURATION (Step 2d)");
         console.log("=================================================");
         console.log("Deployer:", deployer);
         console.log("Adapter:", adapterAddress);
+        console.log("Transactions: 1");
 
         vm.startBroadcast(deployerPrivateKey);
 
         // Configure adapter strategy
-        console.log("\n[Step 1] Configuring adapter strategy...");
+        console.log("\n[Step 1/1] Configuring adapter strategy...");
         adapter.setStrategy(
             ALM_STRATEGY_ID,
             deployer, // strategyAgent
@@ -61,19 +60,17 @@ contract ConfigureAdapter is Script {
 
         vm.stopBroadcast();
 
-        // Final status
         console.log("\n=================================================");
-        console.log("    ADAPTER CONFIGURATION COMPLETE!");
+        console.log("    STEP 2d COMPLETE!");
         console.log("=================================================");
-        console.log("\nAdapter Configuration Summary:");
+        console.log("Configuration:");
         console.log("  Strategy ID:", vm.toString(ALM_STRATEGY_ID));
         console.log("  Strategy Agent:", deployer);
-        console.log("  Daily Limit:", DAILY_LIMIT / 1e18, "tokens");
 
-        console.log("\n[SUCCESS] Adapter is now ready for allocations!");
+        console.log("\n[SUCCESS] All vault configuration complete!");
         console.log("\nNext Steps:");
-        console.log("  1. Verify adapter configuration");
-        console.log("  2. Test allocation/deallocation flows");
-        console.log("  3. Transfer ownership if needed");
+        console.log("  1. Test deposit/withdraw flows");
+        console.log("  2. Test allocation/deallocation");
+        console.log("  3. Transfer ownership (script/3_TransferVaultOwner.s.sol)");
     }
 }
