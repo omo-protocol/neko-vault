@@ -32,7 +32,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     mapping(bytes32 => UpdateConfig) public updateConfigs;
 
     uint256 public requiredWeight;
-    uint256 public defaultConfidenceThreshold = 95; // 95% confidence required
+    uint256 public defaultConfidenceThreshold = 90; // 90% confidence required
 
     // Fallback values for emergency
     mapping(bytes32 => uint256) public fallbackValues;

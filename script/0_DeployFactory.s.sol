@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import "forge-std/Script.sol";
 import "../src/VaultV2Factory.sol";
+import "../src/adapters/UniversalAdapterEscrowFactory.sol";
 
 /**
  * @title DeployVaultFactory
@@ -12,8 +13,8 @@ import "../src/VaultV2Factory.sol";
  * Usage:
  *   PRIVATE_KEY=0x... forge script script/DeployVaultFactory.s.sol --rpc-url <RPC_URL> --broadcast -v
  */
-contract DeployVaultFactory is Script {
-    function run() public returns (address) {
+contract DeployFactory is Script {
+    function run() public {
         // Load private key
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
@@ -28,6 +29,8 @@ contract DeployVaultFactory is Script {
         // Deploy VaultV2Factory
         VaultV2Factory vaultFactory = new VaultV2Factory();
         console.log("\nVaultV2Factory deployed:", address(vaultFactory));
+        UniversalAdapterEscrowFactory adapterFactory = new UniversalAdapterEscrowFactory();
+        console.log("AdapterFactory deployed:", address(adapterFactory));
 
         vm.stopBroadcast();
 
@@ -36,10 +39,7 @@ contract DeployVaultFactory is Script {
         console.log("=================================================");
         console.log("\nDeployed Contract:");
         console.log("  VaultV2Factory:", address(vaultFactory));
+        console.log("  UniversalAdapterEscrowFactory:", address(adapterFactory));
         console.log("\n[SUCCESS] Factory deployed!");
-        console.log("\nTo use this factory in other scripts, set:");
-        console.log("  export VAULT_FACTORY_ADDRESS=", address(vaultFactory));
-
-        return address(vaultFactory);
     }
 }

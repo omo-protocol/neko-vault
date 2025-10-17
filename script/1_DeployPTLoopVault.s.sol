@@ -30,7 +30,7 @@ import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdap
  *   PRIVATE_KEY=0x... ASSET_ADDRESS=0x... \
  *   forge script script/DeployALMVault.s.sol --rpc-url <RPC_URL> --broadcast -v
  */
-contract DeployUniversalAdapterEscrow is Script {
+contract 1_DeployPTLoopVault is Script {
     // Strategy IDs
     bytes32 constant PT_LOOP_STRATEGY_ID = keccak256("pt-khype-loop");
     bytes idData = abi.encodePacked(PT_LOOP_STRATEGY_ID);
