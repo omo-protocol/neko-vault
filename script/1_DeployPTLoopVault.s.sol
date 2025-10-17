@@ -28,33 +28,34 @@ import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdap
  *
  * Usage without existing factory (will deploy new factory):
  *   PRIVATE_KEY=0x... ASSET_ADDRESS=0x... \
- *   forge script script/DeployALMVault.s.sol --rpc-url <RPC_URL> --broadcast -v
+ *   forge script script/1_DeployPTLoopVault.s.sol --rpc-url <RPC_URL> --broadcast -v
  */
-contract 1_DeployPTLoopVault is Script {
+contract DeployPTLoopVault is Script {
     // Strategy IDs
     bytes32 constant PT_LOOP_STRATEGY_ID = keccak256("pt-khype-loop");
-    bytes idData = abi.encodePacked(PT_LOOP_STRATEGY_ID);
-    uint256 constant RELATIVE_CAP = 1e18; // 100% of vault assets (1e18 = 100%)
-    uint256 constant DAILY_LIMIT = 10000e18; // 10,000 tokens daily limit - this param alreadyed ignored in adapter
+    // Asset configuration
     address asset = 0x5555555555555555555555555555555555555555; // WHYPE
-    address vaultFactoryAddress = 0x0000000000000000000000000000000000000000; // config to vault factory address
-    address constant ALLOCATOR = 0x0000000000000000000000000000000000000000; // config to worker wallet address
-    address constant PERFORMANCE_FEE_RECIPIENT = 0x0000000000000000000000000000000000000000; // config to fee recipient address
-    uint256 constant PERFORMANCE_FEE = 0.2e18; // 20% performance fee (0.2e18 = 20%)
+    address vaultFactoryAddress = 0xA51F4C9eFc32853b85aaB3F8BF4c2FbDD4a9C4FD; // config to vault factory address
+    address adapterFactoryAddress = 0xa1C151cd69De3bb49B974d0F4A38DB3c68D2868f; // config to adapter factory address
+    address valuerAddress = 0x891C6ED6bB756985C1657371a618FBd5B9136d87; // config to valuer address
 
     function run() public {
         // Load private key
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        require(asset != address(0), "ASSET_ADDRESS must be set");
+        // Load infrastructure addresses from environment or use defaults
+        // address vaultFactoryAddress = vm.envOr("VAULT_FACTORY_ADDRESS", address(0x0cFDf4B65cd36b85D6e66AE87D75eFE4260c883E));
+        // address adapterFactoryAddress = vm.envOr("ADAPTER_FACTORY_ADDRESS", address(0));
+        // address valuerAddress = vm.envOr("VALUER_ADDRESS", address(0));
 
-        console.log("\n=================================================");
-        console.log("    UNIVERSAL ADAPTER ESCROW DEPLOYMENT");
-        console.log("=================================================");
-        console.log("Deployer:", deployer);
-        console.log("Asset:", asset);
+        // Validate required addresses
+        require(vaultFactoryAddress != address(0), "VAULT_FACTORY_ADDRESS must be set");
+        require(adapterFactoryAddress != address(0), "ADAPTER_FACTORY_ADDRESS must be set");
+        require(valuerAddress != address(0), "VALUER_ADDRESS must be set");
+        require(asset != address(0), "Asset address must be set");
 
+        // Create deterministic salt
         bytes32 salt = keccak256(abi.encodePacked(
             "vault-v2",
             PT_LOOP_STRATEGY_ID,
@@ -64,125 +65,40 @@ contract 1_DeployPTLoopVault is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // Step 1: Get or deploy VaultV2Factory
-        VaultV2Factory vaultFactory;
+        // Load infrastructure contracts
+        VaultV2Factory vaultFactory = VaultV2Factory(vaultFactoryAddress);
+        UniversalAdapterEscrowFactory adapterFactory = UniversalAdapterEscrowFactory(adapterFactoryAddress);
 
-        if (vaultFactoryAddress != address(0)) {
-            // Use existing factory
-            vaultFactory = VaultV2Factory(vaultFactoryAddress);
-            console.log("\n[Using existing VaultV2Factory]");
-            console.log("VaultV2Factory:", address(vaultFactory));
-        } else {
-            // Deploy new factory
-            vaultFactory = new VaultV2Factory();
-            console.log("\n[Deployed new VaultV2Factory]");
-            console.log("VaultV2Factory:", address(vaultFactory));
-        }
-
-        UniversalAdapterEscrowFactory adapterFactory = new UniversalAdapterEscrowFactory();
-        console.log("AdapterFactory deployed:", address(adapterFactory));
-
-        // Step 2: Deploy valuer
-        UniversalValuerOffchain valuer = new UniversalValuerOffchain(deployer, asset);
-        console.log("Valuer deployed:", address(valuer));
-
-        // Configure valuer
-        valuer.initiateSignerChange(deployer, true, 100);
-        valuer.setRequiredWeight(90); // 90% of required weight
-
-        valuer.configureStrategy(
-            PT_LOOP_STRATEGY_ID,
-            60,        // minUpdateInterval: 1 minutes
-            3600,       // maxStaleness: 1 hour
-            500,        // pushThreshold: 5% change triggers update
-            90          // minConfidence: 90% (must be >= defaultConfidenceThreshold)
-        );
-
-        // Set price change bounds (50% max change)
-        valuer.setPriceChangeBounds(PT_LOOP_STRATEGY_ID, 5000);
-
-        // Step 3: Deploy VaultV2
+        // Step 1: Deploy VaultV2
+        console.log("\n[Step 1] Deploying VaultV2...");
         address vaultAddress = vaultFactory.createVaultV2(deployer, asset, salt);
         VaultV2 vault = VaultV2(vaultAddress);
-        console.log("VaultV2 deployed:", vaultAddress);
+        console.log("  VaultV2:", vaultAddress);
 
-        // Step 4: Deploy UniversalAdapterEscrow
+        // Step 2: Deploy UniversalAdapterEscrow
+        console.log("\n[Step 2] Deploying UniversalAdapterEscrow...");
         address adapterAddress = adapterFactory.deployAdapter(
             address(vault),
-            address(valuer),
+            valuerAddress,
             false, // useOffchainValuer
             salt
         );
         UniversalAdapterEscrow adapter = UniversalAdapterEscrow(payable(adapterAddress));
-        console.log("Adapter deployed:", adapterAddress);
+        console.log("  Adapter:", adapterAddress);
 
-        // Step 5: Configure vault
+        // Step 3: Set curator (required for configuration)
+        console.log("\n[Step 3] Setting curator...");
         vault.setCurator(deployer);
-
-        // Add adapter
-        vault.submit(abi.encodeCall(IVaultV2.addAdapter, (address(adapter))));
-        vault.addAdapter(address(adapter));
-
-        // Set allocator
-        vault.submit(abi.encodeCall(IVaultV2.setIsAllocator, (ALLOCATOR, true)));
-        vault.setIsAllocator(ALLOCATOR, true);
-
-        // Set caps
-        vault.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (idData, type(uint128).max)));
-        vault.increaseAbsoluteCap(idData, type(uint128).max);
-
-        vault.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (idData, RELATIVE_CAP)));
-        vault.increaseRelativeCap(idData, RELATIVE_CAP);
-
-        // Set performance fee (if recipient is configured)
-        if (PERFORMANCE_FEE_RECIPIENT != address(0)) {
-            // Step 5a: Set Performance Fee Recipient
-            vault.submit(abi.encodeCall(IVaultV2.setPerformanceFeeRecipient, (PERFORMANCE_FEE_RECIPIENT)));
-            vault.setPerformanceFeeRecipient(PERFORMANCE_FEE_RECIPIENT);
-            console.log("Performance fee recipient set:", PERFORMANCE_FEE_RECIPIENT);
-
-            // Step 5b: Set Performance Fee
-            vault.submit(abi.encodeCall(IVaultV2.setPerformanceFee, (PERFORMANCE_FEE)));
-            vault.setPerformanceFee(PERFORMANCE_FEE);
-        } else {
-            console.log("Skipping performance fee configuration (recipient not set)");
-        }
-
-        // Step 6: Configure adapter
-        adapter.setStrategy(
-            PT_LOOP_STRATEGY_ID,
-            deployer, // strategyAgent
-            "", // No pre-configured data
-            DAILY_LIMIT // Daily limit
-        );
+        console.log("  Curator set:", deployer);
 
         vm.stopBroadcast();
 
         // Final status
         console.log("\n=================================================");
-        console.log("    DEPLOYMENT COMPLETE!");
+        console.log("    VAULT DEPLOYMENT COMPLETE!");
         console.log("=================================================");
         console.log("\nDeployed Contracts:");
-        console.log("  VaultV2Factory:", address(vaultFactory), vaultFactoryAddress != address(0) ? "(existing)" : "(new)");
         console.log("  VaultV2:", address(vault));
         console.log("  UniversalAdapterEscrow:", address(adapter));
-        console.log("  UniversalValuerOffchain:", address(valuer));
-
-        console.log("\nVault Configuration:");
-        console.log("  Allocator:", ALLOCATOR);
-        console.log("  Performance Fee Recipient:", PERFORMANCE_FEE_RECIPIENT);
-        if (PERFORMANCE_FEE_RECIPIENT != address(0)) {
-            console.log("  Performance Fee:", PERFORMANCE_FEE / 1e16, "%");
-        } else {
-            console.log("  Performance Fee: Not configured (recipient not set)");
-        }
-
-        console.log("\n[SUCCESS] Infrastructure deployed!");
-
-        if (vaultFactoryAddress == address(0)) {
-            console.log("\nNote: A new VaultV2Factory was deployed.");
-            console.log("To reuse this factory in future deployments, set:");
-            console.log("  export VAULT_FACTORY_ADDRESS=", address(vaultFactory));
-        }
     }
 }
