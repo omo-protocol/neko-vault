@@ -63,20 +63,19 @@ contract VaultTimeLockWrapperTest is Test {
     function test_fifo_orderingPreservedAfterWithdrawal() public {
         vm.startPrank(alice);
 
-        // Deposit 3 batches at different times
-        asset.approve(address(wrapper), 300e18);
+        // Deposit 3 batches at different times, capturing timestamps at deposit moment
+        asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 firstTime = block.timestamp;
+        (, uint256 firstTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 1 days);
-        asset.approve(address(wrapper), 200e18);
         wrapper.deposit(200e18);
-        uint256 secondTime = block.timestamp;
+        (, uint256 secondTime,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 2 days);
-        asset.approve(address(wrapper), 300e18);
         wrapper.deposit(300e18);
-        uint256 thirdTime = block.timestamp;
+        (, uint256 thirdTime,,) = wrapper.getDeposit(alice, 2);
 
         // Verify initial ordering
         (uint256 amt0, uint256 time0,,) = wrapper.getDeposit(alice, 0);
@@ -112,16 +111,17 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Alice creates 3 batches
         asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 1 days);
         wrapper.deposit(200e18);
-        uint256 time2 = block.timestamp;
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 1 days);
         wrapper.deposit(300e18);
-        uint256 time3 = block.timestamp;
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
 
         // Transfer first batch + partial second (150e18 total)
         wrapper.transfer(bob, 150e18);
@@ -160,12 +160,13 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Create unlocked and locked batches
         asset.approve(address(wrapper), 300e18);
+
         wrapper.deposit(100e18);
-        uint256 unlockedTime = block.timestamp;
+        (, uint256 unlockedTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 6 days); // 6 days later (still within 7 day period)
-        asset.approve(address(wrapper), 200e18);
         wrapper.deposit(200e18);
+        (, uint256 lockedTime,,) = wrapper.getDeposit(alice, 1);
 
         // Fast forward to unlock first batch only
         vm.warp(unlockedTime + LOCK_PERIOD);
@@ -176,7 +177,7 @@ contract VaultTimeLockWrapperTest is Test {
             abi.encodeWithSelector(
                 VaultTimeLockWrapper.BatchStillLocked.selector,
                 1, // batch index
-                block.timestamp + 6 days // unlock time
+                lockedTime + LOCK_PERIOD // unlock time
             )
         );
         wrapper.withdraw(150e18, alice, alice);
@@ -189,8 +190,9 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Create multiple batches with different ages
         asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(200e18);
@@ -418,7 +420,7 @@ contract VaultTimeLockWrapperTest is Test {
         vm.startPrank(alice);
         asset.approve(address(wrapper), INITIAL_DEPOSIT);
         wrapper.deposit(INITIAL_DEPOSIT);
-        uint256 aliceDepositTime = block.timestamp;
+        (, uint256 aliceDepositTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 3 days);
         wrapper.transfer(bob, INITIAL_DEPOSIT);
@@ -445,15 +447,15 @@ contract VaultTimeLockWrapperTest is Test {
         asset.approve(address(wrapper), 600e18);
 
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(200e18);
-        uint256 time2 = block.timestamp;
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(300e18);
-        uint256 time3 = block.timestamp;
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
 
         // Check all batches exist
         assertEq(wrapper.getDepositCount(alice), 3, "Three batches");
@@ -553,6 +555,498 @@ contract VaultTimeLockWrapperTest is Test {
 
         vm.expectRevert(VaultTimeLockWrapper.ZeroAddress.selector);
         wrapper.transfer(address(0), 100e18);
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // NEW SECURITY FIX TESTS: DECIMAL MATCHING
+    // ============================================
+
+    function test_security_decimalsMatchVault() public view {
+        // SECURITY FIX: Wrapper decimals must match vault decimals
+        assertEq(wrapper.decimals(), vault.decimals(), "Wrapper decimals must match vault");
+    }
+
+    function test_security_decimalsConsistentWith18DecimalAsset() public view {
+        // Test with 18-decimal asset (most common)
+        assertEq(vault.decimals(), 18, "Vault should have 18 decimals for 18-decimal asset");
+        assertEq(wrapper.decimals(), 18, "Wrapper should match vault decimals");
+    }
+
+    function test_security_decimalsWorkWithLowDecimalAsset() public {
+        // Test with 6-decimal asset (like USDC)
+        vm.startPrank(owner);
+        MockERC20 usdcLike = new MockERC20("Mock USDC", "USDC", 6);
+
+        VaultV2Factory factory = new VaultV2Factory();
+        IVaultV2 usdcVault = IVaultV2(factory.createVaultV2(
+            owner,
+            address(usdcLike),
+            bytes32(uint256(2))
+        ));
+
+        VaultTimeLockWrapper usdcWrapper = new VaultTimeLockWrapper(address(usdcVault));
+
+        // Vault should normalize to 18 decimals (6 + 12 offset)
+        assertEq(usdcVault.decimals(), 18, "Vault normalizes to 18 decimals");
+        assertEq(usdcWrapper.decimals(), 18, "Wrapper matches vault decimals");
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // NEW SECURITY FIX TESTS: CAP BYPASS PREVENTION
+    // ============================================
+
+    function test_security_transferRevertsWhenReceiverNearCap() public {
+        // Fill Alice to 99 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 99; i++) {
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        // Bob creates 5 batches
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 5; i++) {
+            wrapper.deposit(1e18);
+        }
+
+        // Bob tries to transfer all 5 batches to Alice
+        // Should succeed for first batch (Alice goes to 100)
+        // Should revert on second batch attempt
+        vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
+        wrapper.transfer(alice, 5e18);
+
+        vm.stopPrank();
+
+        // Alice should still have 99 batches (transaction reverted)
+        assertEq(wrapper.getDepositCount(alice), 99, "Alice unchanged after revert");
+    }
+
+    function test_security_transferExactlyToCapSucceeds() public {
+        // Alice has 99 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 99; i++) {
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        // Bob transfers exactly 1 batch to bring Alice to 100
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 10e18);
+        wrapper.deposit(10e18);
+
+        wrapper.transfer(alice, 10e18); // Should succeed
+
+        vm.stopPrank();
+
+        assertEq(wrapper.getDepositCount(alice), 100, "Alice at exactly 100 batches");
+    }
+
+    function test_security_capEnforcedInMiddleOfTransferLoop() public {
+        // Alice has 98 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 98; i++) {
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        // Bob has 5 batches
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 5; i++) {
+            wrapper.deposit(1e18);
+        }
+
+        // Bob tries to transfer all 5 batches
+        // First 2 should push successfully (98->99->100)
+        // Third should fail at cap check
+        vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
+        wrapper.transfer(alice, 5e18);
+
+        vm.stopPrank();
+    }
+
+    function test_security_multipleSmallTransfersRespectsCapEach() public {
+        // Alice has 99 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 99; i++) {
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        // Bob transfers 1 batch successfully
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), type(uint256).max);
+        wrapper.deposit(1e18);
+        wrapper.transfer(alice, 1e18); // Success: Alice at 100
+
+        // Bob tries to transfer another batch
+        wrapper.deposit(1e18);
+        vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
+        wrapper.transfer(alice, 1e18); // Fail: Alice already at 100
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // EDGE CASE TESTS: BATCH MANAGEMENT
+    // ============================================
+
+    function test_edge_partialBatchTransferLeavesFraction() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18); // 1 batch with 1000 tokens
+
+        // Transfer 300 (partial batch)
+        wrapper.transfer(bob, 300e18);
+
+        vm.stopPrank();
+
+        // Alice should have 700 in original batch
+        assertEq(wrapper.getDepositCount(alice), 1, "Alice still has 1 batch");
+        (uint256 aliceAmt,,,) = wrapper.getDeposit(alice, 0);
+        assertEq(aliceAmt, 700e18, "Alice has 700 remaining");
+
+        // Bob should have 300 in new batch with same timestamp
+        assertEq(wrapper.getDepositCount(bob), 1, "Bob has 1 batch");
+        (uint256 bobAmt, uint256 bobTime,,) = wrapper.getDeposit(bob, 0);
+        assertEq(bobAmt, 300e18, "Bob has 300");
+
+        (, uint256 aliceTime,,) = wrapper.getDeposit(alice, 0);
+        assertEq(bobTime, aliceTime, "Timestamp preserved");
+    }
+
+    function test_edge_transferAllBatchesLeavesZero() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 300e18);
+
+        wrapper.deposit(100e18);
+        wrapper.deposit(200e18);
+
+        assertEq(wrapper.getDepositCount(alice), 2, "Alice has 2 batches");
+
+        // Transfer all tokens
+        wrapper.transfer(bob, 300e18);
+
+        assertEq(wrapper.getDepositCount(alice), 0, "Alice has 0 batches after full transfer");
+        assertEq(wrapper.balanceOf(alice), 0, "Alice balance is 0");
+
+        vm.stopPrank();
+    }
+
+    function test_edge_multiplePartialTransfersFragmentBatches() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+
+        // Transfer 100 to bob, 200 to carol
+        wrapper.transfer(bob, 100e18);
+        wrapper.transfer(carol, 200e18);
+
+        // Alice should have 700 in 1 batch
+        assertEq(wrapper.getDepositCount(alice), 1, "Alice has 1 batch");
+        (uint256 amt,,,) = wrapper.getDeposit(alice, 0);
+        assertEq(amt, 700e18, "Alice has 700");
+
+        // Bob has 100
+        (uint256 bobAmt,,,) = wrapper.getDeposit(bob, 0);
+        assertEq(bobAmt, 100e18, "Bob has 100");
+
+        // Carol has 200
+        (uint256 carolAmt,,,) = wrapper.getDeposit(carol, 0);
+        assertEq(carolAmt, 200e18, "Carol has 200");
+
+        vm.stopPrank();
+    }
+
+    function test_edge_withdrawMultipleBatchesAtOnce() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 600e18);
+
+        wrapper.deposit(100e18);
+        uint256 time1 = block.timestamp;
+
+        vm.warp(block.timestamp + 1 days);
+        wrapper.deposit(200e18);
+
+        vm.warp(block.timestamp + 1 days);
+        wrapper.deposit(300e18);
+
+        assertEq(wrapper.getDepositCount(alice), 3, "Alice has 3 batches");
+
+        // Fast forward to unlock all
+        vm.warp(time1 + LOCK_PERIOD + 3 days);
+
+        // Withdraw all at once
+        wrapper.withdraw(600e18, alice, alice);
+
+        assertEq(wrapper.getDepositCount(alice), 0, "All batches consumed");
+        assertEq(wrapper.balanceOf(alice), 0, "All vTokens burned");
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // EDGE CASE TESTS: ALLOWANCE
+    // ============================================
+
+    function test_edge_maxAllowanceDoesntDecrement() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+
+        // Approve Bob with max uint256
+        wrapper.approve(bob, type(uint256).max);
+
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + LOCK_PERIOD);
+
+        // Bob withdraws on behalf of Alice
+        vm.prank(bob);
+        wrapper.withdraw(100e18, bob, alice);
+
+        // Allowance should still be max
+        assertEq(wrapper.allowance(alice, bob), type(uint256).max, "Max allowance unchanged");
+    }
+
+    function test_edge_allowanceExhaustedReverts() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+
+        wrapper.approve(bob, 50e18); // Approve exactly 50 shares
+
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + LOCK_PERIOD);
+
+        // Bob tries to withdraw more than allowance
+        vm.prank(bob);
+        vm.expectRevert(VaultTimeLockWrapper.InsufficientAllowance.selector);
+        wrapper.withdraw(100e18, bob, alice);
+    }
+
+    function test_edge_transferFromRespectsCapLimit() public {
+        // Fill Carol to 100 batches
+        vm.startPrank(carol);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 100; i++) {
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        // Alice approves Bob for transferFrom
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 10e18);
+        wrapper.deposit(10e18);
+        wrapper.approve(bob, 10e18);
+        vm.stopPrank();
+
+        // Bob tries to transferFrom Alice to Carol (who is at cap)
+        vm.prank(bob);
+        vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
+        wrapper.transferFrom(alice, carol, 10e18);
+    }
+
+    // ============================================
+    // EDGE CASE TESTS: APPROVAL SYSTEM
+    // ============================================
+
+    function test_edge_setApprovalForDepositEnablesDeposit() public {
+        // Alice approves Bob
+        vm.prank(alice);
+        wrapper.setApprovalForDeposit(bob, true);
+
+        // Bob can now deposit for Alice
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 100e18);
+        wrapper.depositFor(100e18, alice);
+        vm.stopPrank();
+
+        assertEq(wrapper.balanceOf(alice), 100e18, "Alice received deposit");
+        assertEq(wrapper.getDepositCount(alice), 1, "Alice has 1 batch");
+    }
+
+    function test_edge_removeApprovalForDepositPreventsDeposit() public {
+        // Alice approves then removes Bob
+        vm.startPrank(alice);
+        wrapper.setApprovalForDeposit(bob, true);
+        wrapper.setApprovalForDeposit(bob, false);
+        vm.stopPrank();
+
+        // Bob cannot deposit for Alice
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 100e18);
+        vm.expectRevert(VaultTimeLockWrapper.NotApprovedForDeposit.selector);
+        wrapper.depositFor(100e18, alice);
+        vm.stopPrank();
+    }
+
+    function test_edge_multipleOperatorsCanDeposit() public {
+        // Alice approves both Bob and Carol
+        vm.startPrank(alice);
+        wrapper.setApprovalForDeposit(bob, true);
+        wrapper.setApprovalForDeposit(carol, true);
+        vm.stopPrank();
+
+        // Both can deposit
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 100e18);
+        wrapper.depositFor(100e18, alice);
+        vm.stopPrank();
+
+        vm.startPrank(carol);
+        asset.approve(address(wrapper), 200e18);
+        wrapper.depositFor(200e18, alice);
+        vm.stopPrank();
+
+        assertEq(wrapper.balanceOf(alice), 300e18, "Alice received both deposits");
+        assertEq(wrapper.getDepositCount(alice), 2, "Alice has 2 batches");
+    }
+
+    // ============================================
+    // EDGE CASE TESTS: LOCK TIME BOUNDARIES
+    // ============================================
+
+    function test_edge_depositAtExactUnlockMoment() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 200e18);
+
+        wrapper.deposit(100e18);
+        uint256 depositTime = block.timestamp;
+
+        // Warp to EXACTLY unlock time
+        vm.warp(depositTime + LOCK_PERIOD);
+
+        // Deposit again at unlock boundary
+        wrapper.deposit(100e18);
+
+        // First batch should be unlocked
+        assertTrue(wrapper.isUnlocked(alice), "First batch unlocked");
+
+        // Can withdraw first batch
+        wrapper.withdraw(100e18, alice, alice);
+
+        // Cannot withdraw second batch (just deposited)
+        vm.expectRevert();
+        wrapper.withdraw(100e18, alice, alice);
+
+        vm.stopPrank();
+    }
+
+    function test_edge_multipleDepositsAtSameTimestamp() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 300e18);
+
+        // Multiple deposits in same block
+        wrapper.deposit(100e18);
+        wrapper.deposit(100e18);
+        wrapper.deposit(100e18);
+
+        // All should have same timestamp
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
+
+        assertEq(time1, time2, "Same timestamp");
+        assertEq(time2, time3, "Same timestamp");
+
+        // All unlock at same time
+        vm.warp(time1 + LOCK_PERIOD);
+
+        uint256 unlocked = wrapper.unlockedBalanceOf(alice);
+        assertEq(unlocked, 300e18, "All unlock together");
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // EDGE CASE TESTS: MINT FUNCTION
+    // ============================================
+
+    function test_edge_mintRespectsCapLimit() public {
+        // Fill Alice to 100 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 100; i++) {
+            wrapper.deposit(1e18);
+        }
+
+        // Try to mint (should hit cap)
+        vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
+        wrapper.mint(10e18);
+
+        vm.stopPrank();
+    }
+
+    function test_edge_mintCreatesDepositBatch() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+
+        uint256 shares = 100e18;
+        wrapper.mint(shares);
+
+        assertEq(wrapper.getDepositCount(alice), 1, "Batch created");
+        (uint256 amt, uint256 time,,) = wrapper.getDeposit(alice, 0);
+        assertEq(amt, shares, "Correct amount");
+        assertGt(time, 0, "Timestamp set");
+
+        vm.stopPrank();
+    }
+
+    // ============================================
+    // GAS LIMIT SCENARIO TESTS
+    // ============================================
+
+    function test_gas_withdrawWithMaxBatchesCompletes() public {
+        // Fill Alice to 100 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 100; i++) {
+            wrapper.deposit(1e18);
+        }
+
+        // Fast forward past lockup
+        vm.warp(block.timestamp + LOCK_PERIOD);
+
+        // Withdraw all (should complete despite O(100) shift-left)
+        uint256 gasBefore = gasleft();
+        wrapper.withdraw(100e18, alice, alice);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Should use reasonable gas (not DoS)
+        assertLt(gasUsed, 3_000_000, "Gas under 3M");
+        assertEq(wrapper.getDepositCount(alice), 0, "First batch removed");
+
+        vm.stopPrank();
+    }
+
+    function test_gas_transferWithManyBatchesCompletes() public {
+        // Alice creates 50 batches
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 50; i++) {
+            wrapper.deposit(1e18);
+        }
+
+        // Transfer all to Bob
+        uint256 gasBefore = gasleft();
+        wrapper.transfer(bob, 50e18);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Should complete without DoS
+        assertLt(gasUsed, 5_000_000, "Gas under 5M");
+        assertEq(wrapper.getDepositCount(bob), 50, "Bob received 50 batches");
+        assertEq(wrapper.getDepositCount(alice), 0, "Alice batches cleared");
 
         vm.stopPrank();
     }

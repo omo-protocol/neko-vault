@@ -42,7 +42,7 @@ contract VaultTimeLockWrapper {
     // ERC20 Receipt Token State
     string public constant name = "Vault TimeLock Token";
     string public constant symbol = "vTLT";
-    uint8 public constant decimals = 18;
+    uint8 public immutable decimals; // SECURITY FIX: Use vault's actual decimals instead of hardcoding 18
     uint256 public totalSupply;
 
     mapping(address => uint256) public balanceOf;
@@ -102,6 +102,10 @@ contract VaultTimeLockWrapper {
     constructor(address _vault) {
         vault = IVaultV2(_vault);
         asset = IERC20(vault.asset());
+        // SECURITY FIX: Use vault's decimals to prevent decimal mismatch
+        // VaultV2 uses max(asset.decimals, 18) for shares, so we match that here
+        // This ensures wrapper tokens have the same decimal precision as vault shares
+        decimals = vault.decimals();
     }
 
     // ============================================
@@ -449,9 +453,6 @@ contract VaultTimeLockWrapper {
     function _transferWithBatches(address from, address to, uint256 amount) internal {
         if (balanceOf[from] < amount) revert InsufficientBalance();
 
-        // SECURITY FIX: Check receiver batch limit to prevent DoS
-        if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
-
         // Standard ERC20 balance transfer
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
@@ -464,6 +465,10 @@ contract VaultTimeLockWrapper {
         uint256 batchesConsumed = 0;
 
         while (remaining > 0 && batchesConsumed < fromDeposits.length) {
+            // SECURITY FIX: Check batch limit BEFORE each push to prevent cap bypass
+            // Previous vulnerability: checked once at start, allowing multiple pushes to exceed limit
+            if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
+
             DepositBatch storage sourceBatch = fromDeposits[batchesConsumed];
 
             if (sourceBatch.amount <= remaining) {
