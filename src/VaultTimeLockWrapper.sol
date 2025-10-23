@@ -6,7 +6,15 @@ import {IVaultV2} from "./interfaces/IVaultV2.sol";
 
 /**
  * @title VaultTimeLockWrapper
- * @notice Enforces 7-day lockup on VaultV2 deposits with transferable ERC20 receipt tokens
+ * @notice SECURE VERSION - Enforces 7-day lockup on VaultV2 deposits with transferable ERC20 receipt tokens
+ *
+ * @dev Security Fixes Applied:
+ *      ✅ Proper FIFO removal (shift left instead of swap-with-last)
+ *      ✅ Per-batch lock enforcement (checks every batch during burn)
+ *      ✅ Approval required for onBehalf deposits (prevents DoS)
+ *      ✅ Emergency withdraw properly redeems from vault
+ *      ✅ Allowance checked/deducted in shares not assets
+ *      ✅ Max batch limit per user (prevents unbounded loops)
  *
  * @dev Key Features:
  *      - Mints ERC20 receipt tokens (vTokens) representing wrapped vault shares
@@ -19,11 +27,6 @@ import {IVaultV2} from "./interfaces/IVaultV2.sol";
  *      - Does not modify VaultV2 core
  *      - Wrapper holds vault shares, users hold receipt tokens
  *      - Non-custodial guarantees via forceDeallocate
- *
- * @dev Example Flow:
- *      T=0: Alice deposits 100 tokens → Gets 100 vTokens (unlock T=7)
- *      T=3: Alice transfers 50 vTokens to Bob
- *      T=7: Bob can withdraw (his tokens unlock based on Alice's original deposit at T=0)
  */
 contract VaultTimeLockWrapper {
 
@@ -34,6 +37,7 @@ contract VaultTimeLockWrapper {
     IVaultV2 public immutable vault;
     IERC20 public immutable asset;
     uint256 public constant LOCK_PERIOD = 7 days;
+    uint256 public constant MAX_BATCHES_PER_USER = 100; // Prevent DoS via batch spam
 
     // ERC20 Receipt Token State
     string public constant name = "Vault TimeLock Token";
@@ -43,6 +47,9 @@ contract VaultTimeLockWrapper {
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+
+    // Approval for depositing on behalf of others
+    mapping(address => mapping(address => bool)) public canDepositFor;
 
     /**
      * @dev Deposit tracking structure
@@ -58,8 +65,7 @@ contract VaultTimeLockWrapper {
     /**
      * @dev Per-user FIFO queue of deposit batches
      * Oldest deposits are at index 0
-     * When withdrawing, oldest batches are processed first
-     * When transferring, oldest batches are transferred first (preserves deposit time)
+     * SECURITY: Uses proper shift-left removal to maintain FIFO order
      */
     mapping(address => DepositBatch[]) public userDeposits;
 
@@ -70,10 +76,24 @@ contract VaultTimeLockWrapper {
     event Deposit(address indexed caller, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
     event Withdraw(address indexed caller, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
     event EmergencyExit(address indexed user, address indexed adapter, uint256 assets, uint256 penaltyShares);
+    event ApprovalForDeposit(address indexed owner, address indexed operator, bool approved);
 
     // ERC20 Events
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    // ============================================
+    // ERRORS
+    // ============================================
+
+    error ZeroAmount();
+    error ZeroAddress();
+    error MaxBatchesReached();
+    error BatchStillLocked(uint256 batchIndex, uint256 unlockTime);
+    error InsufficientBalance();
+    error InsufficientAllowance();
+    error NotApprovedForDeposit();
+    error InsufficientDepositBalance();
 
     // ============================================
     // CONSTRUCTOR
@@ -89,45 +109,70 @@ contract VaultTimeLockWrapper {
     // ============================================
 
     /**
-     * @notice Deposit assets and receive transferable vTokens with 7-day lockup
-     * @dev Creates new deposit batch tracked by original deposit time
+     * @notice Deposit assets and receive vTokens with 7-day lockup
+     * @dev SECURITY FIX: Only deposits for msg.sender (no onBehalf parameter)
+     * @param assets Amount of underlying assets to deposit
+     * @return vTokens Amount of receipt tokens minted
+     */
+    function deposit(uint256 assets) external returns (uint256 vTokens) {
+        return _depositInternal(assets, msg.sender, msg.sender);
+    }
+
+    /**
+     * @notice Deposit assets on behalf of another user (requires approval)
+     * @dev SECURITY FIX: Requires prior approval to prevent DoS attacks
      * @param assets Amount of underlying assets to deposit
      * @param onBehalf Address to receive vTokens
-     * @return vTokens Amount of receipt tokens minted (1:1 with vault shares)
+     * @return vTokens Amount of receipt tokens minted
      */
-    function deposit(uint256 assets, address onBehalf) external returns (uint256 vTokens) {
-        require(assets > 0, "Zero deposit");
-        require(onBehalf != address(0), "Zero address");
+    function depositFor(uint256 assets, address onBehalf) external returns (uint256 vTokens) {
+        if (!canDepositFor[onBehalf][msg.sender]) revert NotApprovedForDeposit();
+        return _depositInternal(assets, msg.sender, onBehalf);
+    }
+
+    /**
+     * @dev Internal deposit function
+     */
+    function _depositInternal(uint256 assets, address from, address to) internal returns (uint256 vTokens) {
+        if (assets == 0) revert ZeroAmount();
+        if (to == address(0)) revert ZeroAddress();
+
+        // SECURITY FIX: Check batch limit to prevent DoS
+        if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Pull assets from caller
-        asset.transferFrom(msg.sender, address(this), assets);
+        asset.transferFrom(from, address(this), assets);
 
         // Approve and deposit to vault
         asset.approve(address(vault), assets);
         uint256 shares = vault.deposit(assets, address(this));
 
+        // SECURITY FIX: Reject zero-share deposits (prevents batch spam)
+        if (shares == 0) revert ZeroAmount();
+
         // Mint vTokens 1:1 with vault shares
         vTokens = shares;
 
-        // Create new deposit batch for this user
-        userDeposits[onBehalf].push(DepositBatch({
+        // Create new deposit batch
+        userDeposits[to].push(DepositBatch({
             amount: vTokens,
             depositTime: block.timestamp
         }));
 
         // Mint receipt tokens
-        _mint(onBehalf, vTokens);
+        _mint(to, vTokens);
 
-        emit Deposit(msg.sender, onBehalf, assets, shares, vTokens);
+        emit Deposit(from, to, assets, shares, vTokens);
     }
 
     /**
      * @notice Mint specific amount of vault shares and receive vTokens
-     * @dev Alternative to deposit() for exact share amount
      */
-    function mint(uint256 shares, address onBehalf) external returns (uint256 assets) {
-        require(shares > 0, "Zero shares");
-        require(onBehalf != address(0), "Zero address");
+    function mint(uint256 shares) external returns (uint256 assets) {
+        if (shares == 0) revert ZeroAmount();
+
+        // SECURITY FIX: Check batch limit
+        if (userDeposits[msg.sender].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Calculate required assets
         assets = vault.previewMint(shares);
@@ -138,14 +183,23 @@ contract VaultTimeLockWrapper {
         vault.mint(shares, address(this));
 
         // Create deposit batch and mint vTokens
-        userDeposits[onBehalf].push(DepositBatch({
+        userDeposits[msg.sender].push(DepositBatch({
             amount: shares,
             depositTime: block.timestamp
         }));
 
-        _mint(onBehalf, shares);
+        _mint(msg.sender, shares);
 
-        emit Deposit(msg.sender, onBehalf, assets, shares, shares);
+        emit Deposit(msg.sender, msg.sender, assets, shares, shares);
+    }
+
+    /**
+     * @notice Approve/revoke another address to deposit on your behalf
+     * @dev SECURITY FIX: Required to prevent DoS via onBehalf deposits
+     */
+    function setApprovalForDeposit(address operator, bool approved) external {
+        canDepositFor[msg.sender][operator] = approved;
+        emit ApprovalForDeposit(msg.sender, operator, approved);
     }
 
     // ============================================
@@ -154,8 +208,7 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Withdraw assets after lockup period expires
-     * @dev Enforces 7-day lockup on OLDEST deposit batch
-     *      Burns vTokens from oldest batches first (FIFO)
+     * @dev SECURITY FIX: Checks allowance in shares, not assets
      * @param assets Amount of underlying assets to withdraw
      * @param receiver Address to receive withdrawn assets
      * @param onBehalf Address whose vTokens to burn
@@ -165,21 +218,21 @@ contract VaultTimeLockWrapper {
         external
         returns (uint256 vTokensBurned)
     {
-        require(receiver != address(0), "Zero address");
-
-        // Check authorization if caller is not onBehalf
-        if (msg.sender != onBehalf) {
-            uint256 allowed = allowance[onBehalf][msg.sender];
-            require(allowed >= assets, "Insufficient allowance");
-            if (allowed != type(uint256).max) {
-                allowance[onBehalf][msg.sender] = allowed - assets;
-            }
-        }
+        if (receiver == address(0)) revert ZeroAddress();
 
         // Preview how many shares (vTokens) needed
         uint256 shares = vault.previewWithdraw(assets);
 
-        // Enforce lockup and burn vTokens (FIFO)
+        // SECURITY FIX: Check authorization in SHARES, not assets
+        if (msg.sender != onBehalf) {
+            uint256 allowed = allowance[onBehalf][msg.sender];
+            if (allowed < shares) revert InsufficientAllowance();
+            if (allowed != type(uint256).max) {
+                allowance[onBehalf][msg.sender] = allowed - shares;
+            }
+        }
+
+        // SECURITY FIX: Enforce lockup with per-batch checks
         _burnWithLockupCheck(onBehalf, shares);
 
         // Withdraw from vault
@@ -192,7 +245,6 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Redeem vTokens for assets after lockup period
-     * @dev Burns vTokens from oldest batches first (FIFO)
      * @param vTokens Amount of receipt tokens to burn
      * @param receiver Address to receive assets
      * @param onBehalf Address whose vTokens to burn
@@ -202,18 +254,18 @@ contract VaultTimeLockWrapper {
         external
         returns (uint256 assets)
     {
-        require(receiver != address(0), "Zero address");
+        if (receiver == address(0)) revert ZeroAddress();
 
-        // Check authorization
+        // Check authorization (already in shares)
         if (msg.sender != onBehalf) {
             uint256 allowed = allowance[onBehalf][msg.sender];
-            require(allowed >= vTokens, "Insufficient allowance");
+            if (allowed < vTokens) revert InsufficientAllowance();
             if (allowed != type(uint256).max) {
                 allowance[onBehalf][msg.sender] = allowed - vTokens;
             }
         }
 
-        // Enforce lockup and burn vTokens (FIFO)
+        // SECURITY FIX: Enforce lockup with per-batch checks
         _burnWithLockupCheck(onBehalf, vTokens);
 
         // Redeem from vault (shares = vTokens 1:1)
@@ -223,45 +275,64 @@ contract VaultTimeLockWrapper {
     }
 
     /**
-     * @dev Internal function to burn vTokens with lockup enforcement
-     * Burns from oldest deposits first (FIFO)
-     * Reverts if oldest deposit is still locked
+     * @dev SECURITY FIX: Per-batch lock enforcement with proper FIFO removal
+     * Burns vTokens from oldest deposits first, checking EACH batch for lockup
      */
     function _burnWithLockupCheck(address user, uint256 amount) internal {
         DepositBatch[] storage deposits = userDeposits[user];
-        require(deposits.length > 0, "No deposits");
+        if (deposits.length == 0) revert InsufficientDepositBalance();
 
-        // Check if oldest deposit is unlocked
-        DepositBatch storage oldest = deposits[0];
-        require(
-            block.timestamp >= oldest.depositTime + LOCK_PERIOD,
-            "Oldest deposit still locked"
-        );
-
-        // Burn tokens starting from oldest batch (FIFO)
         uint256 remaining = amount;
+        uint256 batchesConsumed = 0;
 
-        while (remaining > 0 && deposits.length > 0) {
-            DepositBatch storage batch = deposits[0];
+        // SECURITY FIX: Check lock status of EACH batch being burned
+        while (remaining > 0 && batchesConsumed < deposits.length) {
+            DepositBatch storage batch = deposits[batchesConsumed];
+
+            // SECURITY FIX: Per-batch lock check (not just first batch!)
+            if (block.timestamp < batch.depositTime + LOCK_PERIOD) {
+                revert BatchStillLocked(batchesConsumed, batch.depositTime + LOCK_PERIOD);
+            }
 
             if (batch.amount <= remaining) {
-                // Burn entire batch
+                // Consume entire batch
                 remaining -= batch.amount;
-
-                // Remove batch by swapping with last and popping
-                deposits[0] = deposits[deposits.length - 1];
-                deposits.pop();
+                batchesConsumed++;
             } else {
-                // Partially burn batch
+                // Partially consume batch
                 batch.amount -= remaining;
                 remaining = 0;
             }
         }
 
-        require(remaining == 0, "Insufficient deposit balance");
+        if (remaining > 0) revert InsufficientDepositBalance();
+
+        // SECURITY FIX: Proper FIFO removal - shift left instead of swap-with-last
+        if (batchesConsumed > 0) {
+            _removeFirstNBatches(deposits, batchesConsumed);
+        }
 
         // Burn the ERC20 tokens
         _burn(user, amount);
+    }
+
+    /**
+     * @dev SECURITY FIX: Proper FIFO removal via shift-left
+     * Removes first N batches by shifting remaining batches left
+     * This preserves chronological order (unlike swap-with-last)
+     */
+    function _removeFirstNBatches(DepositBatch[] storage batches, uint256 n) internal {
+        uint256 remaining = batches.length - n;
+
+        // Shift remaining batches to the left
+        for (uint256 i = 0; i < remaining; i++) {
+            batches[i] = batches[i + n];
+        }
+
+        // Remove now-duplicated entries at the end
+        for (uint256 i = 0; i < n; i++) {
+            batches.pop();
+        }
     }
 
     // ============================================
@@ -269,9 +340,8 @@ contract VaultTimeLockWrapper {
     // ============================================
 
     /**
-     * @notice Emergency withdrawal via vault's forceDeallocate (bypasses lockup, pays penalty)
-     * @dev Uses vault's force deallocate mechanism (up to 2% penalty)
-     *      Preserves non-custodial guarantee from VaultV2_GATE.md
+     * @notice SECURITY FIX: Emergency withdrawal that properly redeems from vault
+     * @dev Uses vault's forceDeallocate then redeems shares
      * @param adapter Adapter to deallocate from
      * @param data Deallocation data for adapter
      * @param assets Amount of assets to deallocate
@@ -282,41 +352,51 @@ contract VaultTimeLockWrapper {
         bytes memory data,
         uint256 assets
     ) external returns (uint256 penaltyShares) {
-        require(balanceOf[msg.sender] > 0, "No vTokens");
+        if (balanceOf[msg.sender] == 0) revert InsufficientBalance();
 
-        // Force deallocate from vault (charges penalty)
+        // Step 1: Force deallocate from adapter (charges penalty)
         penaltyShares = vault.forceDeallocate(adapter, data, assets, address(this));
 
-        // Transfer assets to user
-        uint256 assetsReceived = asset.balanceOf(address(this));
-        require(assetsReceived >= assets, "Deallocate failed");
-        asset.transfer(msg.sender, assets);
+        // Step 2: SECURITY FIX - Redeem the requested assets from vault
+        // After forceDeallocate, the wrapper still holds vault shares
+        // We need to redeem those shares to get the actual assets
+        uint256 sharesToRedeem = vault.previewWithdraw(assets);
+        vault.withdraw(assets, msg.sender, address(this));
 
-        // Burn vTokens and remove from deposits (bypass lockup check)
-        _burnEmergency(msg.sender, penaltyShares);
+        // Step 3: Burn vTokens from user (penalty + redeemed shares)
+        uint256 totalVTokensToBurn = penaltyShares + sharesToRedeem;
+
+        // Burn without lockup check (emergency bypass)
+        _burnEmergency(msg.sender, totalVTokensToBurn);
 
         emit EmergencyExit(msg.sender, adapter, assets, penaltyShares);
     }
 
     /**
-     * @dev Emergency burn without lockup check (for forceDeallocate only)
+     * @dev Emergency burn without lockup check
+     * SECURITY FIX: Maintains proper FIFO ordering even for emergency burns
      */
     function _burnEmergency(address user, uint256 amount) internal {
         DepositBatch[] storage deposits = userDeposits[user];
         uint256 remaining = amount;
+        uint256 batchesConsumed = 0;
 
-        // Burn from oldest first (no lockup check)
-        while (remaining > 0 && deposits.length > 0) {
-            DepositBatch storage batch = deposits[0];
+        // Burn from oldest first (no lock check)
+        while (remaining > 0 && batchesConsumed < deposits.length) {
+            DepositBatch storage batch = deposits[batchesConsumed];
 
             if (batch.amount <= remaining) {
                 remaining -= batch.amount;
-                deposits[0] = deposits[deposits.length - 1];
-                deposits.pop();
+                batchesConsumed++;
             } else {
                 batch.amount -= remaining;
                 remaining = 0;
             }
+        }
+
+        // SECURITY FIX: Proper FIFO removal
+        if (batchesConsumed > 0) {
+            _removeFirstNBatches(deposits, batchesConsumed);
         }
 
         _burn(user, amount);
@@ -328,11 +408,10 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Transfer vTokens to another address
-     * @dev Transfers oldest deposit batches first (FIFO)
-     *      Receiver inherits original deposit timestamps (preserves lockup)
+     * @dev SECURITY FIX: Maintains proper FIFO ordering during transfers
      */
     function transfer(address to, uint256 amount) external returns (bool) {
-        require(to != address(0), "Zero address");
+        if (to == address(0)) revert ZeroAddress();
         _transferWithBatches(msg.sender, to, amount);
         return true;
     }
@@ -341,11 +420,11 @@ contract VaultTimeLockWrapper {
      * @notice Transfer vTokens from one address to another (requires approval)
      */
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        require(to != address(0), "Zero address");
+        if (to == address(0)) revert ZeroAddress();
 
         // Check and update allowance
         uint256 allowed = allowance[from][msg.sender];
-        require(allowed >= amount, "Insufficient allowance");
+        if (allowed < amount) revert InsufficientAllowance();
         if (allowed != type(uint256).max) {
             allowance[from][msg.sender] = allowed - amount;
         }
@@ -364,12 +443,14 @@ contract VaultTimeLockWrapper {
     }
 
     /**
-     * @dev Internal transfer that preserves deposit batch timestamps
-     * Transfers oldest batches from sender to receiver (FIFO)
-     * Receiver inherits original deposit times (lockup preserved)
+     * @dev SECURITY FIX: Transfer with proper FIFO preservation
+     * Transfers oldest batches from sender to receiver using shift-left removal
      */
     function _transferWithBatches(address from, address to, uint256 amount) internal {
-        require(balanceOf[from] >= amount, "Insufficient balance");
+        if (balanceOf[from] < amount) revert InsufficientBalance();
+
+        // SECURITY FIX: Check receiver batch limit to prevent DoS
+        if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Standard ERC20 balance transfer
         balanceOf[from] -= amount;
@@ -380,32 +461,35 @@ contract VaultTimeLockWrapper {
         DepositBatch[] storage toDeposits = userDeposits[to];
 
         uint256 remaining = amount;
+        uint256 batchesConsumed = 0;
 
-        while (remaining > 0 && fromDeposits.length > 0) {
-            DepositBatch storage oldestBatch = fromDeposits[0];
+        while (remaining > 0 && batchesConsumed < fromDeposits.length) {
+            DepositBatch storage sourceBatch = fromDeposits[batchesConsumed];
 
-            if (oldestBatch.amount <= remaining) {
+            if (sourceBatch.amount <= remaining) {
                 // Transfer entire batch to receiver
                 toDeposits.push(DepositBatch({
-                    amount: oldestBatch.amount,
-                    depositTime: oldestBatch.depositTime // ✅ Preserve original deposit time
+                    amount: sourceBatch.amount,
+                    depositTime: sourceBatch.depositTime // Preserve original deposit time
                 }));
 
-                remaining -= oldestBatch.amount;
-
-                // Remove from sender
-                fromDeposits[0] = fromDeposits[fromDeposits.length - 1];
-                fromDeposits.pop();
+                remaining -= sourceBatch.amount;
+                batchesConsumed++;
             } else {
                 // Partial batch transfer
                 toDeposits.push(DepositBatch({
                     amount: remaining,
-                    depositTime: oldestBatch.depositTime // ✅ Preserve original deposit time
+                    depositTime: sourceBatch.depositTime // Preserve original deposit time
                 }));
 
-                oldestBatch.amount -= remaining;
+                sourceBatch.amount -= remaining;
                 remaining = 0;
             }
+        }
+
+        // SECURITY FIX: Proper FIFO removal from sender
+        if (batchesConsumed > 0) {
+            _removeFirstNBatches(fromDeposits, batchesConsumed);
         }
 
         emit Transfer(from, to, amount);
@@ -435,7 +519,6 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Check if user's oldest deposit is unlocked
-     * @dev Returns true if user can withdraw any amount
      */
     function isUnlocked(address user) external view returns (bool) {
         DepositBatch[] storage deposits = userDeposits[user];
@@ -447,7 +530,6 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Get remaining lock time for user's oldest deposit
-     * @return seconds Seconds until oldest deposit unlocks (0 if unlocked)
      */
     function remainingLockTime(address user) external view returns (uint256) {
         DepositBatch[] storage deposits = userDeposits[user];
@@ -462,7 +544,7 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Get amount of vTokens that are currently unlocked and withdrawable
-     * @dev Sums all deposit batches that have passed the lockup period
+     * @dev SECURITY: This now returns accurate results due to proper FIFO ordering
      */
     function unlockedBalanceOf(address user) external view returns (uint256) {
         DepositBatch[] storage deposits = userDeposits[user];
@@ -489,10 +571,6 @@ contract VaultTimeLockWrapper {
 
     /**
      * @notice Get details of a specific deposit batch
-     * @return amount Number of vTokens in this batch
-     * @return depositTime When this batch was deposited
-     * @return unlockTime When this batch can be withdrawn
-     * @return isUnlocked Whether this batch is currently unlocked
      */
     function getDeposit(address user, uint256 index) external view returns (
         uint256 amount,
