@@ -358,10 +358,21 @@ contract VaultTimeLockWrapper {
     ) external returns (uint256 penaltyShares) {
         if (balanceOf[msg.sender] == 0) revert InsufficientBalance();
 
+        // SECURITY FIX: Approve vault for penalty shares before forceDeallocate
+        // forceDeallocate internally calls withdraw(penaltyAssets, vault, wrapper)
+        // which requires wrapper to approve vault for the penalty shares
+        uint256 vaultBalanceBefore = vault.balanceOf(address(this));
+        vault.approve(address(vault), type(uint256).max);
+
         // Step 1: Force deallocate from adapter (charges penalty)
+        // This will deduct penaltyShares from wrapper via withdraw allowance
         penaltyShares = vault.forceDeallocate(adapter, data, assets, address(this));
 
-        // Step 2: SECURITY FIX - Redeem the requested assets from vault
+        // SECURITY FIX: Revoke approval immediately after forceDeallocate
+        // Prevents griefing attacks where anyone could repeatedly call forceDeallocate
+        vault.approve(address(vault), 0);
+
+        // Step 2: Redeem the requested assets from vault
         // After forceDeallocate, the wrapper still holds vault shares
         // We need to redeem those shares to get the actual assets
         uint256 sharesToRedeem = vault.previewWithdraw(assets);
