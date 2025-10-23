@@ -63,20 +63,19 @@ contract VaultTimeLockWrapperTest is Test {
     function test_fifo_orderingPreservedAfterWithdrawal() public {
         vm.startPrank(alice);
 
-        // Deposit 3 batches at different times
-        asset.approve(address(wrapper), 300e18);
+        // Deposit 3 batches at different times, capturing timestamps at deposit moment
+        asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 firstTime = block.timestamp;
+        (, uint256 firstTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 1 days);
-        asset.approve(address(wrapper), 200e18);
         wrapper.deposit(200e18);
-        uint256 secondTime = block.timestamp;
+        (, uint256 secondTime,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 2 days);
-        asset.approve(address(wrapper), 300e18);
         wrapper.deposit(300e18);
-        uint256 thirdTime = block.timestamp;
+        (, uint256 thirdTime,,) = wrapper.getDeposit(alice, 2);
 
         // Verify initial ordering
         (uint256 amt0, uint256 time0,,) = wrapper.getDeposit(alice, 0);
@@ -112,16 +111,17 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Alice creates 3 batches
         asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 1 days);
         wrapper.deposit(200e18);
-        uint256 time2 = block.timestamp;
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 1 days);
         wrapper.deposit(300e18);
-        uint256 time3 = block.timestamp;
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
 
         // Transfer first batch + partial second (150e18 total)
         wrapper.transfer(bob, 150e18);
@@ -160,12 +160,13 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Create unlocked and locked batches
         asset.approve(address(wrapper), 300e18);
+
         wrapper.deposit(100e18);
-        uint256 unlockedTime = block.timestamp;
+        (, uint256 unlockedTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 6 days); // 6 days later (still within 7 day period)
-        asset.approve(address(wrapper), 200e18);
         wrapper.deposit(200e18);
+        (, uint256 lockedTime,,) = wrapper.getDeposit(alice, 1);
 
         // Fast forward to unlock first batch only
         vm.warp(unlockedTime + LOCK_PERIOD);
@@ -176,7 +177,7 @@ contract VaultTimeLockWrapperTest is Test {
             abi.encodeWithSelector(
                 VaultTimeLockWrapper.BatchStillLocked.selector,
                 1, // batch index
-                block.timestamp + 6 days // unlock time
+                lockedTime + LOCK_PERIOD // unlock time
             )
         );
         wrapper.withdraw(150e18, alice, alice);
@@ -189,8 +190,9 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Create multiple batches with different ages
         asset.approve(address(wrapper), 600e18);
+
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(200e18);
@@ -418,7 +420,7 @@ contract VaultTimeLockWrapperTest is Test {
         vm.startPrank(alice);
         asset.approve(address(wrapper), INITIAL_DEPOSIT);
         wrapper.deposit(INITIAL_DEPOSIT);
-        uint256 aliceDepositTime = block.timestamp;
+        (, uint256 aliceDepositTime,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 3 days);
         wrapper.transfer(bob, INITIAL_DEPOSIT);
@@ -445,15 +447,15 @@ contract VaultTimeLockWrapperTest is Test {
         asset.approve(address(wrapper), 600e18);
 
         wrapper.deposit(100e18);
-        uint256 time1 = block.timestamp;
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(200e18);
-        uint256 time2 = block.timestamp;
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
 
         vm.warp(block.timestamp + 2 days);
         wrapper.deposit(300e18);
-        uint256 time3 = block.timestamp;
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
 
         // Check all batches exist
         assertEq(wrapper.getDepositCount(alice), 3, "Three batches");
