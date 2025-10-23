@@ -6,6 +6,7 @@ import "../src/VaultTimeLockWrapper.sol";
 import "../src/VaultV2.sol";
 import "../src/VaultV2Factory.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
+import {AdapterMock} from "./mocks/AdapterMock.sol";
 
 /**
  * @title VaultTimeLockWrapperTest
@@ -300,6 +301,274 @@ contract VaultTimeLockWrapperTest is Test {
         // Emergency withdraw would be called like:
         // wrapper.emergencyWithdraw(adapterAddress, data, 500e18);
         // But requires adapter setup which is beyond basic unit test scope
+
+        vm.stopPrank();
+    }
+
+    function test_emergency_allowanceProperlyManagedWithAdapter() public {
+        // Setup: Deploy mock adapter and configure vault
+        vm.startPrank(owner);
+
+        // Set curator and allocator to owner
+        VaultV2 vaultV2 = VaultV2(address(vault));
+        vaultV2.setCurator(owner);
+        vaultV2.submit(abi.encodeCall(IVaultV2.setIsAllocator, (owner, true)));
+        vault.setIsAllocator(owner, true);
+
+        AdapterMock mockAdapter = new AdapterMock(address(vault));
+
+        // Add adapter to vault using timelock pattern
+        vaultV2.submit(abi.encodeCall(IVaultV2.addAdapter, (address(mockAdapter))));
+        vault.addAdapter(address(mockAdapter));
+
+        // Set caps for the mock adapter IDs (id-0 and id-1)
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-0"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-0"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-0"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-0"), 1e18);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-1"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-1"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-1"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-1"), 1e18);
+
+        // Set force deallocate penalty (2% = 0.02 * 1e18, max allowed)
+        uint256 penalty = 0.02e18; // 2% penalty
+        vaultV2.submit(abi.encodeCall(IVaultV2.setForceDeallocatePenalty, (address(mockAdapter), penalty)));
+        vault.setForceDeallocatePenalty(address(mockAdapter), penalty);
+
+        vm.stopPrank();
+
+        // Alice deposits into wrapper
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        // Wrapper deposits into vault, vault allocates to adapter
+        vm.startPrank(owner);
+        uint256 wrapperShares = vault.balanceOf(address(wrapper));
+        vault.allocate(address(mockAdapter), "", wrapperShares / 2); // Allocate 50% to adapter
+        vm.stopPrank();
+
+        // SECURITY CHECK #1: Verify wrapper has no allowance set initially
+        assertEq(vault.allowance(address(wrapper), address(vault)), 0, "No initial allowance");
+
+        // Alice triggers emergency withdraw
+        vm.startPrank(alice);
+        uint256 assetsToEmergencyWithdraw = 100e18;
+
+        // Emergency withdraw should succeed despite requiring allowance internally
+        wrapper.emergencyWithdraw(address(mockAdapter), "", assetsToEmergencyWithdraw);
+
+        vm.stopPrank();
+
+        // SECURITY CHECK #2: Verify allowance is revoked after emergency withdraw
+        assertEq(vault.allowance(address(wrapper), address(vault)), 0, "Allowance revoked after emergency");
+
+        // SECURITY CHECK #3: Verify Alice received assets (minus penalty)
+        // Penalty is paid from wrapper's vault shares, Alice gets the requested assets
+        assertGt(asset.balanceOf(alice), 0, "Alice received assets");
+    }
+
+    function test_emergency_noGriefingAfterAllowanceRevoked() public {
+        // Setup: Deploy mock adapter and configure vault
+        vm.startPrank(owner);
+
+        VaultV2 vaultV2 = VaultV2(address(vault));
+        vaultV2.setCurator(owner);
+        vaultV2.submit(abi.encodeCall(IVaultV2.setIsAllocator, (owner, true)));
+        vault.setIsAllocator(owner, true);
+
+        AdapterMock mockAdapter = new AdapterMock(address(vault));
+
+        // Add adapter to vault
+        vaultV2.submit(abi.encodeCall(IVaultV2.addAdapter, (address(mockAdapter))));
+        vault.addAdapter(address(mockAdapter));
+
+        // Set caps
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-0"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-0"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-0"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-0"), 1e18);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-1"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-1"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-1"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-1"), 1e18);
+
+        // Set force deallocate penalty (2% = 0.02 * 1e18, max allowed)
+        uint256 penalty = 0.02e18; // 2% penalty
+        vaultV2.submit(abi.encodeCall(IVaultV2.setForceDeallocatePenalty, (address(mockAdapter), penalty)));
+        vault.setForceDeallocatePenalty(address(mockAdapter), penalty);
+
+        vm.stopPrank();
+
+        // Alice deposits into wrapper
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        // Wrapper deposits into vault, vault allocates to adapter
+        vm.startPrank(owner);
+        uint256 wrapperShares = vault.balanceOf(address(wrapper));
+        vault.allocate(address(mockAdapter), "", wrapperShares / 2);
+        vm.stopPrank();
+
+        // Alice triggers emergency withdraw
+        vm.startPrank(alice);
+        wrapper.emergencyWithdraw(address(mockAdapter), "", 100e18);
+        vm.stopPrank();
+
+        // GRIEFING ATTACK: Attacker tries to call forceDeallocate on wrapper's behalf
+        // This should fail because wrapper revoked approval
+        vm.startPrank(attacker);
+
+        uint256 wrapperSharesBefore = vault.balanceOf(address(wrapper));
+
+        // Attacker tries to grief by calling forceDeallocate
+        // This should revert with InsufficientAllowance error
+        vm.expectRevert();
+        vault.forceDeallocate(address(mockAdapter), "", 50e18, address(wrapper));
+
+        vm.stopPrank();
+
+        // SECURITY CHECK: Wrapper shares unchanged (attack failed)
+        assertEq(vault.balanceOf(address(wrapper)), wrapperSharesBefore, "Wrapper shares unchanged");
+    }
+
+    function test_emergency_allowanceOnlyExistsDuringExecution() public {
+        // Setup: Deploy mock adapter
+        vm.startPrank(owner);
+
+        VaultV2 vaultV2 = VaultV2(address(vault));
+        vaultV2.setCurator(owner);
+        vaultV2.submit(abi.encodeCall(IVaultV2.setIsAllocator, (owner, true)));
+        vault.setIsAllocator(owner, true);
+
+        AdapterMock mockAdapter = new AdapterMock(address(vault));
+
+        vaultV2.submit(abi.encodeCall(IVaultV2.addAdapter, (address(mockAdapter))));
+        vault.addAdapter(address(mockAdapter));
+
+        // Set caps
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-0"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-0"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-0"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-0"), 1e18);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-1"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-1"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-1"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-1"), 1e18);
+
+        uint256 penalty = 0.01e18; // 1% penalty
+        vaultV2.submit(abi.encodeCall(IVaultV2.setForceDeallocatePenalty, (address(mockAdapter), penalty)));
+        vault.setForceDeallocatePenalty(address(mockAdapter), penalty);
+
+        vm.stopPrank();
+
+        // Alice deposits
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        // Allocate to adapter
+        vm.startPrank(owner);
+        uint256 wrapperShares = vault.balanceOf(address(wrapper));
+        vault.allocate(address(mockAdapter), "", wrapperShares / 2);
+        vm.stopPrank();
+
+        // Check allowance before emergency withdraw
+        uint256 allowanceBefore = vault.allowance(address(wrapper), address(vault));
+        assertEq(allowanceBefore, 0, "No allowance before emergency");
+
+        // Alice triggers emergency withdraw
+        vm.startPrank(alice);
+        wrapper.emergencyWithdraw(address(mockAdapter), "", 100e18);
+        vm.stopPrank();
+
+        // Check allowance after emergency withdraw
+        uint256 allowanceAfter = vault.allowance(address(wrapper), address(vault));
+        assertEq(allowanceAfter, 0, "No allowance after emergency");
+
+        // SECURITY VALIDATION: Allowance was only temporary during execution
+        // The approve → forceDeallocate → revoke pattern ensures no persistent allowance
+    }
+
+    function test_emergency_multipleUsersCanEmergencyWithdraw() public {
+        // Setup: Deploy mock adapter
+        vm.startPrank(owner);
+
+        VaultV2 vaultV2 = VaultV2(address(vault));
+        vaultV2.setCurator(owner);
+        vaultV2.submit(abi.encodeCall(IVaultV2.setIsAllocator, (owner, true)));
+        vault.setIsAllocator(owner, true);
+
+        AdapterMock mockAdapter = new AdapterMock(address(vault));
+
+        vaultV2.submit(abi.encodeCall(IVaultV2.addAdapter, (address(mockAdapter))));
+        vault.addAdapter(address(mockAdapter));
+
+        // Set caps
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-0"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-0"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-0"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-0"), 1e18);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (abi.encodePacked("id-1"), type(uint128).max)));
+        vault.increaseAbsoluteCap(abi.encodePacked("id-1"), type(uint128).max);
+        vaultV2.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (abi.encodePacked("id-1"), 1e18)));
+        vault.increaseRelativeCap(abi.encodePacked("id-1"), 1e18);
+
+        uint256 penalty = 0.02e18; // 2% penalty
+        vaultV2.submit(abi.encodeCall(IVaultV2.setForceDeallocatePenalty, (address(mockAdapter), penalty)));
+        vault.setForceDeallocatePenalty(address(mockAdapter), penalty);
+
+        vm.stopPrank();
+
+        // Multiple users deposit
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 2000e18);
+        wrapper.deposit(2000e18);
+        vm.stopPrank();
+
+        // Allocate to adapter
+        vm.startPrank(owner);
+        uint256 wrapperShares = vault.balanceOf(address(wrapper));
+        vault.allocate(address(mockAdapter), "", wrapperShares / 2);
+        vm.stopPrank();
+
+        // Both Alice and Bob can emergency withdraw
+        vm.prank(alice);
+        wrapper.emergencyWithdraw(address(mockAdapter), "", 100e18);
+
+        vm.prank(bob);
+        wrapper.emergencyWithdraw(address(mockAdapter), "", 200e18);
+
+        // SECURITY CHECK: Both withdrawals succeeded and allowance is still 0
+        assertEq(vault.allowance(address(wrapper), address(vault)), 0, "No allowance after multiple emergencies");
+    }
+
+    function test_emergency_revertsWithZeroBalance() public {
+        // Setup adapter (simplified - no allocation needed for this test)
+        vm.startPrank(owner);
+        VaultV2 vaultV2 = VaultV2(address(vault));
+        vaultV2.setCurator(owner);
+        AdapterMock mockAdapter = new AdapterMock(address(vault));
+        vaultV2.submit(abi.encodeCall(IVaultV2.addAdapter, (address(mockAdapter))));
+        vault.addAdapter(address(mockAdapter));
+        vm.stopPrank();
+
+        // Carol has no deposits
+        vm.startPrank(carol);
+
+        // Should revert with InsufficientBalance
+        vm.expectRevert(VaultTimeLockWrapper.InsufficientBalance.selector);
+        wrapper.emergencyWithdraw(address(mockAdapter), "", 100e18);
 
         vm.stopPrank();
     }
