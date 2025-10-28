@@ -94,6 +94,25 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @param calls Array of calls to execute
     function executeStrategy(bytes32 strategyId, Call[] calldata calls) external;
 
+    /// @notice Execute strategy calls with additional slippage protection
+    /// @param strategyId The strategy identifier
+    /// @param calls Array of calls to execute
+    /// @param minBalanceIncrease Minimum balance increase required (for withdrawals), 0 to skip check
+    function executeStrategyWithSlippage(
+        bytes32 strategyId,
+        Call[] calldata calls,
+        uint256 minBalanceIncrease
+    ) external;
+
+    /// @notice Execute strategy calls with circuit breaker bypassed
+    /// @param strategyId The strategy identifier
+    /// @param calls Array of calls to execute
+    /// @dev USE WITH EXTREME CAUTION: Bypasses 10% balance loss circuit breaker
+    function executeStrategyBypassCircuitBreaker(
+        bytes32 strategyId,
+        Call[] calldata calls
+    ) external;
+
     /// @notice Execute a pre-configured strategy
     /// @param strategyId The strategy with pre-configured calldata
     function executePreConfigured(bytes32 strategyId) external;
