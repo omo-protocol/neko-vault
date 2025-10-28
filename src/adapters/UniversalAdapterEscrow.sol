@@ -136,7 +136,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Optionally execute strategy immediately after allocation
         if (executeNow && calls.length > 0) {
-            _executeMulticall(strategyId, calls);
+            _executeMulticall(strategyId, calls, false);
         }
 
         // Return results
@@ -267,7 +267,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @param calls Array of calls to execute
     function externalExecuteMulticall(bytes32 strategyId, Call[] memory calls) external {
         require(msg.sender == address(this), "Only self");
-        _executeMulticall(strategyId, calls);
+        _executeMulticall(strategyId, calls, false);
     }
 
     /// @inheritdoc IAdapter
@@ -424,11 +424,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      - Monitor for MEV and adjust strategies accordingly
     ///
     ///      For additional protection with explicit balance checks, use executeStrategyWithSlippage() instead.
+    ///      For LP minting operations where >10% balance decrease is expected, use executeStrategyBypassCircuitBreaker() instead.
     function executeStrategy(
         bytes32 strategyId,
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
-        _executeMulticall(strategyId, calls);
+        _executeMulticall(strategyId, calls, false);
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -447,7 +448,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
-        _executeMulticall(strategyId, calls);
+        _executeMulticall(strategyId, calls, false);
 
         // Slippage check for withdrawals
         if (minBalanceIncrease > 0) {
@@ -455,6 +456,31 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
         }
 
+        emit StrategyExecuted(strategyId, msg.sender);
+    }
+
+    /// @notice Execute strategy calls with circuit breaker bypassed
+    /// @param strategyId The strategy identifier
+    /// @param calls Array of calls to execute
+    /// @dev USE WITH EXTREME CAUTION: This bypasses the 10% balance loss circuit breaker!
+    ///
+    ///      ONLY use this for legitimate operations that cause large balance decreases:
+    ///      1. LP minting where tokens are locked in NFT position (e.g., Uniswap V3)
+    ///      2. Large protocol deposits (>10% of balance) that need atomic execution
+    ///      3. Multi-step operations where balance temporarily drops >10% but recovers
+    ///
+    ///      SECURITY WARNING:
+    ///      - Agent MUST include proper slippage protection in call data
+    ///      - Agent MUST verify balance after execution manually
+    ///      - Bypassing circuit breaker removes last-resort safety net
+    ///      - Only whitelisted functions can be called (provides some protection)
+    ///
+    ///      For normal operations, use executeStrategy() or executeStrategyWithSlippage() instead.
+    function executeStrategyBypassCircuitBreaker(
+        bytes32 strategyId,
+        Call[] calldata calls
+    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        _executeMulticall(strategyId, calls, true);
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -466,7 +492,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Decode pre-configured calls
         Call[] memory calls = abi.decode(strategy.preConfiguredData, (Call[]));
 
-        _executeMulticall(strategyId, calls);
+        _executeMulticall(strategyId, calls, false);
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -655,6 +681,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @notice Execute multiple calls with validation and circuit breaker
     /// @param strategyId The strategy identifier for tracking external deposits
     /// @param calls Array of calls to execute
+    /// @param bypassCircuitBreaker If true, skip the 10% balance loss check (for LP minting)
     /// @dev SECURITY WARNING: No built-in slippage protection!
     ///      Agents must include slippage/deadline checks in call data to prevent MEV attacks.
     ///      Consider using executeStrategyWithSlippage() for additional protection.
@@ -664,7 +691,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      - Cannot distinguish legitimate protocol deposits from malicious transfers
     ///      - Any balance decrease >10% triggers circuit breaker, even if intentional
     ///      - For protocol deposits >10% of balance, split into smaller calls or use pre-approved amounts
-    function _executeMulticall(bytes32 strategyId, Call[] memory calls) internal {
+    ///      - For LP minting where tokens are locked in NFT, set bypassCircuitBreaker=true
+    function _executeMulticall(bytes32 strategyId, Call[] memory calls, bool bypassCircuitBreaker) internal {
         // L-16 Fix: Removed daily limit tracking logic per recommendation
         // Daily limits were problematic and could prevent emergency operations
 
@@ -702,7 +730,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // This must happen here (not in executeStrategy) because balance delta tracking below
         // would adjust totalExternalDeposits and mask the loss
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-        if (balanceAfter < balanceBefore && balanceBefore > 0) {
+        if (!bypassCircuitBreaker && balanceAfter < balanceBefore && balanceBefore > 0) {
             uint256 loss = balanceBefore - balanceAfter;
             uint256 lossBps = (loss * 10000) / balanceBefore;
 
@@ -711,7 +739,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // For large deposits, either:
             // 1. Split into smaller calls
             // 2. Ensure whitelisted protocol has approval and deposits directly
-            // 3. Use executeStrategyWithSlippage with minBalanceIncrease=0 to bypass
+            // 3. Pass bypassCircuitBreaker=true for LP minting where tokens lock in NFT
             if (lossBps > MAX_BALANCE_LOSS_BPS) {
                 revert ExcessiveBalanceLoss();
             }
