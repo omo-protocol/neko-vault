@@ -1727,14 +1727,14 @@ contract UniversalValuerOffchainComprehensive is Test {
     function testConfigureStrategyInvalidMinConfidence() public {
         vm.startPrank(owner);
 
-        // Should revert for confidence below defaultConfidenceThreshold
+        // Should revert for confidence below defaultConfidenceThreshold (default is 90)
         vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
         valuer.configureStrategy(
             STRATEGY_A,
             MIN_UPDATE_INTERVAL,
             MAX_STALENESS,
             1000,
-            94 // Below default threshold of 95
+            89 // Below default threshold of 90
         );
 
         // Should revert for confidence above 100
