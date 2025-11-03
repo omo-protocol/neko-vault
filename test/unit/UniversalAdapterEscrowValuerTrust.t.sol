@@ -260,6 +260,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
 
     /**
      * @notice Fuzz test: Verify tolerance-based validation across all scenarios
+     * SECURITY FIX: Updated for donation-resistant valuation logic
      */
     function testFuzzToleranceValidation(uint256 realValue, uint256 valuerReturn) public {
         // Bound inputs
@@ -272,18 +273,27 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
 
-        uint256 minKnownValue = asset.balanceOf(address(adapter)) + adapter.totalExternalDeposits();
+        // NEW LOGIC: minKnownValue = totalAllocations (not balance + totalExternalDeposits)
+        uint256 minKnownValue = adapter.totalAllocations();
         uint256 threshold90Percent = (minKnownValue * 9000) / 10000;
+
+        // Calculate excessIdle (donations) that will be excluded
+        uint256 balance = asset.balanceOf(address(adapter));
+        uint256 allocatedInAdapter = adapter.totalAllocations() - adapter.totalExternalDeposits();
+        uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
 
         // Valuer returns some amount (could be under, at, or above minimum)
         maliciousValuer.setReturnValue(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
 
-        // AFTER TOLERANCE FIX: Use tolerance-based validation
-        if (valuerReturn >= threshold90Percent) {
-            // Within tolerance (>= 90% of minimum) - accept valuer's value
-            assertEq(reportedAssets, valuerReturn, "Should use valuer's value when >= 90% threshold");
+        // Adjust valuerReturn for excessIdle to get valuerValueAdj
+        uint256 valuerValueAdj = valuerReturn > excessIdle ? valuerReturn - excessIdle : 0;
+
+        // AFTER TOLERANCE FIX: Use tolerance-based validation with adjusted value
+        if (valuerValueAdj >= threshold90Percent) {
+            // Within tolerance (>= 90% of minimum) - accept valuer's adjusted value
+            assertEq(reportedAssets, valuerValueAdj, "Should use valuer's adjusted value when >= 90% threshold");
         } else {
             // Below tolerance (< 90% of minimum) - use minimum for protection
             assertEq(reportedAssets, minKnownValue, "Should use minimum when valuer < 90% threshold");

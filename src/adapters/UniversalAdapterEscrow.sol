@@ -272,13 +272,32 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IAdapter
     function realAssets() external view override returns (uint256 assets) {
-        // L-13 FIX: Comprehensive asset utilization tracking
-        // This function ensures all assets (both allocated to strategies and idle) are accounted for
-        // No assets are lost or left unused in the adapter
+        // CRITICAL SECURITY FIX: Donation-resistant valuation
+        // Prevents attacker from donating tokens to inflate realAssets and extract value on withdrawals
+        //
+        // VULNERABILITY (before fix):
+        // 1. Attacker donates D tokens to adapter → balance increases
+        // 2. Attacker withdraws A ≤ D tokens → higher realAssets → fewer shares burned
+        // 3. Withdrawal funded by donated balance → attacker keeps extra shares
+        //
+        // FIX: Ignore excess idle balance beyond allocated-in-adapter
+        // - Only count balance up to (totalAllocations - totalExternalDeposits)
+        // - Excess balance (donations) excluded from valuation
+        // - Prevents donation-based share manipulation
 
-        // Calculate minimum known value upfront (needed for validation)
         uint256 balance = IERC20(asset).balanceOf(address(this));
-        uint256 minKnownValue = balance + totalExternalDeposits;
+
+        // Donation-resistant valuation: ignore excess idle balance beyond allocated-in-adapter
+        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
+            ? totalAllocations - totalExternalDeposits
+            : 0;
+
+        uint256 excessIdle = balance > allocatedInAdapter
+            ? balance - allocatedInAdapter
+            : 0;
+
+        // Principal-only fallback (ignores donations sitting on the adapter)
+        uint256 minKnownValue = totalAllocations;
 
         // Call getTotalValue which aggregates all strategy values + idle assets
         (bool success, bytes memory data) = valuer.staticcall(
@@ -287,6 +306,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
+
+            // Adjust totalValue to exclude donation excess
+            uint256 totalValueAdj = totalValue > excessIdle
+                ? totalValue - excessIdle
+                : 0;
 
             // CRITICAL SECURITY FIX Issue #6 (Tolerance-Based Approach):
             // Balance between preventing malicious underpricing and allowing legitimate losses
@@ -301,33 +325,36 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // - Allow valuer values within 10% of minimum (accounts for legitimate losses)
             // - Reject valuer values >10% below minimum (likely malicious/buggy)
             //
-            // LEGITIMATELY ACCEPTED (totalValue >= 90% of minKnownValue):
+            // LEGITIMATELY ACCEPTED (totalValueAdj >= 90% of minKnownValue):
             // ✅ Swap slippage: 0.5-2% loss
             // ✅ Protocol deposit fees: 0.1-1% loss
             // ✅ Small trading losses: < 10%
             // ✅ Prevents ghost accumulation from normal operations
-            // ✅ Profits (totalValue > minKnownValue) always accepted
+            // ✅ Profits (totalValueAdj > minKnownValue) always accepted
             //
-            // ATTACKS PREVENTED (totalValue < 90% of minKnownValue):
+            // ATTACKS PREVENTED (totalValueAdj < 90% of minKnownValue):
             // ❌ 50% malicious underpricing → returns minKnownValue
             // ❌ 90% compromised valuer → returns minKnownValue
             // ❌ Oracle manipulation > 10% → returns minKnownValue
+            // ❌ Donation-based inflation → excessIdle excluded from totalValueAdj
             //
             // TRADE-OFF:
             // - Losses > 10% still create small ghost (but rare in normal operations)
             // - Attacker needs to manipulate valuer by >10% (much harder)
             // - Prevents persistent overpricing from normal slippage/fees
+            // - Prevents donation-based value extraction attacks
 
             // Calculate 90% threshold (allow up to 10% loss)
             // Use 9000 / 10000 to avoid precision loss
             uint256 lossToleranceThreshold = (minKnownValue * 9000) / 10000;
 
-            if (totalValue >= lossToleranceThreshold) {
-                // Within tolerance - accept valuer's value
+            if (totalValueAdj >= lossToleranceThreshold) {
+                // Within tolerance - accept valuer's value (adjusted for donations)
                 // This handles:
-                // - Normal profits (totalValue > minKnownValue)
-                // - Legitimate losses (minKnownValue > totalValue >= 90% minKnownValue)
-                return totalValue;
+                // - Normal profits (totalValueAdj > minKnownValue)
+                // - Legitimate losses (minKnownValue > totalValueAdj >= 90% minKnownValue)
+                // - Ignores donation-based inflation attempts
+                return totalValueAdj;
             }
 
             // Extreme undervaluation (>10% below minimum)
@@ -336,17 +363,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         // CRITICAL SECURITY FIX Issue #4: Proper fallback when valuer fails
-        // Previous code only returned balance, missing external deposits → massive underpricing!
-        //
-        // Example attack scenario with old code:
-        // - 1000 total: 200 in adapter, 800 in external protocols
-        // - Valuer fails → returned only 200
-        // - New depositor deposits 200, gets 50% shares
-        // - But real value is 1200, so they only provided 16.7% of value
-        // - Existing holders diluted by 33%!
-        //
-        // Correct fallback: balance + tracked external deposits
-        // This gives us principal but misses yield (safer than underpricing)
+        // Use totalAllocations (principal) as fallback instead of balance + externalDeposits
+        // This prevents donation inflation even when valuer fails
+        // Misses yield but safer than allowing donation-based attacks
         return minKnownValue;
     }
 
@@ -638,6 +657,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @inheritdoc IUniversalAdapterEscrow
     /// @notice Calculate current ghost amount (overpricing) if any
     /// @dev SECURITY FIX Issue #6: Helper function to monitor when manual sync might be needed
+    ///      SECURITY FIX: Updated to use donation-resistant valuation (consistent with realAssets)
     ///
     ///      WHAT IS A GHOST AMOUNT:
     ///      Ghost = The amount by which minKnownValue exceeds the valuer's reported real value
@@ -652,16 +672,25 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      - If ghost > 5% of totalAssets: Sync urgently
     ///
     ///      Example:
-    ///      - totalExternalDeposits = 1000 (historical flows)
-    ///      - balance = 200
-    ///      - minKnownValue = 1200
-    ///      - Valuer reports: 1000 (real current value after 20% loss)
-    ///      - Ghost = 1200 - 1000 = 200 (16.7% overpricing!)
+    ///      - totalAllocations = 1000 (principal)
+    ///      - Valuer reports: 800 (real current value after 20% loss)
+    ///      - Ghost = 1000 - 800 = 200 (20% overpricing!)
     ///
     /// @return ghost The amount of overpricing (0 if no ghost detected)
     function getGhostAmount() external view returns (uint256 ghost) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
-        uint256 minKnown = balance + totalExternalDeposits;
+
+        // Donation-resistant calculation (consistent with realAssets)
+        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
+            ? totalAllocations - totalExternalDeposits
+            : 0;
+
+        uint256 excessIdle = balance > allocatedInAdapter
+            ? balance - allocatedInAdapter
+            : 0;
+
+        // Principal-only minimum (ignores donations)
+        uint256 minKnown = totalAllocations;
 
         (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getTotalValue(address)", address(this))
@@ -669,8 +698,14 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (success && data.length >= 32) {
             uint256 valuerValue = abi.decode(data, (uint256));
-            if (minKnown > valuerValue) {
-                return minKnown - valuerValue; // Amount of ghost (overpricing)
+
+            // Adjust for donation excess
+            uint256 valuerValueAdj = valuerValue > excessIdle
+                ? valuerValue - excessIdle
+                : 0;
+
+            if (minKnown > valuerValueAdj) {
+                return minKnown - valuerValueAdj; // Amount of ghost (overpricing)
             }
         }
         return 0; // No ghost detected

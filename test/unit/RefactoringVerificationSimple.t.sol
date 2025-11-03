@@ -95,14 +95,33 @@ contract RefactoringVerificationSimple is Test {
      * Proves:
      * - getTotalValue is called instead of getValue
      * - Value is correctly retrieved from valuer
+     * SECURITY FIX: Updated to account for donation-resistant valuation
      */
     function test_Verification_2_GetTotalValue() public {
-        // Set a test value
-        uint256 testValue = 999888777;
+        // Allocate some amount first to have a baseline
+        asset.mint(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(
+            abi.encode(STRATEGY_1, 100e6, false, new IUniversalAdapterEscrow.Call[](0)),
+            100e6, bytes4(0), address(0)
+        );
+
+        // Set a test value above the 90% threshold
+        // totalAllocations = 100e6, so valuer must report >= 90e6 (90% threshold)
+        uint256 testValue = 110e6; // Above threshold
         valuer.setValue(address(adapter), testValue);
 
-        // realAssets should call getTotalValue and return the value
+        // realAssets should call getTotalValue and return the adjusted value
         uint256 reportedAssets = adapter.realAssets();
+
+        // With new logic:
+        // minKnown = totalAllocations = 100e6
+        // balance = 0 (assets were allocated)
+        // allocatedInAdapter = 100e6 - 0 = 100e6
+        // excessIdle = 0 - 100e6 = 0 (capped)
+        // valuerValueAdj = 110e6 - 0 = 110e6
+        // threshold = 100e6 * 0.9 = 90e6
+        // Since 110e6 >= 90e6, return 110e6
         assertEq(reportedAssets, testValue, "getTotalValue correctly returns valuer value");
 
         // The fact that this works proves getTotalValue is being called
@@ -152,8 +171,20 @@ contract RefactoringVerificationSimple is Test {
         assertEq(adapter.getActiveStrategies().length, 1, "EnumerableSet prevents duplicates");
 
         // 2. Test getTotalValue
-        valuer.setValue(address(adapter), 123456);
-        assertEq(adapter.realAssets(), 123456, "realAssets uses getTotalValue");
+        // SECURITY FIX: With donation-resistant valuation, realAssets returns the higher of:
+        // - Valuer's adjusted value (if >= 90% of minKnown)
+        // - minKnownValue = totalAllocations (if valuer < 90%)
+        // totalAllocations = 150e6, so set valuer to return >= 135e6 (90% threshold)
+        uint256 valuerValue = 160e6; // Above 90% threshold (150e6 allocated)
+        valuer.setValue(address(adapter), valuerValue);
+
+        // With new logic:
+        // minKnown = totalAllocations = 150e6
+        // excessIdle = balance - allocatedInAdapter = 0 - 150e6 = 0 (capped at 0)
+        // valuerValueAdj = valuerValue - excessIdle = 160e6 - 0 = 160e6
+        // threshold = 150e6 * 0.9 = 135e6
+        // Since 160e6 >= 135e6, return valuerValueAdj = 160e6
+        assertEq(adapter.realAssets(), valuerValue, "realAssets uses getTotalValue");
 
         // 3. Pre-computed selectors are verified at compile time
         assertTrue(true, "All refactorings verified");

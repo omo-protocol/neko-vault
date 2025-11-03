@@ -101,6 +101,7 @@ contract SecurityMonitor {
     event MonitoringPaused(bool paused, address indexed by);
     event KeeperChanged(address indexed oldKeeper, address indexed newKeeper);
     event ManualIncidentReported(address indexed reporter, ThreatLevel threat, string description);
+    event OwnerChanged(address indexed oldOwner, address indexed newOwner);
 
     /* ERRORS */
 
@@ -119,6 +120,12 @@ contract SecurityMonitor {
         address _keeper,
         MonitoringConfig memory _config
     ) {
+        // SECURITY FIX Issue #4: Validate addresses
+        require(
+            _vault != address(0) && _gate != address(0) && _owner != address(0),
+            "Invalid address"
+        );
+
         vault = _vault;
         gate = _gate;
         owner = _owner;
@@ -174,7 +181,11 @@ contract SecurityMonitor {
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
+        // SECURITY FIX Issue #4: Validate new owner address
+        require(newOwner != address(0), "Invalid owner");
+        address oldOwner = owner;
         owner = newOwner;
+        emit OwnerChanged(oldOwner, newOwner);
     }
 
     /* KEEPER FUNCTIONS (Called by off-chain worker) */
@@ -263,6 +274,16 @@ contract SecurityMonitor {
 
     /// @notice Check for share price crash
     function _checkSharePriceCrash() internal view returns (ThreatLevel) {
+        // SECURITY FIX Issue #3: Skip detection if baseline is not initialized or vault is empty
+        // This prevents false positives when vault empties to totalSupply == 0
+        if (lastSharePrice == 0) {
+            return ThreatLevel.NONE;
+        }
+
+        if (VaultV2(vault).totalSupply() == 0) {
+            return ThreatLevel.NONE;
+        }
+
         if (block.timestamp < lastSharePriceUpdate + config.sharePriceCheckWindow) {
             return ThreatLevel.NONE;
         }
@@ -286,6 +307,11 @@ contract SecurityMonitor {
 
     /// @notice Check for rapid withdrawals
     function _checkRapidWithdrawals() internal view returns (ThreatLevel) {
+        // SECURITY FIX Issue #2: Disable check if misconfigured
+        if (config.rapidWithdrawalThreshold == 0 || config.rapidWithdrawalWindow == 0) {
+            return ThreatLevel.NONE;
+        }
+
         // Reset window if expired
         if (block.timestamp > withdrawalWindowStart + config.rapidWithdrawalWindow) {
             return ThreatLevel.NONE;
@@ -343,10 +369,15 @@ contract SecurityMonitor {
 
         if (totalAllocations == 0) return ThreatLevel.NONE;
 
-        uint256 diff = totalAllocations > realAssets
-            ? totalAllocations - realAssets
-            : realAssets - totalAllocations;
+        // SECURITY FIX Issue #1: Ignore surplus mismatches (realAssets >= totalAllocations).
+        // Surpluses can be caused by third-party donations and should not trigger emergencies.
+        // Only treat deficits (realAssets < totalAllocations) as anomalies.
+        if (realAssets >= totalAllocations) {
+            return ThreatLevel.NONE;
+        }
 
+        // Calculate deficit only
+        uint256 diff = totalAllocations - realAssets;
         uint256 mismatchBps = (diff * 10000) / totalAllocations;
 
         if (mismatchBps >= config.adapterBalanceMismatchThreshold) {
@@ -364,7 +395,10 @@ contract SecurityMonitor {
     function _getSharePrice() internal view returns (uint256) {
         VaultV2 vaultContract = VaultV2(vault);
         uint256 totalSupply = vaultContract.totalSupply();
-        if (totalSupply == 0) return 1e18;  // Initial price
+
+        // SECURITY FIX Issue #3: Return 0 when vault is empty (uninitialized baseline)
+        // This prevents false crash detection for non-18-decimal assets
+        if (totalSupply == 0) return 0;
 
         uint256 totalAssets = vaultContract.totalAssets();
         return (totalAssets * 1e18) / totalSupply;
@@ -417,14 +451,21 @@ contract SecurityMonitor {
     function _updateHistoricalData() internal {
         lastSharePrice = _getSharePrice();
         lastSharePriceUpdate = block.timestamp;
-        lastTotalAssets = VaultV2(vault).totalAssets();
+
+        // SECURITY FIX Issue #2: Track withdrawals by detecting totalAssets decreases
+        uint256 currentTotalAssets = VaultV2(vault).totalAssets();
         lastTotalAssetsUpdate = block.timestamp;
 
         // Reset withdrawal window if expired
         if (block.timestamp > withdrawalWindowStart + config.rapidWithdrawalWindow) {
             withdrawalsInWindow = 0;
             withdrawalWindowStart = block.timestamp;
+        } else if (currentTotalAssets < lastTotalAssets) {
+            // Detected withdrawal (totalAssets decreased)
+            withdrawalsInWindow += (lastTotalAssets - currentTotalAssets);
         }
+
+        lastTotalAssets = currentTotalAssets;
     }
 
     /* VIEW FUNCTIONS */
