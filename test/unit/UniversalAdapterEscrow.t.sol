@@ -908,20 +908,22 @@ contract UniversalAdapterEscrowTest is Test {
 
     function testL13IdleAssetVisibility() public {
         // L-13 FIX: Test visibility into idle assets
+        // SECURITY FIX: Test that donated assets are NOT counted in realAssets (prevents donation attack)
 
         // Initially no idle assets
         assertEq(adapter.getIdleAssets(), 0, "Should start with no idle assets");
 
-        // Transfer some assets directly to adapter (simulating edge case)
-        uint256 idleAmount = 100e6;
-        asset.mint(address(adapter), idleAmount);
+        // Transfer some assets directly to adapter (simulating donation attack)
+        uint256 donatedAmount = 100e6;
+        asset.mint(address(adapter), donatedAmount);
 
-        // Should be visible through getIdleAssets
-        assertEq(adapter.getIdleAssets(), idleAmount, "Idle assets should be visible");
+        // Should be visible through getIdleAssets (visible but not counted in valuation)
+        assertEq(adapter.getIdleAssets(), donatedAmount, "Idle assets should be visible");
 
-        // Should be included in realAssets
+        // SECURITY FIX: Should NOT be included in realAssets (prevents donation inflation attack)
+        // With no allocations, realAssets should be 0 (ignores donations)
         uint256 totalAssets = adapter.realAssets();
-        assertGe(totalAssets, idleAmount, "Real assets should include idle assets");
+        assertEq(totalAssets, 0, "Real assets should NOT include donated assets (security fix)");
     }
 
     /* L-04 FIX TESTS */

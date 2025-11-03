@@ -136,6 +136,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
      * @dev SECURITY FIX Issue #8: Owner needs to fix accounting during emergencies
      */
     function testSyncExternalDepositsWorksDuringPause() public {
+        // SECURITY FIX: Updated for donation-resistant valuation
         // Setup with ghost
         asset.mint(address(adapter), 1000e18);
 
@@ -150,6 +151,8 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         );
 
         // Simulate loss
+        // State: balance=920, totalExternalDeposits=80, totalAllocations=1000
+        // NEW logic: minKnown = totalAllocations = 1000, ghost = 1000 - 800 = 200
         valuer.setReturnValue(800e18);
 
         uint256 ghostBefore = adapter.getGhostAmount();
@@ -159,8 +162,9 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         vm.prank(owner);
         adapter.setPaused(true);
 
-        // Should still be able to sync - adjust valuer to match new minKnownValue
-        valuer.setReturnValue(920e18);
+        // Should still be able to sync
+        // To remove ghost with NEW logic: Set valuer to totalAllocations
+        valuer.setReturnValue(1000e18);
         vm.prank(owner);
         adapter.syncExternalDeposits(0);
 
