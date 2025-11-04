@@ -34,7 +34,7 @@ contract UniversalAdapterEscrowE2E is Test {
         asset = new MockERC20("USDC", "USDC", 6);
         rewardToken = new MockERC20("REWARD", "RWD", 18);
         valuer = new MockValuer();
-        defiProtocol = new MockTarget();
+        defiProtocol = new MockTarget(address(asset)); // Pass asset address to MockTarget
 
         // Deploy vault
         vault = new MockVaultV2(address(asset), owner);
@@ -126,7 +126,8 @@ contract UniversalAdapterEscrowE2E is Test {
         asset.mint(address(adapter), 1000e6);
 
         vm.prank(agent);
-        adapter.executeStrategy(LENDING_STRATEGY, calls);
+        // Use bypassCircuitBreaker for deposits >10% of balance (expected behavior)
+        adapter.executeStrategyBypassCircuitBreaker(LENDING_STRATEGY, calls);
 
         // Verify deposit
         assertEq(defiProtocol.balances(address(adapter)), 1000e6);
@@ -211,9 +212,10 @@ contract UniversalAdapterEscrowE2E is Test {
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));
 
         assertEq(ids[0], LENDING_STRATEGY);
-        // Since MockTarget doesn't actually transfer tokens, we only get adapter balance
-        assertEq(change, -int256(100e6));
-        assertEq(adapter.getAllocation(LENDING_STRATEGY), 900e6); // 1000 - 100 = 900 remaining
+        // UPDATED: MockTarget now transfers tokens, so we get the full amount
+        // Security Fix Issue #2: All-or-nothing enforcement means we get full 1000e6 or revert
+        assertEq(change, -int256(1000e6));
+        assertEq(adapter.getAllocation(LENDING_STRATEGY), 0); // 1000 - 1000 = 0 remaining
 
         // Protocol balance should be reduced since withdrawal was executed
         assertEq(defiProtocol.balances(address(adapter)), 0);
@@ -274,7 +276,27 @@ contract UniversalAdapterEscrowE2E is Test {
         adapter.updateWhitelist(address(defiProtocol), bytes4(0), true, 10000e6);
         vm.stopPrank();
 
-        // Prepare execution calls
+        // Allocate first without immediate execution
+        bytes memory allocData = abi.encode(
+            LENDING_STRATEGY,
+            1000e6,
+            false, // executeNow = false (allocate first, execute separately)
+            new IUniversalAdapterEscrow.Call[](0)
+        );
+
+        // Fund adapter
+        asset.mint(address(adapter), 1000e6);
+        asset.mint(address(vault), 1000e6);
+
+        vm.startPrank(address(vault));
+        asset.transfer(address(adapter), 1000e6);
+        adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
+        vm.stopPrank();
+
+        // Verify allocation
+        assertEq(adapter.getAllocation(LENDING_STRATEGY), 1000e6);
+
+        // Now execute strategy calls separately with circuit breaker bypass (for deposits >10%)
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](2);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(asset),
@@ -287,39 +309,24 @@ contract UniversalAdapterEscrowE2E is Test {
             value: 0
         });
 
-        // Allocate with immediate execution
-        bytes memory allocData = abi.encode(
-            LENDING_STRATEGY,
-            1000e6,
-            true, // executeNow = true
-            calls
-        );
+        vm.prank(agent);
+        adapter.executeStrategyBypassCircuitBreaker(LENDING_STRATEGY, calls);
 
-        // Fund adapter with extra for deposit
-        asset.mint(address(adapter), 1000e6);
-        asset.mint(address(vault), 1000e6);
-
-        vm.startPrank(address(vault));
-        asset.transfer(address(adapter), 1000e6);
-        adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
-        vm.stopPrank();
-
-        // Verify allocation and deposit happened
-        assertEq(adapter.getAllocation(LENDING_STRATEGY), 1000e6);
+        // Verify deposit happened
         assertEq(defiProtocol.balances(address(adapter)), 1000e6);
     }
 
     function testPreConfiguredStrategy() public {
-        // Create pre-configured calls
+        // Create pre-configured calls (deposit 100e6 which is <10% of 5000e6 balance)
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](2);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(asset),
-            data: abi.encodeWithSignature("approve(address,uint256)", address(defiProtocol), 500e6),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(defiProtocol), 100e6),
             value: 0
         });
         calls[1] = IUniversalAdapterEscrow.Call({
             target: address(defiProtocol),
-            data: abi.encodeWithSignature("deposit(uint256)", 500e6),
+            data: abi.encodeWithSignature("deposit(uint256)", 100e6),
             value: 0
         });
 
@@ -346,14 +353,14 @@ contract UniversalAdapterEscrowE2E is Test {
         adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
         vm.stopPrank();
 
-        // Fund for execution
-        asset.mint(address(adapter), 500e6);
+        // Fund for execution - give more balance to avoid circuit breaker (100/5000 = 2%)
+        asset.mint(address(adapter), 4000e6);
 
         // Execute pre-configured strategy
         vm.prank(agent);
         adapter.executePreConfigured(YIELD_STRATEGY);
 
-        assertEq(defiProtocol.balances(address(adapter)), 500e6);
+        assertEq(defiProtocol.balances(address(adapter)), 100e6);
     }
 
     function testSweepRewards() public {

@@ -292,12 +292,20 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
             _createWithdrawCall(50e18)
         );
 
-        // Should cap to totalExternalDeposits (10), bringing it to zero
+        // SECURITY FIX Issue #9: Two-phase decrease
+        // Phase 1: Decrease per-strategy by withdrawn amount (capped to per-strategy)
+        //   - decreaseAmount = min(50, 80) = 50
+        //   - externalDeposits[strategyId] = 80 - 50 = 30
+        // Phase 2: Decrease total by decreaseAmount (capped to total)
+        //   - totalExternalDeposits = 10 - min(50, 10) = 0
+        // Phase 3: Apply surplus (if any)
+        //   - surplus = 50 - 50 = 0 (no surplus since decreaseAmount wasn't further capped)
+
         uint256 totalExternalAfter = adapter.totalExternalDeposits();
-        assertEq(totalExternalAfter, 0, "Should cap to 10 decrease, bringing total to zero");
+        assertEq(totalExternalAfter, 0, "Total should be zero after capped decrease");
 
         uint256 perStrategyAfter = adapter.externalDeposits(strategyId);
-        assertEq(perStrategyAfter, 70e18, "Per-strategy should decrease by 10");
+        assertEq(perStrategyAfter, 30e18, "Per-strategy should decrease by 50 (full withdrawal)");
     }
 
     /**

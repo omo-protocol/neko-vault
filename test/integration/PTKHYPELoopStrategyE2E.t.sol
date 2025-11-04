@@ -569,7 +569,10 @@ contract PTKHYPELoopStrategyE2ETest is Test {
         vault.deallocate(address(adapter), deallocData, ALLOCATION_AMOUNT);
 
         assertEq(adapter.getAllocation(PT_KHYPE_LOOP_ID), 0);
-        assertEq(adapter.getActiveStrategies().length, 0);
+        // SECURITY FIX Issue #3: Strategy remains active if externalDeposits > 0
+        // After deallocating, the PT tokens from loop swaps are tracked as externalDeposits
+        // Strategy only removed when BOTH allocations AND externalDeposits are zero
+        assertEq(adapter.getActiveStrategies().length, 1, "Strategy should remain active with external deposits");
     }
 
     function userWithdraw() internal {

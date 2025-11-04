@@ -173,8 +173,19 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
 
-        // SECURITY FIX: For forceDeallocate, ignore calls but use same data format
+        // SECURITY FIX Issue #3: For forceDeallocate, ignore calls but use same data format
         if (caller == FORCE_DEALLOCATE_SELECTOR) {
+            // SECURITY FIX Issue #3: Only allow force deallocate up to slack amount
+            // Slack = allocations - externalDeposits (assets in adapter, not in external protocols)
+            // This prevents donation-assisted force-deallocate attacks
+            uint256 slack = allocations[strategyId] > externalDeposits[strategyId]
+                ? allocations[strategyId] - externalDeposits[strategyId]
+                : 0;
+
+            if (assets > slack) {
+                revert InvalidAmount();
+            }
+
             // Only allow if sufficient balance is available in adapter
             // Vault has approval to pull tokens directly via transferFrom
             if (assets > adapterBalance) {
@@ -209,20 +220,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
                 uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
 
-                // CRITICAL FIX: Cap actualAmount to requested assets to prevent accounting mismatch
-                // If protocol returns more than needed (e.g., balanceAfter=900, assets=800),
-                // we MUST cap to assets=800, otherwise:
-                // - Adapter returns change=-900
-                // - Vault decreases caps by 900
-                // - But vault only pulls 800 via transferFrom
-                // - Result: 100 token accounting loss!
-
-                actualAmount = balanceAfter;
-
-                // Cap to requested amount (prevents accounting mismatch)
-                if (actualAmount > assets) {
-                    actualAmount = assets;
+                // SECURITY FIX Issue #2: Enforce all-or-nothing
+                // If still insufficient after attempted withdrawals, revert
+                // This ensures VaultV2 always pulls exactly what we report
+                if (balanceAfter < assets) {
+                    revert InvalidAmount();
                 }
+
+                // Ensure VaultV2 pulls exactly what we report as change
+                actualAmount = assets;
 
                 // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
                 // If we don't have enough, vault's transferFrom will revert with insufficient balance
@@ -244,8 +250,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         allocations[strategyId] -= allocationDecrease;
         totalAllocations -= allocationDecrease;
 
-        // Remove from active strategies if fully deallocated
-        if (allocations[strategyId] == 0) {
+        // SECURITY FIX Issue #3: Remove from active strategies if BOTH allocation AND externalDeposits are zero
+        // This prevents valuer from excluding strategies that still have external deposits
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
             _removeFromActiveStrategies(strategyId);
         }
 
@@ -394,8 +401,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IUniversalAdapterEscrow
     function removeStrategy(bytes32 strategyId) external onlyOwner {
-        // Cannot remove strategy with active allocation
-        if (allocations[strategyId] > 0) revert InvalidStrategy();
+        // SECURITY FIX Issue #3: Cannot remove strategy with active allocation OR externalDeposits
+        // This prevents removing strategies that still have funds in external protocols
+        if (allocations[strategyId] > 0 || externalDeposits[strategyId] > 0) {
+            revert InvalidStrategy();
+        }
 
         delete strategies[strategyId];
         _removeFromActiveStrategies(strategyId);
@@ -827,21 +837,33 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 withdrawn = balanceAfter - balanceBefore;
 
             // SECURITY FIX Issue #9: Prevent desynchronization between per-strategy and aggregate
-            // Cap decrease to both per-strategy AND aggregate to prevent underflow
-            uint256 decreaseAmount = withdrawn;
+            // This implements the auditor-recommended two-phase approach:
+            // 1. First reduce by per-strategy-capped amount
+            // 2. Then apply surplus to aggregate only
 
-            // Cap to per-strategy external deposits
+            // Cap per-strategy decrease to prevent underflow
+            uint256 decreaseAmount = withdrawn;
             if (decreaseAmount > externalDeposits[strategyId]) {
                 decreaseAmount = externalDeposits[strategyId];
             }
 
-            // Cap to total external deposits (prevents desync if aggregate is lower)
+            externalDeposits[strategyId] -= decreaseAmount;
+
+            // First reduce aggregate by the per-strategy-capped amount
             if (decreaseAmount > totalExternalDeposits) {
-                decreaseAmount = totalExternalDeposits;
+                totalExternalDeposits = 0;
+            } else {
+                totalExternalDeposits -= decreaseAmount;
             }
 
-            externalDeposits[strategyId] -= decreaseAmount;
-            totalExternalDeposits -= decreaseAmount;
+            // Then apply any surplus withdrawal to aggregate only (up to remaining totalExternalDeposits)
+            uint256 surplus = withdrawn > decreaseAmount ? withdrawn - decreaseAmount : 0;
+            if (surplus > 0) {
+                if (surplus > totalExternalDeposits) {
+                    surplus = totalExternalDeposits;
+                }
+                totalExternalDeposits -= surplus;
+            }
         }
         // If balanceAfter == balanceBefore, no accounting update
         // NOTE: This misses cases where deposit+withdrawal happened in same multicall
