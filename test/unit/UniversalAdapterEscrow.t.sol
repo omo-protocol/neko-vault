@@ -43,7 +43,7 @@ contract UniversalAdapterEscrowTest is Test {
         asset = new MockERC20("USDC", "USDC", 6);
         rewardToken = new MockERC20("REWARD", "RWD", 18);
         valuer = new MockValuer();
-        target = new MockTarget();
+        target = new MockTarget(address(asset)); // Pass asset address to MockTarget
 
         // Deploy vault mock
         vault = new MockVaultV2(address(asset), owner);
