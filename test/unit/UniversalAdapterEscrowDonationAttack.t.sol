@@ -129,13 +129,21 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         assertEq(adapter.getAllocation(STRATEGY_1), initialAllocation - donationAmount, "Allocation reduced by donation amount");
 
         // SECURITY FIX VERIFICATION: realAssets should NOT include the donation
-        // Update valuer to report with donation included
-        valuer.setReturnValue(initialAllocation);
-        uint256 realAssetsAfter = adapter.realAssets();
+        // After deallocate (MockVault doesn't actually pull tokens via transferFrom):
+        // - Balance in adapter: 1000e18 (900 initial + 100 donation, not pulled by vault)
+        // - totalAllocations: 800e18 (900 - 100 deallocated)
+        // - allocatedInAdapter: 800e18
+        // - excessIdle: 1000e18 - 800e18 = 200e18 (includes both donation + deallocated amount)
+        //
+        // Valuer should report total value INCLUDING all idle: 1000e18
+        // realAssets() will then subtract excessIdle (200e18) to get 800e18
+        uint256 totalValueIncludingIdle = initialAllocation + donationAmount; // 1000e18
+        valuer.setReturnValue(totalValueIncludingIdle);
 
-        // With OLD logic: realAssets would include donation, making cap bypass possible
-        // With NEW logic: realAssets excludes donation, cap bypass prevented
-        uint256 expectedRealAssets = initialAllocation - donationAmount; // Only allocated amount
+        uint256 realAssetsAfter = adapter.realAssets();
+        uint256 expectedRealAssets = initialAllocation - donationAmount; // 800e18
+
+        // Donation protection: realAssets excludes the 100e18 donation
         assertEq(realAssetsAfter, expectedRealAssets, "realAssets should exclude donation even after deallocate");
 
         // The cap bypass attack fails because:

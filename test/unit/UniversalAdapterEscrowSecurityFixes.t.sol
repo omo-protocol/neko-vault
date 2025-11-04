@@ -197,16 +197,16 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         vm.prank(owner);
         adapter.setPaused(true);
 
-        // Before sync: realAssets overprices due to ghost
+        // AFTER HIGH SEVERITY FIX: realAssets reports accurate value immediately (no overpricing)
         uint256 realAssetsBefore = adapter.realAssets();
-        assertEq(realAssetsBefore, 1000e18, "Should return minKnownValue (overpriced)");
+        assertEq(realAssetsBefore, 800e18, "Should return accurate valuer value (no longer overpriced!)");
 
-        // Sync to fix - adjust valuer to match new minKnownValue
+        // Sync to fix accounting drift - adjust valuer to match new minKnownValue
         valuer.setReturnValue(920e18);
         vm.prank(owner);
         adapter.syncExternalDeposits(0);
 
-        // After sync: realAssets is accurate
+        // After sync: realAssets remains accurate
         uint256 realAssetsAfter = adapter.realAssets();
         assertEq(realAssetsAfter, 920e18, "Should return accurate value after sync");
     }
