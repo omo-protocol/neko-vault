@@ -103,24 +103,25 @@ contract UniversalAdapterEscrowManualSyncTest is Test {
      * @notice Test getGhostAmount detects large ghost (20% loss)
      */
     function testGetGhostAmountLargeGhost() public {
-        // Mint and allocate 1000, simulate 20% loss (exceeds 10% tolerance)
+        // Mint and allocate 1000, simulate 20% loss (legitimate market crash)
         asset.mint(address(adapter), 1000e18);
 
         bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
-        // Valuer reports 800 (20% loss - exceeds tolerance)
-        // minKnownValue = 1000
+        // Valuer reports 800 (20% loss)
+        // minKnownValue (totalAllocations) = 1000
         valuer.setReturnValue(800e18);
 
-        // Ghost should be full 200 (20% of 1000)
+        // Ghost shows the accounting drift: 1000 (principal) - 800 (real value) = 200
         uint256 ghost = adapter.getGhostAmount();
         assertEq(ghost, 200e18, "Ghost should be 200e18 (20% of 1000)");
 
-        // Verify realAssets rejects this and uses minimum
+        // AFTER HIGH SEVERITY FIX: realAssets NOW ACCEPTS accurate valuer value
+        // This prevents value extraction by early withdrawers!
         uint256 reportedAssets = adapter.realAssets();
-        assertEq(reportedAssets, 1000e18, "realAssets should reject 20% loss and use minimum");
+        assertEq(reportedAssets, 800e18, "realAssets should report accurate 800 value (no longer overpriced)");
     }
 
     /**

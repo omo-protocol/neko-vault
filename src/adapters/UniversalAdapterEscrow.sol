@@ -312,53 +312,55 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 ? totalValue - excessIdle
                 : 0;
 
-            // CRITICAL SECURITY FIX Issue #6 (Tolerance-Based Approach):
-            // Balance between preventing malicious underpricing and allowing legitimate losses
+            // CRITICAL SECURITY FIX - HIGH SEVERITY ISSUE:
+            // Always trust the valuer's donation-adjusted value, no fallback threshold
             //
-            // PROBLEM WITH STRICT MINIMUM:
-            // - totalExternalDeposits tracks historical flows, not current value
-            // - When deposits have slippage/fees (e.g., 800 sent → 760 value), creates "ghost"
-            // - Strict check (totalValue >= minKnownValue) causes persistent overpricing
-            // - Ghost accumulates with each loss: 5 KHYPE loss → permanent 5 KHYPE overprice
+            // PREVIOUS VULNERABILITY (10% Tolerance Threshold):
+            // - When real losses >10% occurred, adapter returned principal instead of actual value
+            // - VaultV2 overstated totalAssets, causing share overpricing
+            // - Early withdrawers burned fewer shares per asset, extracting excess value
+            // - Late withdrawers suffered principal loss or failed withdrawals
+            // - Created perverse "bank run" incentive during legitimate market crashes
             //
-            // SOLUTION: Tolerance-Based Validation
-            // - Allow valuer values within 10% of minimum (accounts for legitimate losses)
-            // - Reject valuer values >10% below minimum (likely malicious/buggy)
+            // ROOT CAUSE OF VULNERABILITY:
+            // - 10% threshold was meant to prevent malicious underpricing
+            // - But in practice, it caused WORSE harm during legitimate losses
+            // - Overpricing enables value extraction (more harmful than underpricing)
+            // - Defeats the purpose of real-time valuer pricing
             //
-            // LEGITIMATELY ACCEPTED (totalValueAdj >= 90% of minKnownValue):
-            // ✅ Swap slippage: 0.5-2% loss
-            // ✅ Protocol deposit fees: 0.1-1% loss
-            // ✅ Small trading losses: < 10%
-            // ✅ Prevents ghost accumulation from normal operations
-            // ✅ Profits (totalValueAdj > minKnownValue) always accepted
+            // NEW SECURITY MODEL:
+            // ✅ Always accept valuer's donation-adjusted value (even if >10% loss)
+            // ✅ Donation protection remains via excessIdle adjustment
+            // ✅ Fair share pricing for all users (early and late withdrawers)
+            // ✅ Accurate loss reporting prevents value extraction
+            // ✅ Let SecurityMonitor/EmergencyGate handle anomaly detection
             //
-            // ATTACKS PREVENTED (totalValueAdj < 90% of minKnownValue):
-            // ❌ 50% malicious underpricing → returns minKnownValue
-            // ❌ 90% compromised valuer → returns minKnownValue
-            // ❌ Oracle manipulation > 10% → returns minKnownValue
+            // WHAT'S STILL PROTECTED:
             // ❌ Donation-based inflation → excessIdle excluded from totalValueAdj
+            // ❌ Malicious valuer underpricing → Valuer has multi-sig + signature verification
+            // ❌ Operational anomalies → SecurityMonitor detects rapid withdrawals
+            // ❌ Emergency situations → EmergencyGate can pause operations
+            //
+            // WHY THIS IS SAFE:
+            // - UniversalValuerOffchain is a trusted component with signature verification
+            // - Real DeFi losses >10% are legitimate (liquidations, exploits, crashes)
+            // - Accurate pricing is CRITICAL for user fairness
+            // - Ghost amounts from losses >10% can be manually synced via syncExternalDeposits()
             //
             // TRADE-OFF:
-            // - Losses > 10% still create small ghost (but rare in normal operations)
-            // - Attacker needs to manipulate valuer by >10% (much harder)
-            // - Prevents persistent overpricing from normal slippage/fees
-            // - Prevents donation-based value extraction attacks
+            // - Large losses >10% may create temporary ghost (manual sync needed)
+            // - But prevents systematic value extraction from late withdrawers
+            // - Owner can call syncExternalDeposits() to correct ghost amounts
+            // - Better to under-report slightly than enable value extraction
 
-            // Calculate 90% threshold (allow up to 10% loss)
-            // Use 9000 / 10000 to avoid precision loss
-            uint256 lossToleranceThreshold = (minKnownValue * 9000) / 10000;
-
-            if (totalValueAdj >= lossToleranceThreshold) {
-                // Within tolerance - accept valuer's value (adjusted for donations)
-                // This handles:
-                // - Normal profits (totalValueAdj > minKnownValue)
-                // - Legitimate losses (minKnownValue > totalValueAdj >= 90% minKnownValue)
-                // - Ignores donation-based inflation attempts
+            // Always trust the valuer's donation-adjusted value
+            // Only reject if valuer returns 0 (no data available)
+            if (totalValueAdj > 0) {
                 return totalValueAdj;
             }
 
-            // Extreme undervaluation (>10% below minimum)
-            // Likely malicious/buggy valuer - protect holders by using minimum
+            // Valuer returned 0 - fall back to principal
+            // This should only happen if valuer has no data for this adapter
             return minKnownValue;
         }
 
@@ -542,16 +544,21 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /// @inheritdoc IUniversalAdapterEscrow
-    /// @notice Manually adjust totalExternalDeposits to remove ghost amounts
-    /// @dev SECURITY FIX Issue #6: Manual intervention for large losses (>10%) that exceeded tolerance
-    ///      SECURITY FIX Issue #8: No pause check - owner can fix mispricing even during pause
+    /// @notice Manually adjust totalExternalDeposits to remove accounting drift
+    /// @dev SECURITY FIX: After HIGH severity issue fix, this is for accounting cleanup only
+    ///      SECURITY FIX Issue #8: No pause check - owner can fix accounting even during pause
+    ///
+    ///      CONTEXT AFTER HIGH SEVERITY FIX:
+    ///      - realAssets() now always reports accurate values (no 10% fallback)
+    ///      - Ghost amounts are minimal in normal operations
+    ///      - This function is for periodic accounting maintenance, not emergency fixes
     ///
     ///      USE CASES:
-    ///      - Market crash causes >10% loss → ghost accumulates
-    ///      - Strategy exits with high slippage during black swan events
-    ///      - Periodic maintenance to clear accumulated small ghosts
-    ///      - After large losses from liquidations/exploits in external protocols
-    ///      - CRITICAL: Fix mispricing during pause to enable accurate emergency operations
+    ///      - Clear accumulated accounting drift from slippage/fees
+    ///      - Periodic maintenance to keep tracking accurate
+    ///      - After protocol interactions with complex fee structures
+    ///      - Cleanup after external protocol exploits/liquidations
+    ///      - Fix accounting during pause for accurate emergency operations
     ///
     ///      SECURITY MEASURES:
     ///      - Can only reduce totalExternalDeposits (removing ghost, not creating it)
@@ -656,27 +663,32 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @inheritdoc IUniversalAdapterEscrow
     /// @notice Calculate current ghost amount (overpricing) if any
-    /// @dev SECURITY FIX Issue #6: Helper function to monitor when manual sync might be needed
+    /// @dev SECURITY FIX: Updated after HIGH severity issue fix (removal of 10% threshold)
     ///      SECURITY FIX: Updated to use donation-resistant valuation (consistent with realAssets)
     ///
     ///      WHAT IS A GHOST AMOUNT:
-    ///      Ghost = The amount by which minKnownValue exceeds the valuer's reported real value
-    ///      This happens when:
-    ///      - Large losses (>10%) exceed the tolerance threshold
-    ///      - Multiple small losses accumulate over time
-    ///      - Protocol liquidations or exploits cause value loss
+    ///      Ghost = Difference between minKnownValue and valuer's reported real value
+    ///      This typically happens due to:
+    ///      - Historical tracking limitations in totalExternalDeposits
+    ///      - Accumulated slippage/fees from protocol interactions
+    ///      - Small discrepancies between accounting and actual value
+    ///
+    ///      IMPORTANT: After the HIGH severity fix, realAssets() always returns valuer's
+    ///      accurate value (no 10% threshold fallback), so ghost amounts should be minimal
+    ///      in normal operations. Ghost only represents accounting drift, not security issue.
     ///
     ///      WHEN TO SYNC:
-    ///      - If ghost > 0.5% of totalAssets: Consider syncing
-    ///      - If ghost > 2% of totalAssets: Should sync soon
-    ///      - If ghost > 5% of totalAssets: Sync urgently
+    ///      - If ghost > 1% of totalAllocations: Monitor
+    ///      - If ghost > 3% of totalAllocations: Consider syncing
+    ///      - If ghost > 5% of totalAllocations: Should sync
     ///
     ///      Example:
-    ///      - totalAllocations = 1000 (principal)
-    ///      - Valuer reports: 800 (real current value after 20% loss)
-    ///      - Ghost = 1000 - 800 = 200 (20% overpricing!)
+    ///      - totalAllocations = 1000 (principal tracking)
+    ///      - Valuer reports: 950 (after accumulated slippage/fees)
+    ///      - Ghost = 1000 - 950 = 50 (5% accounting drift)
+    ///      - realAssets() correctly returns 950 (no overpricing!)
     ///
-    /// @return ghost The amount of overpricing (0 if no ghost detected)
+    /// @return ghost The amount of accounting drift (0 if tracking is accurate)
     function getGhostAmount() external view returns (uint256 ghost) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
 
