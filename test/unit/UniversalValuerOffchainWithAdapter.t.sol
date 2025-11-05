@@ -124,12 +124,11 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // Deploy a simple contract that's not an adapter
         MockERC20 notAnAdapter = new MockERC20("NotAdapter", "NAD", 18);
 
-        // Try with a contract that doesn't implement IUniversalAdapterEscrow
-        // The try-catch in _getActiveStrategies will return empty array
-        uint256 totalValue = valuer.getTotalValue(address(notAnAdapter));
-
-        // Should return 0 (no strategies, no balance in asset token)
-        assertEq(totalValue, 0, "Non-adapter returns 0 value");
+        // SECURITY FIX Issue #1 (FIXING_ISSUES.md): Now reverts instead of returning empty
+        // This prevents gas-manipulation attacks where attacker uses low gas to cause
+        // getActiveStrategies() to fail and manipulate share price
+        vm.expectRevert("StrategyEnumerationFailed");
+        valuer.getTotalValue(address(notAnAdapter));
     }
 
     function test_RemoveStrategyUpdatesActiveList() public {

@@ -660,8 +660,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         try IUniversalAdapterEscrow(escrow).getActiveStrategies() returns (bytes32[] memory ids) {
             return ids;
         } catch {
-            // Return empty array if the call fails (e.g., not a UniversalAdapterEscrow)
-            return new bytes32[](0);
+            // SECURITY FIX Issue #1 (FIXING_ISSUES.md): Do not return idle-only on enumeration failure
+            // Returning empty array allows attackers to manipulate share price via low-gas transactions
+            // that cause getActiveStrategies() to fail, making realAssets() ignore external deposits
+            // Better to fail-closed (revert) than fail-open (return empty and allow manipulation)
+            revert("StrategyEnumerationFailed");
         }
     }
 }
