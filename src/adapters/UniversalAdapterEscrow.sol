@@ -71,6 +71,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Access control
     address public owner;
 
+    // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early-exit target for deallocate multicall
+    // Transient variable used during deallocate to enable early exit when sufficient assets recovered
+    // Set to target withdrawal amount before multicall, reset to 0 after
+    uint256 private withdrawTarget;
+
     /* MODIFIERS */
 
     modifier onlyVault() {
@@ -192,6 +197,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         (bytes32 strategyId, uint256 minAmountOut, , Call[] memory withdrawCalls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
+        // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Cap withdraw calls to bound gas
+        // Prevents DoS from excessively long multicalls that can OOG
+        if (withdrawCalls.length > 64) revert InvalidData();
+
         // IMPORTANT: No allocation validation here - users should be able to withdraw
         // idle assets, profits, or do emergency withdrawals even from strategies with 0 allocation
 
@@ -234,6 +243,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // If protocol withdrawal fails (no liquidity, paused, etc.), we can still
                 // return whatever balance we have instead of reverting entire deallocate
                 if (withdrawCalls.length > 0) {
+                    // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Set early-exit target
+                    // Enables _executeMulticall to break early when sufficient assets recovered
+                    withdrawTarget = assets;
+
                     try this.externalExecuteMulticall(strategyId, withdrawCalls) {
                         // Success - balance increased from protocol withdrawal
                     } catch {
@@ -241,6 +254,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                         // Continue with current balance (partial fulfillment)
                         // Vault's transferFrom will naturally limit to available balance
                     }
+
+                    // SECURITY FIX Issue #1: Reset target regardless of success/failure
+                    withdrawTarget = 0;
                 }
 
                 uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
@@ -888,6 +904,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (!success) {
                 revert CallFailed(i, returnData);
             }
+
+            // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early exit optimization
+            // If withdrawTarget is set (deallocate flow) and we've recovered enough assets, break early
+            // This prevents DoS from executing expensive remaining calls when already sufficient
+            if (
+                withdrawTarget != 0 &&
+                IERC20(asset).balanceOf(address(this)) >= withdrawTarget
+            ) {
+                break;
+            }
         }
 
         // CIRCUIT BREAKER: Check for excessive balance loss BEFORE balance delta tracking
@@ -938,42 +964,28 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 deposited = balanceBefore - balanceAfter;
             externalDeposits[strategyId] += deposited;
             totalExternalDeposits += deposited;
-        } else if (balanceAfter > balanceBefore) {
-            // Net balance increased - likely withdrawal from external protocol
-            // NOTE: Could also be profit/yield, causing externalDeposits undercount
-            uint256 withdrawn = balanceAfter - balanceBefore;
-
-            // SECURITY FIX Issue #9: Prevent desynchronization between per-strategy and aggregate
-            // This implements the auditor-recommended two-phase approach:
-            // 1. First reduce by per-strategy-capped amount
-            // 2. Then apply surplus to aggregate only
-
-            // Cap per-strategy decrease to prevent underflow
-            uint256 decreaseAmount = withdrawn;
-            if (decreaseAmount > externalDeposits[strategyId]) {
-                decreaseAmount = externalDeposits[strategyId];
-            }
-
-            externalDeposits[strategyId] -= decreaseAmount;
-
-            // First reduce aggregate by the per-strategy-capped amount
-            if (decreaseAmount > totalExternalDeposits) {
-                totalExternalDeposits = 0;
-            } else {
-                totalExternalDeposits -= decreaseAmount;
-            }
-
-            // Then apply any surplus withdrawal to aggregate only (up to remaining totalExternalDeposits)
-            uint256 surplus = withdrawn > decreaseAmount ? withdrawn - decreaseAmount : 0;
-            if (surplus > 0) {
-                if (surplus > totalExternalDeposits) {
-                    surplus = totalExternalDeposits;
-                }
-                totalExternalDeposits -= surplus;
-            }
         }
-        // If balanceAfter == balanceBefore, no accounting update
+        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Do NOT adjust on balance increases
+        // Previous code treated balance increases as withdrawals and reduced totalExternalDeposits
+        // This enabled two attack vectors:
+        //   1. Double counting: Stale valuer includes strategy value + increased balance counted twice
+        //   2. Donation infiltration: Balance increase from swapping donated tokens bypasses donation filter
+        // FIX: Only track balance DECREASES (deposits to protocol), ignore balance INCREASES
+        // Defer aggregate reduction to admin/keeper sync via syncExternalDeposits() or deallocate()
+        //
+        // If balanceAfter > balanceBefore: Do nothing (no accounting update)
+        // If balanceAfter == balanceBefore: No accounting update
         // NOTE: This misses cases where deposit+withdrawal happened in same multicall
+
+        // SECURITY FIX Issue #3 (security_issues_5nov2025.md): Maintain activeStrategies invariant
+        // Remove strategy when BOTH allocations and externalDeposits are zero
+        // This prevents stale entries that cause:
+        //   - Valuer mispricing (includes stale strategy values)
+        //   - Increased gas costs for enumeration
+        //   - Potential DoS if many stale entries accumulate
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
     }
 
 
