@@ -24,6 +24,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Circuit breaker: Maximum acceptable balance loss per executeStrategy call (10% = 1000 basis points)
     uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
 
+    // SECURITY FIX Issue #2 (FIXING_ISSUES.md): Gas cap for valuer.getTotalValue() to preserve liveness
+    // Prevents unbounded activeStrategies enumeration from causing DoS of deposits/withdrawals
+    uint256 private constant VALUER_GAS_STIPEND = 200000;
+
     /* IMMUTABLES */
 
     address public immutable parentVault;
@@ -162,6 +166,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         address
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
+
+        // SECURITY FIX Issue #3 (FIXING_ISSUES.md): Prevent OOG from oversized Call[] payload
+        // The operator could accidentally store liquidityData with massive Call[] array
+        // Decoding large arrays can OOG even when calls aren't needed
+        // Limit to reasonable size (~100KB) to preserve withdrawal availability
+        if (data.length > 100000) revert InvalidData(); // ~100KB max
 
         // Decode deallocation data with slippage protection parameter
         (bytes32 strategyId, uint256 minAmountOut, , Call[] memory withdrawCalls) =
@@ -307,7 +317,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 minKnownValue = totalAllocations;
 
         // Call getTotalValue which aggregates all strategy values + idle assets
-        (bool success, bytes memory data) = valuer.staticcall(
+        // SECURITY FIX Issue #2 (FIXING_ISSUES.md): Cap gas to prevent DoS from unbounded enumeration
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
             abi.encodeWithSignature("getTotalValue(address)", address(this))
         );
 
@@ -614,6 +625,33 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         totalExternalDeposits = newTotalExternalDeposits;
 
         emit ExternalDepositsSynced(msg.sender, oldValue, newTotalExternalDeposits);
+    }
+
+    /// @notice Reduce per-strategy externalDeposits to clear irrecoverable external exposure
+    /// @dev SECURITY FIX Issue #4 (FIXING_ISSUES.md): Enables removal of stuck strategies after losses
+    /// @param strategyId The strategy to update
+    /// @param newPerStrategy The new per-strategy externalDeposits value (must be <= current)
+    function reduceExternalDeposits(bytes32 strategyId, uint256 newPerStrategy) external onlyOwner {
+        uint256 current = externalDeposits[strategyId];
+
+        // SECURITY: Can only reduce, never increase
+        if (newPerStrategy > current) revert InvalidAmount();
+
+        uint256 delta = current - newPerStrategy;
+
+        // Update per-strategy value
+        externalDeposits[strategyId] = newPerStrategy;
+
+        // Reduce aggregate (cap to prevent underflow)
+        uint256 t = totalExternalDeposits;
+        totalExternalDeposits = delta > t ? 0 : t - delta;
+
+        // If both allocation and externalDeposits are now zero, remove from active set
+        if (allocations[strategyId] == 0 && newPerStrategy == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
+
+        emit ExternalDepositsReduced(strategyId, current, newPerStrategy, delta);
     }
 
     /* VIEW FUNCTIONS */

@@ -42,6 +42,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     event AllocationUpdated(bytes32 indexed strategyId, uint256 newAmount, int256 change);
     event StrategyRemoved(bytes32 indexed strategyId);
     event ExternalDepositsSynced(address indexed syncer, uint256 oldValue, uint256 newValue);
+    event ExternalDepositsReduced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
 
     /* ERRORS */
 
