@@ -707,6 +707,35 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         uint256 oldValue = totalExternalDeposits;
+
+        // SECURITY FIX (security_issues_5nov2025_2.md): Proportionally reduce per-strategy values
+        // to maintain invariant: totalExternalDeposits == sum(externalDeposits[•])
+        // This prevents asymmetric updates that cause double counting (overpricing) or
+        // full-idle subtraction (underpricing) in the donation filter
+        if (oldValue > 0 && newTotalExternalDeposits < oldValue) {
+            // Calculate reduction ratio with 1e18 precision to avoid rounding errors
+            // ratio = newTotal / oldTotal
+            uint256 ratio = (newTotalExternalDeposits * 1e18) / oldValue;
+
+            // Apply ratio to all active strategies' externalDeposits
+            bytes32[] memory activeStrategyIds = activeStrategies.values();
+            for (uint256 i = 0; i < activeStrategyIds.length; i++) {
+                bytes32 strategyId = activeStrategyIds[i];
+                uint256 currentPerStrategy = externalDeposits[strategyId];
+
+                if (currentPerStrategy > 0) {
+                    // Proportionally reduce: newValue = currentValue * ratio
+                    uint256 newPerStrategy = (currentPerStrategy * ratio) / 1e18;
+                    externalDeposits[strategyId] = newPerStrategy;
+
+                    // If both allocation and externalDeposits are now zero, remove from active set
+                    if (allocations[strategyId] == 0 && newPerStrategy == 0) {
+                        _removeFromActiveStrategies(strategyId);
+                    }
+                }
+            }
+        }
+
         totalExternalDeposits = newTotalExternalDeposits;
 
         emit ExternalDepositsSynced(msg.sender, oldValue, newTotalExternalDeposits);
@@ -727,9 +756,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Update per-strategy value
         externalDeposits[strategyId] = newPerStrategy;
 
-        // Reduce aggregate (cap to prevent underflow)
-        uint256 t = totalExternalDeposits;
-        totalExternalDeposits = delta > t ? 0 : t - delta;
+        // SECURITY FIX (security_issues_5nov2025_2.md): Replace clamp-to-0 with revert
+        // to preserve invariant sequencing and prevent aggregate from drifting from per-strategy sum
+        // OLD: totalExternalDeposits = delta > t ? 0 : t - delta; (clamped to 0, breaks invariant)
+        // NEW: Revert if invariant would be broken (ensures totalExternalDeposits == sum(externalDeposits[•]))
+        require(delta <= totalExternalDeposits, "Invariant: delta exceeds total");
+        totalExternalDeposits -= delta;
 
         // If both allocation and externalDeposits are now zero, remove from active set
         if (allocations[strategyId] == 0 && newPerStrategy == 0) {
