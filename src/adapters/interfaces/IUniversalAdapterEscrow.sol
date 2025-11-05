@@ -59,6 +59,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error InvalidAmount();
     error SlippageTooHigh();
     error ExcessiveBalanceLoss();
+    error ValuationUnavailable();
 
     /* EXTERNAL FUNCTIONS */
 
@@ -182,4 +183,10 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @dev Helper function to monitor when manual sync might be needed
     /// @return ghost The amount by which minKnownValue exceeds valuer's reported value
     function getGhostAmount() external view returns (uint256 ghost);
+
+    /// @notice Get cached valuation info for monitoring
+    /// @return value The cached valuation value
+    /// @return timestamp When the valuation was cached
+    /// @return isStale Whether the cached value is too old (>1 hour)
+    function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale);
 }
