@@ -273,15 +273,64 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
                 // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
                 // If we don't have enough, vault's transferFrom will revert with insufficient balance
+
+                // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction on withdrawal
+                // When we successfully withdraw from protocol to adapter, reduce externalDeposits accordingly
+                // This is SAFE here because:
+                // 1. We're in deallocate (vault-initiated withdrawal)
+                // 2. We just executed withdrawCalls that increased balance
+                // 3. We know this is a withdrawal, not a donation or other balance increase
+                //
+                // This fixes underpricing caused by overstated externalDeposits after withdrawals
+                // Note: balanceAfter already defined at line 262
+                if (balanceAfter > adapterBalance) {
+                    uint256 d = externalDeposits[strategyId];
+                    uint256 x = balanceAfter - adapterBalance;
+
+                    // Cap reduction to requested assets (don't over-reduce if we got extra)
+                    if (x > assets) x = assets;
+
+                    // Cap reduction to current per-strategy external deposits (prevent underflow)
+                    if (x > d) x = d;
+
+                    // Apply symmetric reduction
+                    if (x > 0) {
+                        externalDeposits[strategyId] = d - x;
+                        totalExternalDeposits -= x;
+                    }
+                }
             }
         }
 
-        // SECURITY FIX: Slippage protection for liquidity adapter withdrawals
-        // Prevents MEV sandwich attacks when withdrawal involves DEX swaps
-        // minAmountOut = 0 disables check (backward compatible)
-        // Force deallocate bypasses slippage check as it doesn't execute withdrawal calls
-        if (caller != FORCE_DEALLOCATE_SELECTOR && minAmountOut > 0 && actualAmount < minAmountOut) {
-            revert SlippageTooHigh();
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #2): Improved slippage protection
+        // OLD: Checked actualAmount < minAmountOut (ineffective - actualAmount = assets after success)
+        // NEW: Check total balance after withdrawCalls to ensure MEV/slippage hasn't reduced it below minimum
+        //
+        // Only enforce when:
+        // 1. Not force deallocate (force ignores calls anyway)
+        // 2. minAmountOut > 0 (slippage protection requested)
+        //
+        // NOTE: minAmountOut represents minimum acceptable TOTAL balance, not balance increase
+        // This allows users to set slippage tolerance (e.g., request 1000 with minAmountOut 990 = 1% tolerance)
+        if (
+            caller != FORCE_DEALLOCATE_SELECTOR &&
+            minAmountOut > 0
+        ) {
+            // Edge case: if minAmountOut > requested assets, fail immediately
+            // We never return more than requested assets, even if balance is higher
+            if (minAmountOut > assets) {
+                revert SlippageTooHigh();
+            }
+
+            // If withdrawCalls were executed, check total balance meets minimum
+            if (withdrawCalls.length > 0) {
+                uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+
+                // Enforce total balance >= minAmountOut to protect against MEV/slippage
+                if (balanceAfter < minAmountOut) {
+                    revert SlippageTooHigh();
+                }
+            }
         }
 
         // Update allocation - handle case where actualAmount exceeds tracked allocation
@@ -348,12 +397,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             : 0;
 
         // Principal-only fallback (ignores donations sitting on the adapter)
-        uint256 minKnownValue = totalAllocations;
+        // uint256 minKnownValue = totalAllocations;
 
-        // Call getTotalValue which aggregates all strategy values + idle assets
-        // SECURITY FIX Issue #2 (FIXING_ISSUES.md): Cap gas to prevent DoS from unbounded enumeration
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Use single aggregated strategy ID
+        // instead of enumerating all strategies to prevent DoS from unbounded enumeration
+        // OLD: getTotalValue(address) → O(n) enumeration of activeStrategies → OOG with many strategies
+        // NEW: getValue(ESCROW_TOTAL_ID) → O(1) lookup → gas-bounded
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+
         (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
-            abi.encodeWithSignature("getTotalValue(address)", address(this))
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
         if (success && data.length >= 32) {
@@ -578,6 +631,31 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (minBalanceIncrease > 0) {
             uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
             require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
+
+            // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction on withdrawal
+            // When we successfully withdraw (balance increased), reduce externalDeposits accordingly
+            // This is SAFE here because:
+            // 1. We're in executeStrategyWithSlippage with minBalanceIncrease > 0 (explicit withdrawal)
+            // 2. We measured the balance increase and it passed slippage check
+            // 3. We know this is a withdrawal, not a donation or other balance increase
+            //
+            // This fixes underpricing caused by overstated externalDeposits after withdrawals
+            if (balanceAfter > balanceBefore) {
+                uint256 d = externalDeposits[strategyId];
+                uint256 x = balanceAfter - balanceBefore;
+
+                // Cap reduction to measured minimum increase (don't over-reduce if we got extra)
+                if (x > minBalanceIncrease) x = minBalanceIncrease;
+
+                // Cap reduction to current per-strategy external deposits (prevent underflow)
+                if (x > d) x = d;
+
+                // Apply symmetric reduction
+                if (x > 0) {
+                    externalDeposits[strategyId] = d - x;
+                    totalExternalDeposits -= x;
+                }
+            }
         }
 
         _updateCachedValuation();
@@ -1063,9 +1141,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             ? balance - allocatedInAdapter
             : 0;
 
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Use single aggregated strategy ID
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+
         // Try to get fresh valuation
         (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
-            abi.encodeWithSignature("getTotalValue(address)", address(this))
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
         if (success && data.length >= 32) {

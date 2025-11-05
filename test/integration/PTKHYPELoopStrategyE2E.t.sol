@@ -176,6 +176,12 @@ contract PTKHYPELoopStrategyE2ETest is Test {
             type(uint256).max
         );
 
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Set fallback value for ESCROW_TOTAL
+        // The adapter now uses getValue(ESCROW_TOTAL_ID) instead of getTotalValue(address)
+        // to prevent DoS from unbounded strategy enumeration. Set a reasonable fallback value.
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        valuer.setFallbackValue(escrowTotalId, INITIAL_DEPOSIT); // Use initial deposit as max possible
+
         vm.stopPrank();
     }
 
@@ -427,6 +433,12 @@ contract PTKHYPELoopStrategyE2ETest is Test {
         vm.prank(allocator);
         vault.allocate(address(adapter), allocData1, 300e18);
 
+        // Update fallback value after first allocation to reflect current state
+        // SECURITY FIX: Ensure valuer reflects current allocation total
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        vm.prank(owner);
+        valuer.setFallbackValue(escrowTotalId, 300e18);
+
         // Allocate to second strategy
         bytes memory allocData2 = abi.encode(
             secondStrategyId,
@@ -436,6 +448,10 @@ contract PTKHYPELoopStrategyE2ETest is Test {
         );
         vm.prank(allocator);
         vault.allocate(address(adapter), allocData2, 200e18);
+
+        // Update fallback value after second allocation
+        vm.prank(owner);
+        valuer.setFallbackValue(escrowTotalId, 500e18);
 
         // Verify allocations
         assertEq(adapter.getAllocation(PT_KHYPE_LOOP_ID), 300e18);

@@ -686,8 +686,9 @@ contract UniversalValuerOffchainComprehensive is Test {
     /* VIEW FUNCTION TESTS */
 
     function testGetValue() public {
-        // No value set - should revert with LowConfidence
-        vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): No value set - should revert with ValueTooStale
+        // Changed from LowConfidence because uninitialized reports (timestamp==0) now check fallback first
+        vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
         valuer.getValue(STRATEGY_A);
 
         // Set value
