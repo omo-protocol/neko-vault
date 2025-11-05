@@ -168,6 +168,15 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Support ESCROW_TOTAL fallback
+        // If no report exists (timestamp == 0), use fallback value immediately
+        if (report.timestamp == 0) {
+            if (fallbackValues[strategyId] > 0) {
+                return fallbackValues[strategyId];
+            }
+            revert ValueTooStale();
+        }
+
         // L-18 FIX: If strategy is configured, use config values directly; otherwise use constants as fallback
         uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
 
