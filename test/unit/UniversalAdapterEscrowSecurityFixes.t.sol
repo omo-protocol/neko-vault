@@ -244,20 +244,23 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
 
         // Now: externalDeposits[strategyId] = 80, totalExternalDeposits = 60 (desync!)
 
-        // Withdraw 30 from protocol - before fix, this could underflow totalExternalDeposits
+        // Withdraw 30 from protocol
         vm.prank(owner);
         adapter.executeStrategy(
             strategyId,
             _createWithdrawCall(30e18)
         );
 
-        // After fix: Should cap decrease to totalExternalDeposits (60), not underflow
+        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER reduce externalDeposits
+        // OLD: Would reduce totalExternalDeposits and per-strategy externalDeposits (vulnerable to double counting)
+        // NEW: Does NOT change externalDeposits on balance increase (prevents double counting & donation infiltration)
         uint256 totalExternalAfter = adapter.totalExternalDeposits();
-        assertEq(totalExternalAfter, 30e18, "Should cap to totalExternalDeposits, not underflow");
+        assertEq(totalExternalAfter, 60e18, "Total NOT reduced on balance increase (security fix #2)");
 
-        // Per-strategy should also be decreased by same amount
         uint256 perStrategyAfter = adapter.externalDeposits(strategyId);
-        assertEq(perStrategyAfter, 50e18, "Should decrease per-strategy by same amount");
+        assertEq(perStrategyAfter, 80e18, "Per-strategy NOT reduced on balance increase (security fix #2)");
+
+        // NOTE: Manual sync required via syncExternalDeposits() or deallocate() to update tracking
     }
 
     /**
@@ -292,20 +295,19 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
             _createWithdrawCall(50e18)
         );
 
-        // SECURITY FIX Issue #9: Two-phase decrease
-        // Phase 1: Decrease per-strategy by withdrawn amount (capped to per-strategy)
-        //   - decreaseAmount = min(50, 80) = 50
-        //   - externalDeposits[strategyId] = 80 - 50 = 30
-        // Phase 2: Decrease total by decreaseAmount (capped to total)
-        //   - totalExternalDeposits = 10 - min(50, 10) = 0
-        // Phase 3: Apply surplus (if any)
-        //   - surplus = 50 - 50 = 0 (no surplus since decreaseAmount wasn't further capped)
-
+        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER reduce externalDeposits
+        // This test previously validated the two-phase approach for reducing externalDeposits on withdrawals
+        // NEW BEHAVIOR: Balance increases (withdrawals) do NOT reduce externalDeposits at all
+        // This prevents double counting and donation infiltration attacks
+        //
+        // Result: Both values remain unchanged after withdrawal
         uint256 totalExternalAfter = adapter.totalExternalDeposits();
-        assertEq(totalExternalAfter, 0, "Total should be zero after capped decrease");
+        assertEq(totalExternalAfter, 10e18, "Total NOT reduced on balance increase (security fix #2)");
 
         uint256 perStrategyAfter = adapter.externalDeposits(strategyId);
-        assertEq(perStrategyAfter, 30e18, "Per-strategy should decrease by 50 (full withdrawal)");
+        assertEq(perStrategyAfter, 80e18, "Per-strategy NOT reduced on balance increase (security fix #2)");
+
+        // NOTE: Manual sync required via syncExternalDeposits() or deallocate() to correct desync
     }
 
     /**

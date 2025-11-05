@@ -172,22 +172,30 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     }
 
     /**
-     * @notice Test that zero value correctly triggers fallback
+     * @notice Test that zero value correctly triggers time-bounded cache fallback
+     * @dev TIME-BOUNDED FALLBACK FIX (FIXING.md): Uses cached value instead of principal
      */
     function testZeroValueTriggersFallback() public {
-        // Setup
+        // Set valuer to return correct value BEFORE allocation
+        maliciousValuer.setReturnValue(1000e18);
+
+        // Setup - allocate funds which creates initial cached valuation
         bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
+        // After allocation, cache is populated with 1000e18
 
-        // Valuer returns 0 (should trigger fallback)
+        // Verify cache was populated correctly
+        uint256 initialAssets = adapter.realAssets();
+        assertEq(initialAssets, 1000e18, "Initial valuation should be 1000e18");
+
+        // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
+        // Should use cached valuation (1000e18) instead of reverting
+        // This is the time-bounded fallback in action
         uint256 reportedAssets = adapter.realAssets();
-
-        // Fallback should return totalAllocations (principal)
-        uint256 expectedFallback = adapter.totalAllocations();
-        assertEq(reportedAssets, expectedFallback, "Zero value should trigger fallback to principal");
+        assertEq(reportedAssets, 1000e18, "Should use cached valuation when valuer returns 0");
     }
 
     /**
@@ -238,22 +246,35 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      * @dev SECURITY FIX: Updated for new security model (no tolerance threshold)
      */
     function testFuzzValuerAlwaysTrusted(uint256 realValue, uint256 valuerReturn) public {
-        // Bound inputs
+        // Skip edge case where realValue is 0 (cold start - no allocations)
+        if (realValue == 0) return;
+
+        // Bound inputs - ensure realValue > 0 to avoid cold start edge case
         realValue = bound(realValue, 1000e18, 10000e18);
+
         valuerReturn = bound(valuerReturn, 1, realValue * 2); // Can be under or over
+
+        // Set valuer to return correct value BEFORE allocation so cache is populated correctly
+        maliciousValuer.setReturnValue(realValue);
 
         // Setup
         asset.mint(address(adapter), realValue);
         bytes memory allocateData = abi.encode(strategyId, realValue, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
+        // Cache is now populated with realValue (donation-adjusted)
 
         // Calculate excessIdle (donations) that will be excluded
         uint256 balance = asset.balanceOf(address(adapter));
         uint256 allocatedInAdapter = adapter.totalAllocations() - adapter.totalExternalDeposits();
         uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
+        uint256 initialCachedValue = realValue > excessIdle ? realValue - excessIdle : 0;
 
-        // Valuer returns some amount
+        // Ensure we actually allocated something and cache is not 0
+        vm.assume(adapter.totalAllocations() > 0);
+        vm.assume(initialCachedValue > 0); // Skip edge case where all value is donations
+
+        // Now set the fuzzed valuer return value
         maliciousValuer.setReturnValue(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
@@ -261,14 +282,14 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Adjust valuerReturn for excessIdle to get valuerValueAdj
         uint256 valuerValueAdj = valuerReturn > excessIdle ? valuerReturn - excessIdle : 0;
 
-        // AFTER HIGH SEVERITY FIX: Always accept valuer's adjusted value if > 0
+        // TIME-BOUNDED FALLBACK FIX: Always accept valuer's adjusted value if > 0
         if (valuerValueAdj > 0) {
             // Accept valuer's adjusted value (even if far below principal)
             assertEq(reportedAssets, valuerValueAdj, "Should always use valuer's adjusted value when > 0");
         } else {
-            // Only use fallback if valuer returns 0 (after adjustment)
-            uint256 expectedFallback = adapter.totalAllocations();
-            assertEq(reportedAssets, expectedFallback, "Should use principal fallback only when adjusted value = 0");
+            // When adjusted value = 0, use time-bounded cached fallback
+            // Cache was populated during allocation with initialCachedValue
+            assertEq(reportedAssets, initialCachedValue, "Should use cached fallback when adjusted value = 0");
         }
     }
 }

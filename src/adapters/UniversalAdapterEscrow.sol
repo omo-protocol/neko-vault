@@ -28,6 +28,14 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Prevents unbounded activeStrategies enumeration from causing DoS of deposits/withdrawals
     uint256 private constant VALUER_GAS_STIPEND = 200000;
 
+    // HYBRID SECURITY MODEL (FIXING.md): Time-bounded fallback to cached valuation
+    // Maximum age of cached valuation before rejecting fallback
+    // CONFIGURABLE: Adjust based on your strategy volatility and operational needs
+    //   - 1 hour: Very secure, tight cache (high volatility strategies)
+    //   - 4 hours: Balanced security/availability (recommended for most cases)
+    //   - 12 hours: High availability (stable strategies only)
+    uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
+
     /* IMMUTABLES */
 
     address public immutable parentVault;
@@ -50,6 +58,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     mapping(bytes32 => uint256) public externalDeposits;
     uint256 public totalExternalDeposits;
 
+    // Cached valuation for time-bounded fallback
+    uint256 private cachedValuation;
+    uint256 private cachedValuationTimestamp;
+
     // Whitelist management
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
 
@@ -58,6 +70,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     // Access control
     address public owner;
+
+    // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early-exit target for deallocate multicall
+    // Transient variable used during deallocate to enable early exit when sufficient assets recovered
+    // Set to target withdrawal amount before multicall, reset to 0 after
+    uint256 private withdrawTarget;
 
     /* MODIFIERS */
 
@@ -143,6 +160,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _executeMulticall(strategyId, calls, false);
         }
 
+        // Update cached valuation for time-bounded fallback
+        _updateCachedValuation();
+
         // Return results
         ids = new bytes32[](1);
         ids[0] = strategyId;
@@ -176,6 +196,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Decode deallocation data with slippage protection parameter
         (bytes32 strategyId, uint256 minAmountOut, , Call[] memory withdrawCalls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
+
+        // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Cap withdraw calls to bound gas
+        // Prevents DoS from excessively long multicalls that can OOG
+        if (withdrawCalls.length > 64) revert InvalidData();
 
         // IMPORTANT: No allocation validation here - users should be able to withdraw
         // idle assets, profits, or do emergency withdrawals even from strategies with 0 allocation
@@ -219,6 +243,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // If protocol withdrawal fails (no liquidity, paused, etc.), we can still
                 // return whatever balance we have instead of reverting entire deallocate
                 if (withdrawCalls.length > 0) {
+                    // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Set early-exit target
+                    // Enables _executeMulticall to break early when sufficient assets recovered
+                    withdrawTarget = assets;
+
                     try this.externalExecuteMulticall(strategyId, withdrawCalls) {
                         // Success - balance increased from protocol withdrawal
                     } catch {
@@ -226,6 +254,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                         // Continue with current balance (partial fulfillment)
                         // Vault's transferFrom will naturally limit to available balance
                     }
+
+                    // SECURITY FIX Issue #1: Reset target regardless of success/failure
+                    withdrawTarget = 0;
                 }
 
                 uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
@@ -268,6 +299,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Transfer assets back to vault
         // The vault will pull the assets using transferFrom
+
+        // Update cached valuation for time-bounded fallback
+        _updateCachedValuation();
 
         // Return results
         ids = new bytes32[](1);
@@ -372,21 +406,68 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // - Better to under-report slightly than enable value extraction
 
             // Always trust the valuer's donation-adjusted value
-            // Only reject if valuer returns 0 (no data available)
             if (totalValueAdj > 0) {
                 return totalValueAdj;
             }
 
-            // Valuer returned 0 - fall back to principal
-            // This should only happen if valuer has no data for this adapter
-            return minKnownValue;
+            // Valuer returned 0 - check if this is legitimate (no allocations) or error
+            // If no allocations, 0 is the correct value (cold start or fully deallocated)
+            if (totalAllocations == 0) {
+                return 0;  // Legitimate 0 value when nothing allocated
+            }
+
+            // Valuer returned 0 but we have allocations - attempt time-bounded fallback
+            // If cached valuation is recent (< 4 hours), use it as fallback
+            // Otherwise revert to prevent stale pricing
+            if (cachedValuationTimestamp > 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
+                // Recent cache available - use it to maintain availability
+                return cachedValuation;
+            }
+
+            // No recent cache and valuer returned 0 despite allocations - must revert
+            revert ValuationUnavailable();
         }
 
-        // CRITICAL SECURITY FIX Issue #4: Proper fallback when valuer fails
-        // Use totalAllocations (principal) as fallback instead of balance + externalDeposits
-        // This prevents donation inflation even when valuer fails
-        // Misses yield but safer than allowing donation-based attacks
-        return minKnownValue;
+        // HYBRID SECURITY MODEL (FIXING.md): Time-bounded fallback to cached valuation
+        //
+        // VULNERABILITY: Falling back to principal enables gas-manipulation attacks:
+        //   - Force valuer failure with low gas during profits → underprice → mint excess shares
+        //   - Force valuer failure with low gas during losses → overprice → burn too few shares
+        //
+        // SOLUTION: Three-tier fallback strategy
+        //   1. Try fresh valuation with gas stipend
+        //   2. If fails but cached valuation < 4 hours old → use cache (time-bounded fallback)
+        //   3. If cache too stale or missing → revert (fail-closed)
+        //   EXCEPTION: If totalAllocations == 0, return 0 (cold start or fully deallocated)
+        //
+        // SECURITY PROPERTIES:
+        //   ✅ Gas manipulation attacks infeasible (attacker can't sustain low-gas for 4 hours)
+        //   ✅ Maintains availability during transient valuation failures
+        //   ✅ Prevents stale pricing with 4-hour cache expiry
+        //   ✅ Fails closed when cache unavailable or too old
+        //   ✅ Handles cold start gracefully when no allocations exist
+        //
+        // OPERATIONAL BENEFITS:
+        //   ✅ Vault remains operational during brief valuation outages
+        //   ✅ Users can still withdraw during short-term issues
+        //   ✅ Reduces single-point-of-failure risk
+        //   ✅ 4-hour window provides time to restore valuation service
+
+        // Cold start case: no allocations, valuer failed to respond
+        // This is safe to return 0 since there's nothing allocated
+        if (totalAllocations == 0) {
+            return 0;
+        }
+
+        // Valuer call failed but we have allocations - try cached fallback
+        if (cachedValuationTimestamp > 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
+            // Recent cached valuation available - use it to maintain availability
+            return cachedValuation;
+        }
+
+        // No recent cached valuation - must revert
+        // Operator must ensure valuation service health or reduce strategy count
+        revert ValuationUnavailable();
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
@@ -472,6 +553,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         _executeMulticall(strategyId, calls, false);
+        _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -498,6 +580,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
         }
 
+        _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -523,6 +606,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
         _executeMulticall(strategyId, calls, true);
+        _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -535,6 +619,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         Call[] memory calls = abi.decode(strategy.preConfiguredData, (Call[]));
 
         _executeMulticall(strategyId, calls, false);
+        _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -819,6 +904,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (!success) {
                 revert CallFailed(i, returnData);
             }
+
+            // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early exit optimization
+            // If withdrawTarget is set (deallocate flow) and we've recovered enough assets, break early
+            // This prevents DoS from executing expensive remaining calls when already sufficient
+            if (
+                withdrawTarget != 0 &&
+                IERC20(asset).balanceOf(address(this)) >= withdrawTarget
+            ) {
+                break;
+            }
         }
 
         // CIRCUIT BREAKER: Check for excessive balance loss BEFORE balance delta tracking
@@ -869,42 +964,28 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 deposited = balanceBefore - balanceAfter;
             externalDeposits[strategyId] += deposited;
             totalExternalDeposits += deposited;
-        } else if (balanceAfter > balanceBefore) {
-            // Net balance increased - likely withdrawal from external protocol
-            // NOTE: Could also be profit/yield, causing externalDeposits undercount
-            uint256 withdrawn = balanceAfter - balanceBefore;
-
-            // SECURITY FIX Issue #9: Prevent desynchronization between per-strategy and aggregate
-            // This implements the auditor-recommended two-phase approach:
-            // 1. First reduce by per-strategy-capped amount
-            // 2. Then apply surplus to aggregate only
-
-            // Cap per-strategy decrease to prevent underflow
-            uint256 decreaseAmount = withdrawn;
-            if (decreaseAmount > externalDeposits[strategyId]) {
-                decreaseAmount = externalDeposits[strategyId];
-            }
-
-            externalDeposits[strategyId] -= decreaseAmount;
-
-            // First reduce aggregate by the per-strategy-capped amount
-            if (decreaseAmount > totalExternalDeposits) {
-                totalExternalDeposits = 0;
-            } else {
-                totalExternalDeposits -= decreaseAmount;
-            }
-
-            // Then apply any surplus withdrawal to aggregate only (up to remaining totalExternalDeposits)
-            uint256 surplus = withdrawn > decreaseAmount ? withdrawn - decreaseAmount : 0;
-            if (surplus > 0) {
-                if (surplus > totalExternalDeposits) {
-                    surplus = totalExternalDeposits;
-                }
-                totalExternalDeposits -= surplus;
-            }
         }
-        // If balanceAfter == balanceBefore, no accounting update
+        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Do NOT adjust on balance increases
+        // Previous code treated balance increases as withdrawals and reduced totalExternalDeposits
+        // This enabled two attack vectors:
+        //   1. Double counting: Stale valuer includes strategy value + increased balance counted twice
+        //   2. Donation infiltration: Balance increase from swapping donated tokens bypasses donation filter
+        // FIX: Only track balance DECREASES (deposits to protocol), ignore balance INCREASES
+        // Defer aggregate reduction to admin/keeper sync via syncExternalDeposits() or deallocate()
+        //
+        // If balanceAfter > balanceBefore: Do nothing (no accounting update)
+        // If balanceAfter == balanceBefore: No accounting update
         // NOTE: This misses cases where deposit+withdrawal happened in same multicall
+
+        // SECURITY FIX Issue #3 (security_issues_5nov2025.md): Maintain activeStrategies invariant
+        // Remove strategy when BOTH allocations and externalDeposits are zero
+        // This prevents stale entries that cause:
+        //   - Valuer mispricing (includes stale strategy values)
+        //   - Increased gas costs for enumeration
+        //   - Potential DoS if many stale entries accumulate
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
     }
 
 
@@ -936,6 +1017,49 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
     }
 
+    /// @notice Update cached valuation from fresh valuer call
+    /// @dev Called by state-modifying functions to refresh cache for time-bounded fallback
+    function _updateCachedValuation() internal {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+
+        // Donation-resistant calculation (same as realAssets)
+        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
+            ? totalAllocations - totalExternalDeposits
+            : 0;
+
+        uint256 excessIdle = balance > allocatedInAdapter
+            ? balance - allocatedInAdapter
+            : 0;
+
+        // Try to get fresh valuation
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getTotalValue(address)", address(this))
+        );
+
+        if (success && data.length >= 32) {
+            uint256 totalValue = abi.decode(data, (uint256));
+            uint256 totalValueAdj = totalValue > excessIdle
+                ? totalValue - excessIdle
+                : 0;
+
+            if (totalValueAdj > 0) {
+                // Update cache with fresh valuation
+                cachedValuation = totalValueAdj;
+                cachedValuationTimestamp = block.timestamp;
+            }
+        }
+        // If valuer call fails, keep existing cache (don't update)
+    }
+
+    /// @inheritdoc IUniversalAdapterEscrow
+    function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale) {
+        value = cachedValuation;
+        timestamp = cachedValuationTimestamp;
+
+        // Cache is stale if more than MAX_CACHED_VALUATION_AGE old
+        isStale = cachedValuationTimestamp == 0 ||
+                  block.timestamp - cachedValuationTimestamp > MAX_CACHED_VALUATION_AGE;
+    }
 
     /// @notice Receive ETH
     /// @dev COMMENTED OUT FOR NOW AS WE DON'T ACCEPT ETH
