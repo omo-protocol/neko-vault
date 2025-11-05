@@ -293,6 +293,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     // Cap reduction to current per-strategy external deposits (prevent underflow)
                     if (x > d) x = d;
 
+                    // Cap reduction to totalExternalDeposits (prevent underflow from desync)
+                    if (x > totalExternalDeposits) x = totalExternalDeposits;
+
                     // Apply symmetric reduction
                     if (x > 0) {
                         externalDeposits[strategyId] = d - x;
@@ -412,6 +415,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
 
+            // NOTE (security_issues_5nov2025_4.md Issue #2): Semantic mismatch handling deferred
+            // The conditional logic to detect if valuer excludes idle is too aggressive and triggers
+            // false positives during legitimate losses. This requires operator-level configuration
+            // (valuer semantic agreement) rather than runtime detection.
+            //
+            // Current approach: Assume valuer includes idle balance (standard behavior)
             // Adjust totalValue to exclude donation excess
             uint256 totalValueAdj = totalValue > excessIdle
                 ? totalValue - excessIdle
@@ -605,7 +614,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bytes32 strategyId,
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): Prevent balance increases
+        // Balance increases (withdrawals) must use executeStrategyWithSlippage() or deallocate()
+        // to ensure proper externalDeposits accounting via symmetric reduction
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
         _executeMulticall(strategyId, calls, false);
+
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        if (balanceAfter > balanceBefore) revert InvalidAmount();
+
         _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
@@ -650,6 +668,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // Cap reduction to current per-strategy external deposits (prevent underflow)
                 if (x > d) x = d;
 
+                // Cap reduction to totalExternalDeposits (prevent underflow from desync)
+                if (x > totalExternalDeposits) x = totalExternalDeposits;
+
                 // Apply symmetric reduction
                 if (x > 0) {
                     externalDeposits[strategyId] = d - x;
@@ -683,7 +704,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bytes32 strategyId,
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): Prevent balance increases
+        // Balance increases (withdrawals) must use executeStrategyWithSlippage() or deallocate()
+        // to ensure proper externalDeposits accounting via symmetric reduction
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
         _executeMulticall(strategyId, calls, true);
+
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        if (balanceAfter > balanceBefore) revert InvalidAmount();
+
         _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
@@ -696,7 +726,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Decode pre-configured calls
         Call[] memory calls = abi.decode(strategy.preConfiguredData, (Call[]));
 
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): Prevent balance increases
+        // Balance increases (withdrawals) must use executeStrategyWithSlippage() or deallocate()
+        // to ensure proper externalDeposits accounting via symmetric reduction
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
         _executeMulticall(strategyId, calls, false);
+
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        if (balanceAfter > balanceBefore) revert InvalidAmount();
+
         _updateCachedValuation();
         emit StrategyExecuted(strategyId, msg.sender);
     }
@@ -816,6 +855,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         totalExternalDeposits = newTotalExternalDeposits;
 
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #3): Invalidate stale cache and refresh
+        // syncExternalDeposits changes donation filter parameters, so cached valuation becomes stale
+        cachedValuationTimestamp = 0;
+        _updateCachedValuation();
+
         emit ExternalDepositsSynced(msg.sender, oldValue, newTotalExternalDeposits);
     }
 
@@ -845,6 +889,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (allocations[strategyId] == 0 && newPerStrategy == 0) {
             _removeFromActiveStrategies(strategyId);
         }
+
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #3): Invalidate stale cache and refresh
+        // reduceExternalDeposits changes donation filter parameters, so cached valuation becomes stale
+        cachedValuationTimestamp = 0;
+        _updateCachedValuation();
 
         emit ExternalDepositsReduced(strategyId, current, newPerStrategy, delta);
     }
@@ -1012,7 +1061,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // Execute the call
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
             if (!success) {
-                revert CallFailed(i, returnData);
+                // Best-effort during deallocate: when withdrawTarget is set, skip failed subcalls
+                // to allow subsequent calls to recover sufficient assets. For other flows,
+                // preserve strict revert-on-failure semantics.
+                if (withdrawTarget == 0) revert CallFailed(i, returnData);
             }
 
             // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early exit optimization

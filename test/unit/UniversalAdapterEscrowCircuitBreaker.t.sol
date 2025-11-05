@@ -220,8 +220,10 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
             value: 0
         });
 
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): executeStrategy() now prevents balance increases
+        // Use executeStrategyWithSlippage() for withdrawals to enable symmetric reduction
         vm.prank(agent);
-        adapter.executeStrategy(strategyId, calls);
+        adapter.executeStrategyWithSlippage(strategyId, calls, 90e18);
 
         uint256 balanceAfter = asset.balanceOf(address(adapter));
         assertEq(balanceAfter, 1000e18, "Should have all tokens back after withdrawal");
@@ -346,7 +348,8 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
 
         // Balance went from 910 to 820 (9.9% decrease - under threshold)
 
-        // Now withdraw everything back (balance increases - always allowed)
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): Withdrawals must use executeStrategyWithSlippage
+        // executeStrategy() now prevents balance increases to force proper externalDeposits accounting
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 180e18),
@@ -354,7 +357,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         });
 
         vm.prank(agent);
-        adapter.executeStrategy(strategyId, calls);
+        adapter.executeStrategyWithSlippage(strategyId, calls, 180e18);
 
         uint256 balanceAfter = asset.balanceOf(address(adapter));
         assertEq(balanceAfter, 1000e18, "Should have all 1000 tokens back");
