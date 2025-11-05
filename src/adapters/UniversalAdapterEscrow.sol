@@ -811,8 +811,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balance = IERC20(asset).balanceOf(address(this));
         uint256 newMinKnown = balance + newTotalExternalDeposits;
 
-        (bool success, bytes memory data) = valuer.staticcall(
-            abi.encodeWithSignature("getTotalValue(address)", address(this))
+        // SECURITY FIX (security_issues_5nov2025_5.md): Use aggregated ESCROW_TOTAL valuation
+        // OLD: getTotalValue(address) → O(N) strategy enumeration → gas-unsafe for high N
+        // NEW: getValue(ESCROW_TOTAL_ID) → O(1) lookup → gas-bounded
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
         if (success && data.length >= 32) {
@@ -835,6 +840,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 ratio = (newTotalExternalDeposits * 1e18) / oldValue;
 
             // Apply ratio to all active strategies' externalDeposits
+            // TODO (security_issues_5nov2025_5.md): For large N, replace this O(N) sweep
+            // with a paginated sync to avoid gas limits
             bytes32[] memory activeStrategyIds = activeStrategies.values();
             for (uint256 i = 0; i < activeStrategyIds.length; i++) {
                 bytes32 strategyId = activeStrategyIds[i];
