@@ -244,23 +244,22 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
 
         // Now: externalDeposits[strategyId] = 80, totalExternalDeposits = 60 (desync!)
 
-        // Withdraw 30 from protocol
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): executeStrategy() now prevents withdrawals
+        // Withdrawals must use executeStrategyWithSlippage() for proper externalDeposits accounting
         vm.prank(owner);
-        adapter.executeStrategy(
+        adapter.executeStrategyWithSlippage(
             strategyId,
-            _createWithdrawCall(30e18)
+            _createWithdrawCall(30e18),
+            30e18  // Expect at least 30e18 balance increase
         );
 
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER reduce externalDeposits
-        // OLD: Would reduce totalExternalDeposits and per-strategy externalDeposits (vulnerable to double counting)
-        // NEW: Does NOT change externalDeposits on balance increase (prevents double counting & donation infiltration)
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
+        // Balance increases (withdrawals) now DO reduce externalDeposits in controlled contexts
         uint256 totalExternalAfter = adapter.totalExternalDeposits();
-        assertEq(totalExternalAfter, 60e18, "Total NOT reduced on balance increase (security fix #2)");
+        assertEq(totalExternalAfter, 30e18, "Total reduced on withdrawal via executeStrategyWithSlippage");
 
         uint256 perStrategyAfter = adapter.externalDeposits(strategyId);
-        assertEq(perStrategyAfter, 80e18, "Per-strategy NOT reduced on balance increase (security fix #2)");
-
-        // NOTE: Manual sync required via syncExternalDeposits() or deallocate() to update tracking
+        assertEq(perStrategyAfter, 50e18, "Per-strategy reduced on withdrawal (80 - 30 = 50)");
     }
 
     /**
@@ -288,26 +287,23 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
             bytes32(uint256(10e18)) // totalExternalDeposits = 10, but per-strategy = 80
         );
 
-        // Try to withdraw 50 (more than totalExternalDeposits)
+        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): executeStrategy() now prevents withdrawals
+        // Withdrawals must use executeStrategyWithSlippage() for proper externalDeposits accounting
         vm.prank(owner);
-        adapter.executeStrategy(
+        adapter.executeStrategyWithSlippage(
             strategyId,
-            _createWithdrawCall(50e18)
+            _createWithdrawCall(50e18),
+            50e18  // Expect at least 50e18 balance increase
         );
 
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER reduce externalDeposits
-        // This test previously validated the two-phase approach for reducing externalDeposits on withdrawals
-        // NEW BEHAVIOR: Balance increases (withdrawals) do NOT reduce externalDeposits at all
-        // This prevents double counting and donation infiltration attacks
-        //
-        // Result: Both values remain unchanged after withdrawal
+        // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
+        // Balance increases (withdrawals) DO reduce externalDeposits in controlled contexts
+        // With desync protection: x is capped to min(d=80, totalExternalDeposits=10) = 10
         uint256 totalExternalAfter = adapter.totalExternalDeposits();
-        assertEq(totalExternalAfter, 10e18, "Total NOT reduced on balance increase (security fix #2)");
+        assertEq(totalExternalAfter, 0, "Total reduced to 0 (10 - 10 = 0)");
 
         uint256 perStrategyAfter = adapter.externalDeposits(strategyId);
-        assertEq(perStrategyAfter, 80e18, "Per-strategy NOT reduced on balance increase (security fix #2)");
-
-        // NOTE: Manual sync required via syncExternalDeposits() or deallocate() to correct desync
+        assertEq(perStrategyAfter, 70e18, "Per-strategy reduced by capped amount (80 - 10 = 70)");
     }
 
     /**

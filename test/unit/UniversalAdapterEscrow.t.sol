@@ -1199,24 +1199,27 @@ contract UniversalAdapterEscrowTest is Test {
             data: abi.encodeWithSignature("withdraw(uint256)", 280e6),
             value: 0
         });
-        vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, withdrawCalls);
 
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER auto-reduce externalDeposits
-        // OLD BEHAVIOR: Balance increase → reduce externalDeposits (vulnerable to double counting)
-        // NEW BEHAVIOR: Balance increase → NO CHANGE to externalDeposits (prevents double counting)
-        //
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): executeStrategy() now prevents balance increases
+        // Use executeStrategyWithSlippage() for withdrawals to enable symmetric reduction
+        vm.prank(agent);
+        adapter.executeStrategyWithSlippage(STRATEGY_1, withdrawCalls, 280e6);
+
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): Symmetric reduction in controlled withdrawal paths
+        // executeStrategyWithSlippage() reduces externalDeposits by the measured balance increase
         // After withdrawal with profit:
-        // - externalDeposits remains at 80e6 (NOT auto-reduced on balance increase)
+        // - Balance increase: 280e6 (80 principal + 200 profit)
+        // - externalDeposits reduced from 80e6 by min(280e6, 80e6, totalExternalDeposits) = 80e6
+        // - externalDeposits: 80e6 - 80e6 = 0e6
         // - adapter balance: 920e6 (kept) + 280e6 (withdrawn) = 1200e6
         // - totalAllocations: 1000e6
-        // - externalDeposits must be synced manually via syncExternalDeposits() or deallocate()
-        assertEq(adapter.externalDeposits(STRATEGY_1), 80e6, "External deposits NOT auto-reduced (security fix #2)");
-        assertEq(adapter.totalExternalDeposits(), 80e6, "Total external deposits NOT auto-reduced");
+        assertEq(adapter.externalDeposits(STRATEGY_1), 0, "External deposits reduced by symmetric reduction (80e6)");
+        assertEq(adapter.totalExternalDeposits(), 0, "Total external deposits reduced to 0");
         assertEq(asset.balanceOf(address(adapter)), 1200e6, "Adapter has principal + profit");
 
-        // NOTE: getIdleAssets() will undercount because externalDeposits not synced yet
-        // This is the trade-off: Accurate valuation requires manual sync, but prevents attacks
+        // getIdleAssets() should correctly report 200e6 profit as idle
+        // Idle = balance - (totalAllocations - totalExternalDeposits) = 1200 - (1000 - 0) = 200
+        assertEq(adapter.getIdleAssets(), 200e6, "200e6 profit correctly identified as idle");
     }
 
     function testExternalDepositTrackingMultipleStrategies() public {
@@ -1358,18 +1361,25 @@ contract UniversalAdapterEscrowTest is Test {
             data: abi.encodeWithSignature("withdraw(uint256)", 30e6),
             value: 0
         });
-        vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, withdrawCalls);
 
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER auto-reduce externalDeposits
-        // OLD: Partial withdrawal (30e6) would reduce externalDeposits from 90e6 to 60e6
-        // NEW: Partial withdrawal (30e6) does NOT change externalDeposits (remains at 90e6)
-        assertEq(adapter.externalDeposits(STRATEGY_1), 90e6, "90e6 still external (NOT auto-reduced on balance increase)");
-        assertEq(adapter.totalExternalDeposits(), 90e6, "Total external deposits = 90e6");
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): executeStrategy() now prevents balance increases
+        // Use executeStrategyWithSlippage() for withdrawals to enable symmetric reduction
+        vm.prank(agent);
+        adapter.executeStrategyWithSlippage(STRATEGY_1, withdrawCalls, 30e6);
+
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): Symmetric reduction in controlled withdrawal paths
+        // executeStrategyWithSlippage() reduces externalDeposits by the measured balance increase
+        // After partial withdrawal:
+        // - Balance increase: 30e6
+        // - externalDeposits reduced from 90e6 by min(30e6, 90e6, totalExternalDeposits) = 30e6
+        // - externalDeposits: 90e6 - 30e6 = 60e6
+        assertEq(adapter.externalDeposits(STRATEGY_1), 60e6, "External deposits reduced by symmetric reduction (30e6)");
+        assertEq(adapter.totalExternalDeposits(), 60e6, "Total external deposits = 60e6");
         assertEq(asset.balanceOf(address(adapter)), 940e6, "940e6 in adapter");
 
-        // NOTE: getIdleAssets() will not accurately reflect withdrawn amount until manual sync
-        // This trade-off prevents double counting attacks
+        // getIdleAssets() should correctly report 0 (all assets still allocated)
+        // Idle = balance - (totalAllocations - totalExternalDeposits) = 940 - (1000 - 60) = 0
+        assertEq(adapter.getIdleAssets(), 0, "No idle assets - all still allocated");
     }
 
     function testExternalDepositTrackingComplexScenario() public {
@@ -1429,23 +1439,29 @@ contract UniversalAdapterEscrowTest is Test {
             data: abi.encodeWithSignature("withdraw(uint256)", 30e6),
             value: 0
         });
+
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): executeStrategy() now prevents balance increases
+        // Use executeStrategyWithSlippage() for withdrawals to enable symmetric reduction
         vm.prank(agent);
-        adapter.executeStrategy(STRATEGY_1, withdrawCalls);
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Balance increases NO LONGER auto-reduce externalDeposits
-        // OLD: Would reduce from 70e6 to 40e6 after 30e6 withdrawal
-        // NEW: Remains at 70e6 (NOT auto-reduced on balance increase)
-        assertEq(adapter.externalDeposits(STRATEGY_1), 70e6, "Step 5: 70e6 still external (NOT auto-reduced)");
+        adapter.executeStrategyWithSlippage(STRATEGY_1, withdrawCalls, 30e6);
+
+        // SECURITY FIX Issue #1 (security_issues_5nov2025_4.md): Symmetric reduction in controlled withdrawal paths
+        // executeStrategyWithSlippage() reduces externalDeposits by the measured balance increase
+        // After withdrawal:
+        // - Balance increase: 30e6
+        // - externalDeposits reduced from 70e6 by min(30e6, 70e6, totalExternalDeposits) = 30e6
+        // - externalDeposits: 70e6 - 30e6 = 40e6
+        assertEq(adapter.externalDeposits(STRATEGY_1), 40e6, "Step 5: 40e6 external (reduced by symmetric reduction)");
         assertEq(asset.balanceOf(address(adapter)), 1460e6, "Step 5: 1460e6 in adapter");
-        // NOTE: getIdleAssets() will not accurately reflect withdrawn amount until manual sync
 
         // Step 6: Deallocate 500e6
         bytes memory deallocData = abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.deallocate(deallocData, 500e6, bytes4(0), address(0));
         assertEq(adapter.totalAllocations(), 700e6, "Step 6: 700e6 allocated");
-        // NOTE: Idle calculation affected by externalDeposits not being auto-synced
-        // With new security fix: externalDeposits = 70e6 (not auto-reduced)
-        // Idle = 1460 - (700 - 70) = 1460 - 630 = 830
+        // With symmetric reduction: externalDeposits = 40e6
+        // Idle = 1460 - (700 - 40) = 1460 - 660 = 800
+        assertEq(adapter.getIdleAssets(), 800e6, "Step 6: 800e6 idle");
     }
 
     function testDeallocateSmartBalanceFirst() public {
