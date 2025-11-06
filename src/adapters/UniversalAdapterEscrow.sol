@@ -206,6 +206,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
+        bool withdrawalsExecuted = false; // Track if we actually executed withdrawals
 
         // SECURITY FIX Issue #3: For forceDeallocate, ignore calls but use same data format
         if (caller == FORCE_DEALLOCATE_SELECTOR) {
@@ -243,6 +244,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // If protocol withdrawal fails (no liquidity, paused, etc.), we can still
                 // return whatever balance we have instead of reverting entire deallocate
                 if (withdrawCalls.length > 0) {
+                    withdrawalsExecuted = true; // Mark that we executed withdrawals
+
                     // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Set early-exit target
                     // Enables _executeMulticall to break early when sufficient assets recovered
                     withdrawTarget = assets;
@@ -336,6 +339,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
+        // SECURITY FIX (security_issues_5nov2025_6.md Issue #1): Forward surplus to vault
+        // If withdrawals returned more than requested assets, forward the surplus immediately.
+        // This prevents externalDeposits from staying overstated and underpricing totalAssets.
+        // Done after slippage checks so availability checks use the full balance.
+        // Only forward if we actually executed withdrawals (not in Scenario 1 where balance covers all).
+        if (caller != FORCE_DEALLOCATE_SELECTOR && withdrawalsExecuted) {
+            uint256 _bal = IERC20(asset).balanceOf(address(this));
+            if (_bal > assets) {
+                SafeERC20Lib.safeTransfer(asset, parentVault, _bal - assets);
+            }
+        }
+
         // Update allocation - handle case where actualAmount exceeds tracked allocation
         uint256 allocationDecrease = actualAmount > allocations[strategyId]
             ? allocations[strategyId]
@@ -415,16 +430,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
 
-            // NOTE (security_issues_5nov2025_4.md Issue #2): Semantic mismatch handling deferred
-            // The conditional logic to detect if valuer excludes idle is too aggressive and triggers
-            // false positives during legitimate losses. This requires operator-level configuration
-            // (valuer semantic agreement) rather than runtime detection.
+            // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
+            // Handles both valuer semantic interpretations without requiring runtime detection:
+            // - If valuer includes idle (totalValue >= excessIdle): subtract donation-only excess
+            // - If valuer excludes idle (totalValue < excessIdle): add allocatedInAdapter back
             //
-            // Current approach: Assume valuer includes idle balance (standard behavior)
-            // Adjust totalValue to exclude donation excess
-            uint256 totalValueAdj = totalValue > excessIdle
-                ? totalValue - excessIdle
-                : 0;
+            // This prevents DoS from donations that would otherwise zero the adjusted value and
+            // cause reverts after cache expiry when totalAllocations > 0.
+            //
+            // WHY THIS WORKS:
+            // - Normal case (no donation): totalValue includes idle, excessIdle is small, subtract it
+            // - Donation attack: totalValue < excessIdle, add allocatedInAdapter to recover legitimate value
+            // - Cold start/valuer outage: handled by cache fallback logic below
+            uint256 totalValueAdj;
+            if (totalValue >= excessIdle) {
+                totalValueAdj = totalValue - excessIdle;
+            } else {
+                totalValueAdj = totalValue + allocatedInAdapter;
+            }
 
             // CRITICAL SECURITY FIX - HIGH SEVERITY ISSUE:
             // Always trust the valuer's donation-adjusted value, no fallback threshold
@@ -677,6 +700,17 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     totalExternalDeposits -= x;
                 }
             }
+
+            // SECURITY FIX (security_issues_5nov2025_6.md Issue #1): Forward surplus to vault
+            // If withdrawal returned more than minBalanceIncrease, forward the surplus immediately.
+            // This prevents externalDeposits from staying overstated and underpricing totalAssets.
+            if (balanceAfter > balanceBefore + minBalanceIncrease) {
+                SafeERC20Lib.safeTransfer(
+                    asset,
+                    parentVault,
+                    balanceAfter - (balanceBefore + minBalanceIncrease)
+                );
+            }
         }
 
         _updateCachedValuation();
@@ -811,8 +845,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balance = IERC20(asset).balanceOf(address(this));
         uint256 newMinKnown = balance + newTotalExternalDeposits;
 
-        (bool success, bytes memory data) = valuer.staticcall(
-            abi.encodeWithSignature("getTotalValue(address)", address(this))
+        // SECURITY FIX (security_issues_5nov2025_5.md): Use aggregated ESCROW_TOTAL valuation
+        // OLD: getTotalValue(address) → O(N) strategy enumeration → gas-unsafe for high N
+        // NEW: getValue(ESCROW_TOTAL_ID) → O(1) lookup → gas-bounded
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
         if (success && data.length >= 32) {
@@ -835,6 +874,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 ratio = (newTotalExternalDeposits * 1e18) / oldValue;
 
             // Apply ratio to all active strategies' externalDeposits
+            // TODO (security_issues_5nov2025_5.md): For large N, replace this O(N) sweep
+            // with a paginated sync to avoid gas limits
             bytes32[] memory activeStrategyIds = activeStrategies.values();
             for (uint256 i = 0; i < activeStrategyIds.length; i++) {
                 bytes32 strategyId = activeStrategyIds[i];
@@ -1203,9 +1244,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
-            uint256 totalValueAdj = totalValue > excessIdle
-                ? totalValue - excessIdle
-                : 0;
+
+            // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
+            // Same logic as realAssets() to handle both valuer semantic interpretations
+            uint256 totalValueAdj;
+            if (totalValue >= excessIdle) {
+                totalValueAdj = totalValue - excessIdle;
+            } else {
+                totalValueAdj = totalValue + allocatedInAdapter;
+            }
 
             if (totalValueAdj > 0) {
                 // Update cache with fresh valuation
