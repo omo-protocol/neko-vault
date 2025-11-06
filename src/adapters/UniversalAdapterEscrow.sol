@@ -308,34 +308,42 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // SECURITY FIX (security_issues_5nov2025_3.md Issue #2): Improved slippage protection
-        // OLD: Checked actualAmount < minAmountOut (ineffective - actualAmount = assets after success)
-        // NEW: Check total balance after withdrawCalls to ensure MEV/slippage hasn't reduced it below minimum
+        // SECURITY FIX (security_issues_5nov2025_7.md Issue #1): Effective slippage protection
+        // Enforce minimum balance INCREASE achieved by withdrawCalls (deltaIncrease) to protect against MEV/slippage
+        //
+        // VULNERABILITY (OLD APPROACH):
+        // - Checked total balance >= minAmountOut (ineffective)
+        // - Constrained by minAmountOut <= assets (made it redundant)
+        // - Didn't measure actual delta from withdrawCalls
+        // - Allowed MEV bots to sandwich DEX swaps while transaction still succeeds
+        // - Loss absorbed by remaining depositors as reduced pool value
+        //
+        // NEW APPROACH:
+        // - Measure actual delta increase from withdrawCalls execution
+        // - Compare delta to minAmountOut (slippage tolerance)
+        // - Only enforce when withdrawals were actually executed
+        // - Protects against silent principal loss from poor execution prices
         //
         // Only enforce when:
         // 1. Not force deallocate (force ignores calls anyway)
         // 2. minAmountOut > 0 (slippage protection requested)
+        // 3. We actually executed withdrawCalls (withdrawalsExecuted == true)
         //
-        // NOTE: minAmountOut represents minimum acceptable TOTAL balance, not balance increase
-        // This allows users to set slippage tolerance (e.g., request 1000 with minAmountOut 990 = 1% tolerance)
         if (
             caller != FORCE_DEALLOCATE_SELECTOR &&
-            minAmountOut > 0
+            minAmountOut > 0 &&
+            withdrawalsExecuted
         ) {
-            // Edge case: if minAmountOut > requested assets, fail immediately
-            // We never return more than requested assets, even if balance is higher
-            if (minAmountOut > assets) {
+            // Measure delta increase from before withdrawCalls (adapterBalance) to current balance
+            uint256 balanceAfterCheck = IERC20(asset).balanceOf(address(this));
+            uint256 deltaIncrease = balanceAfterCheck > adapterBalance
+                ? balanceAfterCheck - adapterBalance
+                : 0;
+
+            // Enforce minimum delta increase to protect against MEV/slippage
+            // This ensures the withdrawCalls achieved acceptable execution price
+            if (deltaIncrease < minAmountOut) {
                 revert SlippageTooHigh();
-            }
-
-            // If withdrawCalls were executed, check total balance meets minimum
-            if (withdrawCalls.length > 0) {
-                uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-
-                // Enforce total balance >= minAmountOut to protect against MEV/slippage
-                if (balanceAfter < minAmountOut) {
-                    revert SlippageTooHigh();
-                }
             }
         }
 
