@@ -94,7 +94,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
 
     /**
      * @notice Test deallocate with slippage check that passes
-     * @dev UPDATED: With Issue #2 fix, DEX must return enough to meet full request
+     * @dev UPDATED: security_issues_5nov2025_7.md - minAmountOut now represents minimum delta increase
      */
     function testDeallocateWithSlippageCheckPasses() public {
         // Setup
@@ -114,17 +114,16 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Must withdraw 40e18 from DEX, which returns exactly 40e18
         // Total return = 910 + 40 = 950e18 ✓
         uint256 requestedAmount = 950e18;
-        uint256 minAcceptable = 950e18; // Expect exact amount with Issue #2 fix
+        uint256 minDeltaIncrease = 40e18; // SECURITY FIX: minAmountOut now represents minimum delta increase from withdrawCalls
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
-        bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, minDeltaIncrease, false, withdrawCalls);
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
 
-        // SECURITY FIX Issue #2: Must return exact requested amount
+        // Should return exact requested amount
         uint256 returnedAmount = uint256(-change);
         assertEq(returnedAmount, 950e18, "Should return exact requested amount");
-        assertGe(returnedAmount, minAcceptable, "Should meet minimum");
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
     }
 
@@ -268,7 +267,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
     /* ============ EDGE CASES ============ */
 
     /**
-     * @notice Test exact amount returned - UPDATED for Issue #2 fix
+     * @notice Test exact amount returned - UPDATED for security_issues_5nov2025_7.md
      */
     function testExactMinimumAmount() public {
         asset.mint(address(adapter), 1000e18);
@@ -286,9 +285,9 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Adapter has 910e18, request 950e18 so it withdraws 40e18 from DEX
         // Total return = 910 + 40 = 950e18 (exact)
         uint256 requestedAmount = 950e18;
-        uint256 minAcceptable = 950e18; // Must be exact with Issue #2 fix
+        uint256 minDeltaIncrease = 40e18; // SECURITY FIX: minAmountOut now represents minimum delta increase from withdrawCalls
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
-        bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, minDeltaIncrease, false, withdrawCalls);
 
         vm.prank(address(vault));
         (, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
@@ -298,8 +297,8 @@ contract UniversalAdapterEscrowSlippageTest is Test {
     }
 
     /**
-     * @notice Test minAmountOut greater than requested amount
-     * @dev Edge case where caller sets minAmountOut > assets (expecting profit/yield)
+     * @notice Test minAmountOut enforces minimum delta increase from withdrawCalls
+     * @dev UPDATED for security_issues_5nov2025_7.md - tests delta-based slippage protection
      */
     function testMinAmountGreaterThanRequested() public {
         asset.mint(address(adapter), 1000e18);
@@ -311,21 +310,26 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         vm.prank(owner);
         adapter.executeStrategy(strategyId, _createDepositCall(90e18));
 
-        // Request 500, but set minAmountOut = 600 (expecting yield)
-        // Note: actualAmount is capped to requested assets (500), so this will always fail
-        uint256 requestedAmount = 500e18;
-        uint256 minAcceptable = 600e18;
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(requestedAmount, minAcceptable);
-        bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
+        // Set 3% slippage on DEX
+        dex.setSlippagePercent(3);
 
-        // Should revert because actual (500 or less) < minAcceptable (600)
+        // Adapter has 910e18, request 930e18, so need to withdraw 20e18 from DEX
+        // With 3% slippage, DEX will return 19.4e18 (19400000000000000000)
+        // Total balance after = 910 + 19.4 = 929.4e18 < 930e18 would fail all-or-nothing
+        // So request 929e18 instead, which passes all-or-nothing but fails slippage
+        uint256 requestedAmount = 929e18;
+        uint256 minDeltaIncrease = 19.5e18; // Require less than 2.5% slippage, but we get 3%
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(20e18, 0);
+        bytes memory deallocateData = abi.encode(strategyId, minDeltaIncrease, false, withdrawCalls);
+
+        // Should revert because deltaIncrease (19.4e18) < minDeltaIncrease (19.5e18)
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.SlippageTooHigh.selector);
         adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
     }
 
     /**
-     * @notice Fuzz test: UPDATED for Issue #2 fix (all-or-nothing)
+     * @notice Fuzz test: UPDATED for security_issues_5nov2025_7.md (delta-based slippage)
      */
     function testFuzzSlippageProtection(uint256 amount, uint8 slippagePercent, uint8 tolerancePercent) public {
         amount = bound(amount, 100e18, 1000e18);
@@ -357,26 +361,30 @@ contract UniversalAdapterEscrowSlippageTest is Test {
             return;
         }
 
-        // Calculate expected return with slippage
+        // Calculate expected delta increase with slippage
         uint256 dexActualReturn = (dexWithdrawalNeeded * (100 - slippagePercent)) / 100;
         uint256 totalExpectedReturn = adapterBalance + dexActualReturn;
 
-        // Set minAcceptable based on tolerance
-        uint256 minAcceptable = (requestedAmount * (100 - tolerancePercent)) / 100;
+        // SECURITY FIX: minAmountOut now represents minimum delta increase (not total balance)
+        // Set minDeltaIncrease based on tolerance applied to dexWithdrawalNeeded
+        uint256 minDeltaIncrease = (dexWithdrawalNeeded * (100 - tolerancePercent)) / 100;
 
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(dexWithdrawalNeeded, 0);
-        bytes memory deallocateData = abi.encode(strategyId, minAcceptable, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, minDeltaIncrease, false, withdrawCalls);
 
         vm.prank(address(vault));
 
-        // SECURITY FIX Issue #2: All-or-nothing enforcement
-        // If totalExpectedReturn < requestedAmount, revert with InvalidAmount
+        // Check both all-or-nothing (totalExpectedReturn vs requestedAmount) and slippage (dexActualReturn vs minDeltaIncrease)
         if (totalExpectedReturn < requestedAmount) {
             // Insufficient balance after DEX withdrawal - should revert with InvalidAmount
             vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
             adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
+        } else if (dexActualReturn < minDeltaIncrease) {
+            // Sufficient total balance but slippage too high - should revert with SlippageTooHigh
+            vm.expectRevert(IUniversalAdapterEscrow.SlippageTooHigh.selector);
+            adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
         } else {
-            // Has sufficient balance - should succeed with exact requested amount
+            // Has sufficient balance and acceptable slippage - should succeed
             (, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
             assertEq(uint256(-change), requestedAmount, "Should return exact requested amount");
         }
