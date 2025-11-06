@@ -279,18 +279,20 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
 
         uint256 reportedAssets = adapter.realAssets();
 
-        // Adjust valuerReturn for excessIdle to get valuerValueAdj
-        uint256 valuerValueAdj = valuerReturn > excessIdle ? valuerReturn - excessIdle : 0;
-
-        // TIME-BOUNDED FALLBACK FIX: Always accept valuer's adjusted value if > 0
-        if (valuerValueAdj > 0) {
-            // Accept valuer's adjusted value (even if far below principal)
-            assertEq(reportedAssets, valuerValueAdj, "Should always use valuer's adjusted value when > 0");
+        // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
+        // Adjust valuerReturn based on the new semantic-agnostic logic:
+        // - If valuerReturn >= excessIdle: subtract excessIdle
+        // - If valuerReturn < excessIdle: add allocatedInAdapter
+        uint256 valuerValueAdj;
+        if (valuerReturn >= excessIdle) {
+            valuerValueAdj = valuerReturn - excessIdle;
         } else {
-            // When adjusted value = 0, use time-bounded cached fallback
-            // Cache was populated during allocation with initialCachedValue
-            assertEq(reportedAssets, initialCachedValue, "Should use cached fallback when adjusted value = 0");
+            valuerValueAdj = valuerReturn + allocatedInAdapter;
         }
+
+        // Semantic-agnostic adjustment always produces a value > 0 (when allocations > 0)
+        // This prevents DoS from donations that would otherwise zero the adjusted value
+        assertEq(reportedAssets, valuerValueAdj, "Should use semantic-agnostic adjusted value");
     }
 }
 
