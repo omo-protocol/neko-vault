@@ -8,7 +8,7 @@ out/
 /broadcast/**/dry-run/
 
 # Docs
-docs/
+# docs/
 
 # Dotenv file
 .env
@@ -23,3 +23,14 @@ docs/
 !security-audit-reference.md
 !UNIVERSAL_ADAPTER_README.md
 !SECURITY_IMPROVEMENTS_SUMMARY.md
+!defi-protocol-rebase-integration.md
+!rebase-token-integration-flow.md
+/venv-keeper
+/src/keepers/__pycache__
+
+!VaultTimeLockWrapper-TechnicalDocumentation.md
+!VaultTimeLockWrapper.md
+
+!/docs/OVAULT_FLOW_DIAGRAMS.md
+!/docs/OVAULT_VISUAL_SUMMARY.md
+!/docs/OVAULT_FRONTEND_INTEGRATION.md

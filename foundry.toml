@@ -5,6 +5,13 @@ optimizer_runs = 100000
 bytecode_hash = "none"
 evm_version = "cancun"
 dynamic_test_linking = true
+remappings = [
+    "@layerzerolabs/oft-evm/=lib/devtools/packages/oft-evm/",
+    "@layerzerolabs/oapp-evm/=lib/devtools/packages/oapp-evm/",
+    "@layerzerolabs/ovault-evm/=lib/devtools/packages/ovault-evm/",
+    "@layerzerolabs/lz-evm-protocol-v2/=lib/LayerZero-v2/packages/layerzero-v2/evm/protocol/",
+    "@layerzerolabs/lz-evm-messagelib-v2/=lib/LayerZero-v2/packages/layerzero-v2/evm/messagelib/",
+]
 
 [profile.default.fmt]
 wrap_comments = true
