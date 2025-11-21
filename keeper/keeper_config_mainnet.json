@@ -1,0 +1,33 @@
+{
+  "rpc_url": "https://evmrpc-eu.hyperpc.app/3cf8e8790ae44da79f6798306fa7413c",
+  "signer_private_key": "YOUR_KEEPER_PRIVATE_KEY_HERE",
+  "valuer_address": "0x7f7b37A897EF5331262a9A6a5F60078BcfbF58Cc",
+  "wrapper_address": "0xfD739d4e423301CE9385c1fb8850539D657C296D",
+  "chain_id": 999,
+
+  "strategies": [
+    {
+      "id": "PT_KHYPE_LOOP",
+      "mode": "pt_khype_loop",
+      "escrow": "0x5Bc418252Fd72b4dF7feCc297caF50B23f9Ee6cA",
+      "underlying": "0xfD739d4e423301CE9385c1fb8850539D657C296D",
+      "confidence": 95,
+      "extras": {
+        "pt_khype_address": "0x311dB0FDe558689550c68355783c95eFDfe25329",
+        "felix_lending": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD",
+        "felix_market_id": "0x1df0d0ebcdc52069692452cb9a3e5cf6c017b237378141eaf08a05ce17205ed6",
+        "pendle_market": "0x8867d2b7aDb8609c51810237EcC9A25A2F601B97",
+        "pt_oracle": "0x9a9Fa8338dd5E5B2188006f1Cd2Ef26d921650C2",
+        "pendle_router": "0x888888888889758F76e7103c6CbF23ABbF58F946"
+      }
+    }
+  ],
+
+  "keeper_settings": {
+    "update_check_interval": 60,
+    "ttl": 300,
+    "gas_limit": 350000,
+    "max_fee_gwei": 1.0,
+    "max_priority_gwei": 0.5
+  }
+}
