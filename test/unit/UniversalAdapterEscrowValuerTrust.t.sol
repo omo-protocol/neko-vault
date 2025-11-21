@@ -174,16 +174,20 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     /**
      * @notice Test that zero value correctly triggers time-bounded cache fallback
      * @dev TIME-BOUNDED FALLBACK FIX (FIXING.md): Uses cached value instead of principal
+     * @dev SECURITY FIX: Cache must be explicitly refreshed by keeper (not auto-populated)
      */
     function testZeroValueTriggersFallback() public {
         // Set valuer to return correct value BEFORE allocation
         maliciousValuer.setReturnValue(1000e18);
 
-        // Setup - allocate funds which creates initial cached valuation
+        // Setup - allocate funds
         bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
-        // After allocation, cache is populated with 1000e18
+
+        // SECURITY FIX: Keeper explicitly refreshes cache after allocation
+        // This simulates the real keeper workflow: allocate → keeper updates valuer → keeper refreshes cache
+        adapter.refreshCachedValuation();
 
         // Verify cache was populated correctly
         uint256 initialAssets = adapter.realAssets();
@@ -244,6 +248,8 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     /**
      * @notice Fuzz test: Verify valuer values always accepted if > 0
      * @dev SECURITY FIX: Updated for new security model (no tolerance threshold)
+     * @dev NOTE: This test validates realAssets() directly without cache refresh
+     *            to test the semantic-agnostic adjustment logic independently
      */
     function testFuzzValuerAlwaysTrusted(uint256 realValue, uint256 valuerReturn) public {
         // Skip edge case where realValue is 0 (cold start - no allocations)
@@ -252,9 +258,10 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Bound inputs - ensure realValue > 0 to avoid cold start edge case
         realValue = bound(realValue, 1000e18, 10000e18);
 
-        valuerReturn = bound(valuerReturn, 1, realValue * 2); // Can be under or over
+        // Bound valuerReturn - can be any positive value (semantic-agnostic)
+        valuerReturn = bound(valuerReturn, 1, realValue * 10);
 
-        // Set valuer to return correct value BEFORE allocation so cache is populated correctly
+        // Set valuer to return correct value BEFORE allocation
         maliciousValuer.setReturnValue(realValue);
 
         // Setup
@@ -262,37 +269,43 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         bytes memory allocateData = abi.encode(strategyId, realValue, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
-        // Cache is now populated with realValue (donation-adjusted)
+
+        // NOTE: We don't call refreshCachedValuation() here because:
+        // 1. This test validates realAssets() semantic-agnostic logic
+        // 2. refreshCachedValuation() has sanity checks that would reject extreme fuzz values
+        // 3. We want to test that realAssets() accepts any valuer value > 0
 
         // Calculate excessIdle (donations) that will be excluded
         uint256 balance = asset.balanceOf(address(adapter));
         uint256 allocatedInAdapter = adapter.totalAllocations() - adapter.totalExternalDeposits();
         uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
-        uint256 initialCachedValue = realValue > excessIdle ? realValue - excessIdle : 0;
 
-        // Ensure we actually allocated something and cache is not 0
+        // Ensure we actually allocated something
         vm.assume(adapter.totalAllocations() > 0);
-        vm.assume(initialCachedValue > 0); // Skip edge case where all value is donations
+        vm.assume(allocatedInAdapter > 0);
+
+        // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
+        // Calculate expected adjusted value based on the semantic-agnostic logic:
+        // - If valuerReturn >= excessIdle: subtract excessIdle
+        // - If valuerReturn < excessIdle: add allocatedInAdapter
+        uint256 expectedValueAdj;
+        if (valuerReturn >= excessIdle) {
+            expectedValueAdj = valuerReturn - excessIdle;
+        } else {
+            expectedValueAdj = valuerReturn + allocatedInAdapter;
+        }
+
+        // Skip cases where adjustment would result in 0 (triggers ValuationUnavailable)
+        vm.assume(expectedValueAdj > 0);
 
         // Now set the fuzzed valuer return value
         maliciousValuer.setReturnValue(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
 
-        // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
-        // Adjust valuerReturn based on the new semantic-agnostic logic:
-        // - If valuerReturn >= excessIdle: subtract excessIdle
-        // - If valuerReturn < excessIdle: add allocatedInAdapter
-        uint256 valuerValueAdj;
-        if (valuerReturn >= excessIdle) {
-            valuerValueAdj = valuerReturn - excessIdle;
-        } else {
-            valuerValueAdj = valuerReturn + allocatedInAdapter;
-        }
-
         // Semantic-agnostic adjustment always produces a value > 0 (when allocations > 0)
         // This prevents DoS from donations that would otherwise zero the adjusted value
-        assertEq(reportedAssets, valuerValueAdj, "Should use semantic-agnostic adjusted value");
+        assertEq(reportedAssets, expectedValueAdj, "Should use semantic-agnostic adjusted value");
     }
 }
 
