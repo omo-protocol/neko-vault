@@ -842,6 +842,63 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      2. Verify valuer is reporting accurate current value
     ///      3. Calculate correct external deposits: valuerValue - balance
     ///      4. Call syncExternalDeposits with corrected value (works even when paused)
+    /// @notice Sync external deposits for specific strategies with actual values
+    /// @param strategyIds Array of strategy IDs to update
+    /// @param newValues Array of new external deposit values for each strategy
+    function syncExternalDepositsPerStrategy(bytes32[] calldata strategyIds, uint256[] calldata newValues) external onlyOwner {
+        require(strategyIds.length == newValues.length, "Length mismatch");
+        require(strategyIds.length > 0, "Empty arrays");
+
+        uint256 totalDelta = 0;
+
+        for (uint256 i = 0; i < strategyIds.length; i++) {
+            bytes32 strategyId = strategyIds[i];
+            uint256 oldValue = externalDeposits[strategyId];
+            uint256 newValue = newValues[i];
+
+            // SECURITY: Can only reduce, never increase (removing ghost, not creating it)
+            require(newValue <= oldValue, "Can only reduce ghost deposits");
+
+            uint256 delta = oldValue - newValue;
+            externalDeposits[strategyId] = newValue;
+            totalDelta += delta;
+
+            // If both allocation and externalDeposits are now zero, remove from active set
+            if (allocations[strategyId] == 0 && newValue == 0) {
+                _removeFromActiveStrategies(strategyId);
+            }
+
+            emit ExternalDepositSyncedPerStrategy(strategyId, oldValue, newValue, delta);
+        }
+
+        // Update total to maintain invariant: totalExternalDeposits == sum(externalDeposits[•])
+        totalExternalDeposits -= totalDelta;
+
+        // VALIDATION: New value should make sense given valuer's current report
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 newMinKnown = balance + totalExternalDeposits;
+
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
+        );
+
+        if (success && data.length >= 32) {
+            uint256 valuerValue = abi.decode(data, (uint256));
+
+            // SAFETY CHECK: New minimum shouldn't be too far below valuer value
+            // Allow up to 20% below valuer for safety margin (more conservative than 10% tolerance)
+            require(valuerValue >= (newMinKnown * 8000) / 10000, "New value too low vs valuer");
+        }
+
+        // SECURITY FIX: Invalidate stale cache and refresh
+        cachedValuationTimestamp = 0;
+        _updateCachedValuation();
+
+        emit ExternalDepositsSyncedBatch(msg.sender, totalDelta, totalExternalDeposits);
+    }
+
     function syncExternalDeposits(uint256 newTotalExternalDeposits) external onlyOwner {
         // SECURITY FIX Issue #8: Removed pause check
         // Owner must be able to fix accounting during pause for accurate emergency operations

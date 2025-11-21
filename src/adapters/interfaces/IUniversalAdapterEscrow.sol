@@ -43,6 +43,8 @@ interface IUniversalAdapterEscrow is IAdapter {
     event StrategyRemoved(bytes32 indexed strategyId);
     event ExternalDepositsSynced(address indexed syncer, uint256 oldValue, uint256 newValue);
     event ExternalDepositsReduced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
+    event ExternalDepositSyncedPerStrategy(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
+    event ExternalDepositsSyncedBatch(address indexed syncer, uint256 totalDelta, uint256 newTotalValue);
 
     /* ERRORS */
 
@@ -127,6 +129,11 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Set the pause status
     /// @param _paused Whether to pause the contract
     function setPaused(bool _paused) external;
+
+    /// @notice Sync external deposits for specific strategies with actual values
+    /// @param strategyIds Array of strategy IDs to update
+    /// @param newValues Array of new external deposit values for each strategy
+    function syncExternalDepositsPerStrategy(bytes32[] calldata strategyIds, uint256[] calldata newValues) external;
 
     /// @notice Manually sync totalExternalDeposits to remove ghost amounts
     /// @param newTotalExternalDeposits The corrected external deposits value (must be <= current)
