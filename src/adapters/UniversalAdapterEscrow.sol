@@ -359,18 +359,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // SECURITY FIX (security_issues_5nov2025_6.md Issue #1): Forward surplus to vault
-        // If withdrawals returned more than requested assets, forward the surplus immediately.
-        // This prevents externalDeposits from staying overstated and underpricing totalAssets.
-        // Done after slippage checks so availability checks use the full balance.
-        // Only forward if we actually executed withdrawals (not in Scenario 1 where balance covers all).
-        if (caller != FORCE_DEALLOCATE_SELECTOR && withdrawalsExecuted) {
-            uint256 _bal = IERC20(asset).balanceOf(address(this));
-            if (_bal > assets) {
-                SafeERC20Lib.safeTransfer(asset, parentVault, _bal - assets);
-            }
-        }
-
         // Update allocation - handle case where actualAmount exceeds tracked allocation
         uint256 allocationDecrease = actualAmount > allocations[strategyId]
             ? allocations[strategyId]
