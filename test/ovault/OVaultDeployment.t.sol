@@ -10,12 +10,21 @@ import {ShareOFT} from "../../src/ovault/ShareOFT.sol";
 import {ShareOFTAdapter} from "../../src/ovault/ShareOFTAdapter.sol";
 import {VaultComposerSync} from "../../src/ovault/VaultComposerSync.sol";
 
+// Mock LayerZero Endpoint V2 for testing
+contract MockEndpointV2 {
+    uint32 public eid = 1;
+
+    function setDelegate(address) external {}
+}
+
 /// @title OVaultDeployment Test
 /// @notice Tests basic deployment and setup of OVault infrastructure
 /// @dev This test verifies that all contracts can be deployed and basic properties work
 contract OVaultDeploymentTest is Test {
     address owner = address(0x1);
-    address lzEndpoint = address(0x1a44076050125825900e736c501f859c50fE728c); // Mock endpoint
+
+    MockEndpointV2 hubEndpoint;
+    MockEndpointV2 spokeEndpoint;
 
     AssetOFT assetOFT;
     VaultV2 vault;
@@ -24,15 +33,19 @@ contract OVaultDeploymentTest is Test {
     ShareOFT spokeShareOFT;
 
     function setUp() public {
+        // Deploy mock endpoints
+        hubEndpoint = new MockEndpointV2();
+        spokeEndpoint = new MockEndpointV2();
+
         vm.startPrank(owner);
 
         // Deploy hub infrastructure
-        assetOFT = new AssetOFT("USD Tether", "USDT", lzEndpoint, owner);
+        assetOFT = new AssetOFT("USD Tether", "USDT", address(hubEndpoint), owner);
         vault = new VaultV2(owner, address(assetOFT));
         vault.setName("Morpho USDT Vault");
         vault.setSymbol("mUSDT");
 
-        shareAdapter = new ShareOFTAdapter(address(vault), lzEndpoint, owner);
+        shareAdapter = new ShareOFTAdapter(address(vault), address(hubEndpoint), owner);
         composer = new VaultComposerSync(
             address(vault),
             address(assetOFT),
@@ -43,7 +56,7 @@ contract OVaultDeploymentTest is Test {
         spokeShareOFT = new ShareOFT(
             "Morpho USDT Vault Shares",
             "mUSDT",
-            lzEndpoint,
+            address(spokeEndpoint),
             owner
         );
 
