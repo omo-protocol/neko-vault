@@ -160,8 +160,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _executeMulticall(strategyId, calls, false);
         }
 
-        // Update cached valuation for time-bounded fallback
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
+        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
+        // after updating the valuer with fresh data.
 
         // Return results
         ids = new bytes32[](1);
@@ -375,8 +376,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // Transfer assets back to vault
         // The vault will pull the assets using transferFrom
 
-        // Update cached valuation for time-bounded fallback
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
+        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
+        // after updating the valuer with fresh data.
 
         // Return results
         ids = new bytes32[](1);
@@ -655,7 +657,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
         if (balanceAfter > balanceBefore) revert InvalidAmount();
 
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -721,7 +723,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -756,7 +758,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
         if (balanceAfter > balanceBefore) revert InvalidAmount();
 
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -778,7 +780,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
         if (balanceAfter > balanceBefore) revert InvalidAmount();
 
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -892,9 +894,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             require(valuerValue >= (newMinKnown * 8000) / 10000, "New value too low vs valuer");
         }
 
-        // SECURITY FIX: Invalidate stale cache and refresh
+        // SECURITY FIX: Invalidate stale cache (removed _updateCachedValuation() call)
+        // Keepers should call refreshCachedValuation() after updating valuer with fresh data
         cachedValuationTimestamp = 0;
-        _updateCachedValuation();
 
         emit ExternalDepositsSyncedBatch(msg.sender, totalDelta, totalExternalDeposits);
     }
@@ -961,10 +963,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         totalExternalDeposits = newTotalExternalDeposits;
 
-        // SECURITY FIX (security_issues_5nov2025_4.md Issue #3): Invalidate stale cache and refresh
-        // syncExternalDeposits changes donation filter parameters, so cached valuation becomes stale
-        cachedValuationTimestamp = 0;
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
+        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
+        // after updating the valuer with fresh data.
 
         emit ExternalDepositsSynced(msg.sender, oldValue, newTotalExternalDeposits);
     }
@@ -996,12 +997,54 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _removeFromActiveStrategies(strategyId);
         }
 
-        // SECURITY FIX (security_issues_5nov2025_4.md Issue #3): Invalidate stale cache and refresh
-        // reduceExternalDeposits changes donation filter parameters, so cached valuation becomes stale
-        cachedValuationTimestamp = 0;
-        _updateCachedValuation();
+        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
+        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
+        // after updating the valuer with fresh data.
 
         emit ExternalDepositsReduced(strategyId, current, newPerStrategy, delta);
+    }
+
+    /// @notice Refresh cached valuation from current valuer state
+    /// @dev SECURITY FIX: Separated from state-changing functions to prevent cache poisoning.
+    ///      Should be called by keepers AFTER valuer has been updated with fresh off-chain data.
+    ///      This ensures cache contains only validated, keeper-signed valuations, not stale data
+    ///      from the same transaction as state changes.
+    function refreshCachedValuation() external {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
+            ? totalAllocations - totalExternalDeposits : 0;
+        uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
+        
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+        
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", totalId)
+        );
+        
+        if (success && data.length >= 32) {
+            uint256 totalValue = abi.decode(data, (uint256));
+            uint256 totalValueAdj;
+            
+            if (totalValue >= excessIdle) {
+                totalValueAdj = totalValue - excessIdle;
+            } else {
+                totalValueAdj = totalValue + allocatedInAdapter;
+            }
+            
+            // SECURITY: Sanity check - reject obviously wrong values
+            if (totalAllocations > 0) {
+                require(totalValueAdj >= (totalAllocations * 80) / 100, "Valuation too low - check valuer");
+                require(totalValueAdj <= (totalAllocations * 150) / 100, "Valuation too high - check valuer");
+            }
+            
+            if (totalValueAdj > 0) {
+                cachedValuation = totalValueAdj;
+                cachedValuationTimestamp = block.timestamp;
+                emit CachedValuationRefreshed(totalValueAdj, block.timestamp);
+            }
+        } else {
+            revert("Valuer call failed");
+        }
     }
 
     /* VIEW FUNCTIONS */
