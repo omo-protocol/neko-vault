@@ -23,7 +23,7 @@ contract ConfigureAdapter is Script {
     uint256 constant DAILY_LIMIT = 10000e18; // 10,000 tokens daily limit - this param already ignored in adapter
 
     // Configuration parameters (must match deployment script)
-    address constant ADAPTER_ADDRESS = 0xE7537bB191a6FfcD73eED7b2e720F5918Ba7E7E8; // config to adapter address
+    address constant ADAPTER_ADDRESS = 0x5Bc418252Fd72b4dF7feCc297caF50B23f9Ee6cA; // config to adapter address
 
     function run() public {
         // Load private key
@@ -49,7 +49,7 @@ contract ConfigureAdapter is Script {
         console.log("\n[Step 1/1] Configuring adapter strategy...");
         adapter.setStrategy(
             ALM_STRATEGY_ID,
-            deployer, // strategyAgent
+            0x28572bC31Dc4f271d2377c47632ebfcB4CDf8e88, // strategyAgent
             "", // No pre-configured data
             DAILY_LIMIT // Daily limit
         );
