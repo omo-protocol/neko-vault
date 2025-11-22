@@ -294,11 +294,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     // Cap reduction to requested assets (don't over-reduce if we got extra)
                     if (x > assets) x = assets;
 
-                    // Cap reduction to current per-strategy external deposits (prevent underflow)
-                    if (x > d) x = d;
-
-                    // Cap reduction to totalExternalDeposits (prevent underflow from desync)
-                    if (x > totalExternalDeposits) x = totalExternalDeposits;
+                    // SECURITY FIX: Two-Phase Cap to prevent underflow and accounting desync
+                    // Cap to MINIMUM of per-strategy and total external deposits
+                    // This ensures both accounting invariants are preserved simultaneously:
+                    // - externalDeposits[strategyId] >= 0 (no underflow)
+                    // - totalExternalDeposits >= sum(externalDeposits[i]) (maintains invariant)
+                    uint256 maxReduction = d < totalExternalDeposits ? d : totalExternalDeposits;
+                    if (x > maxReduction) x = maxReduction;
 
                     // Apply symmetric reduction
                     if (x > 0) {
@@ -698,11 +700,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // Cap reduction to measured minimum increase (don't over-reduce if we got extra)
                 if (x > minBalanceIncrease) x = minBalanceIncrease;
 
-                // Cap reduction to current per-strategy external deposits (prevent underflow)
-                if (x > d) x = d;
-
-                // Cap reduction to totalExternalDeposits (prevent underflow from desync)
-                if (x > totalExternalDeposits) x = totalExternalDeposits;
+                // SECURITY FIX: Two-Phase Cap to prevent underflow and accounting desync
+                // Cap to MINIMUM of per-strategy and total external deposits
+                // This ensures both accounting invariants are preserved simultaneously:
+                // - externalDeposits[strategyId] >= 0 (no underflow)
+                // - totalExternalDeposits >= sum(externalDeposits[i]) (maintains invariant)
+                uint256 maxReduction = d < totalExternalDeposits ? d : totalExternalDeposits;
+                if (x > maxReduction) x = maxReduction;
 
                 // Apply symmetric reduction
                 if (x > 0) {
