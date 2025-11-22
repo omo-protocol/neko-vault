@@ -278,35 +278,23 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
                 // If we don't have enough, vault's transferFrom will revert with insufficient balance
 
-                // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction on withdrawal
-                // When we successfully withdraw from protocol to adapter, reduce externalDeposits accordingly
-                // This is SAFE here because:
-                // 1. We're in deallocate (vault-initiated withdrawal)
-                // 2. We just executed withdrawCalls that increased balance
-                // 3. We know this is a withdrawal, not a donation or other balance increase
+                // SECURITY FIX: Valuer-based synchronization after withdrawal
+                // Sync externalDeposits to actual remaining value in protocol using valuer
+                // This prevents ghost funds by accurately tracking principal + yield
                 //
-                // This fixes underpricing caused by overstated externalDeposits after withdrawals
+                // Benefits over old symmetric reduction:
+                // 1. Handles yield correctly (increase in value tracked)
+                // 2. Self-correcting (syncs to actual on-chain value)
+                // 3. Protocol-agnostic (no protocol-specific queries needed)
+                // 4. Uses existing valuer infrastructure
+                //
                 // Note: balanceAfter already defined at line 262
                 if (balanceAfter > adapterBalance) {
-                    uint256 d = externalDeposits[strategyId];
-                    uint256 x = balanceAfter - adapterBalance;
-
-                    // Cap reduction to requested assets (don't over-reduce if we got extra)
-                    if (x > assets) x = assets;
-
-                    // SECURITY FIX: Two-Phase Cap to prevent underflow and accounting desync
-                    // Cap to MINIMUM of per-strategy and total external deposits
-                    // This ensures both accounting invariants are preserved simultaneously:
-                    // - externalDeposits[strategyId] >= 0 (no underflow)
-                    // - totalExternalDeposits >= sum(externalDeposits[i]) (maintains invariant)
-                    uint256 maxReduction = d < totalExternalDeposits ? d : totalExternalDeposits;
-                    if (x > maxReduction) x = maxReduction;
-
-                    // Apply symmetric reduction
-                    if (x > 0) {
-                        externalDeposits[strategyId] = d - x;
-                        totalExternalDeposits -= x;
-                    }
+                    uint256 withdrawnAmount = balanceAfter - adapterBalance;
+                    if (withdrawnAmount > assets) withdrawnAmount = assets;
+                    
+                    // Sync externalDeposits to actual protocol value via valuer
+                    _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, assets);
                 }
             }
         }
@@ -685,34 +673,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
             require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
 
-            // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction on withdrawal
-            // When we successfully withdraw (balance increased), reduce externalDeposits accordingly
-            // This is SAFE here because:
-            // 1. We're in executeStrategyWithSlippage with minBalanceIncrease > 0 (explicit withdrawal)
-            // 2. We measured the balance increase and it passed slippage check
-            // 3. We know this is a withdrawal, not a donation or other balance increase
-            //
-            // This fixes underpricing caused by overstated externalDeposits after withdrawals
+            // SECURITY FIX: Valuer-based synchronization after withdrawal
+            // Sync externalDeposits to actual remaining value in protocol using valuer
+            // This prevents ghost funds and correctly handles yield
             if (balanceAfter > balanceBefore) {
-                uint256 d = externalDeposits[strategyId];
-                uint256 x = balanceAfter - balanceBefore;
-
-                // Cap reduction to measured minimum increase (don't over-reduce if we got extra)
-                if (x > minBalanceIncrease) x = minBalanceIncrease;
-
-                // SECURITY FIX: Two-Phase Cap to prevent underflow and accounting desync
-                // Cap to MINIMUM of per-strategy and total external deposits
-                // This ensures both accounting invariants are preserved simultaneously:
-                // - externalDeposits[strategyId] >= 0 (no underflow)
-                // - totalExternalDeposits >= sum(externalDeposits[i]) (maintains invariant)
-                uint256 maxReduction = d < totalExternalDeposits ? d : totalExternalDeposits;
-                if (x > maxReduction) x = maxReduction;
-
-                // Apply symmetric reduction
-                if (x > 0) {
-                    externalDeposits[strategyId] = d - x;
-                    totalExternalDeposits -= x;
-                }
+                uint256 withdrawnAmount = balanceAfter - balanceBefore;
+                if (withdrawnAmount > minBalanceIncrease) withdrawnAmount = minBalanceIncrease;
+                
+                // Sync externalDeposits to actual protocol value via valuer
+                _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, minBalanceIncrease);
             }
 
             // SECURITY FIX (security_issues_5nov2025_6.md Issue #1): Forward surplus to vault
@@ -1309,6 +1278,142 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function _removeFromActiveStrategies(bytes32 strategyId) internal {
         // O(1) operation with EnumerableSet
         activeStrategies.remove(strategyId);
+    }
+
+    /// @notice Sync externalDeposits to actual protocol value after withdrawal using valuer
+    /// @dev SECURITY FIX: Prevents ghost funds by syncing to actual remaining value from valuer
+    /// @param strategyId The strategy that was withdrawn from
+    /// @param withdrawnAmount Amount that was withdrawn (balance increase measured)
+    /// @param requestedAssets Amount that was requested in the deallocate call
+    function _syncExternalDepositsWithValuer(
+        bytes32 strategyId,
+        uint256 withdrawnAmount,
+        uint256 requestedAssets
+    ) internal {
+        // Get current tracked value
+        uint256 trackedValue = externalDeposits[strategyId];
+        
+        // If nothing tracked, nothing to sync
+        if (trackedValue == 0) return;
+        
+        // Try to get actual remaining value from valuer
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", strategyId)
+        );
+        
+        if (success && data.length >= 32) {
+            uint256 actualValue = abi.decode(data, (uint256));
+            
+            // If valuer returns 0, it means either:
+            // 1. Strategy actually has 0 value (fully withdrawn)
+            // 2. Valuer not configured for this strategy (test/dev environment)
+            // In case 2, fall back to conservative estimate
+            bool valuerConfigured = (actualValue > 0 || trackedValue == 0);
+            
+            // Sync externalDeposits to actual value if valuer is configured
+            if (valuerConfigured && actualValue != trackedValue) {
+                int256 delta;
+                
+                if (actualValue < trackedValue) {
+                    // Value decreased (withdrawal or loss)
+                    uint256 decrease = trackedValue - actualValue;
+                    
+                    // Sanity check: decrease should be close to withdrawn amount
+                    // Allow 20% variance for price movements, fees, slippage, yield
+                    uint256 expectedMin = (withdrawnAmount * 80) / 100;
+                    uint256 expectedMax = (withdrawnAmount * 120) / 100;
+                    
+                    if (decrease < expectedMin || decrease > expectedMax) {
+                        // Unexpected decrease - emit warning
+                        emit UnexpectedValueChange(
+                            strategyId,
+                            withdrawnAmount,
+                            decrease,
+                            withdrawnAmount,
+                            "Value decrease outside expected range"
+                        );
+                    }
+                    
+                    // Update per-strategy accounting
+                    externalDeposits[strategyId] = actualValue;
+                    
+                    // Safe total reduction with desync protection
+                    if (decrease > totalExternalDeposits) {
+                        // Desync detected - shouldn't happen but handle gracefully
+                        emit AccountingDesyncDetected(strategyId, decrease, totalExternalDeposits);
+                        totalExternalDeposits = 0;
+                    } else {
+                        totalExternalDeposits -= decrease;
+                    }
+                    
+                    delta = -int256(decrease);
+                } else {
+                    // Value increased (yield accrued between last sync and now)
+                    uint256 increase = actualValue - trackedValue;
+                    
+                    // Update accounting to include accrued yield
+                    externalDeposits[strategyId] = actualValue;
+                    totalExternalDeposits += increase;
+                    
+                    emit YieldAccrued(strategyId, increase);
+                    
+                    delta = int256(increase);
+                }
+                
+                emit ExternalDepositsValuerSynced(strategyId, trackedValue, actualValue, delta);
+            } else {
+                // Valuer returned 0 but we have trackedValue > 0
+                // This means valuer is not configured - use conservative fallback
+                _applyConservativeReduction(strategyId, trackedValue, withdrawnAmount, false);
+            }
+        } else {
+            // Valuer call failed - determine if we should warn
+            bool cacheStale = block.timestamp - cachedValuationTimestamp >= MAX_CACHED_VALUATION_AGE;
+            _applyConservativeReduction(strategyId, trackedValue, withdrawnAmount, cacheStale);
+        }
+    }
+
+    /// @notice Apply conservative reduction when valuer unavailable
+    /// @param strategyId The strategy identifier
+    /// @param trackedValue Current tracked external deposits
+    /// @param withdrawnAmount Amount withdrawn
+    /// @param emitWarning Whether to emit warning about valuer unavailability
+    function _applyConservativeReduction(
+        bytes32 strategyId,
+        uint256 trackedValue,
+        uint256 withdrawnAmount,
+        bool emitWarning
+    ) internal {
+        // Conservative estimate: reduce by withdrawn amount
+        uint256 conservativeReduction = withdrawnAmount;
+        
+        // Apply two-phase cap for safety (prevents underflow)
+        uint256 maxReduction = trackedValue < totalExternalDeposits ? trackedValue : totalExternalDeposits;
+        if (conservativeReduction > maxReduction) {
+            conservativeReduction = maxReduction;
+        }
+        
+        if (conservativeReduction > 0) {
+            externalDeposits[strategyId] = trackedValue - conservativeReduction;
+            totalExternalDeposits -= conservativeReduction;
+            
+            if (emitWarning) {
+                emit UnexpectedValueChange(
+                    strategyId,
+                    withdrawnAmount,
+                    conservativeReduction,
+                    withdrawnAmount,
+                    "Valuer unavailable - using conservative estimate"
+                );
+            } else {
+                emit ExternalDepositsValuerSynced(
+                    strategyId,
+                    trackedValue,
+                    trackedValue - conservativeReduction,
+                    -int256(conservativeReduction)
+                );
+            }
+        }
     }
 
     /// @notice Get strategy value including yield from valuer
