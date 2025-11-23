@@ -50,6 +50,11 @@ interface IUniversalAdapterEscrow is IAdapter {
     event YieldAccrued(bytes32 indexed strategyId, uint256 yieldAmount);
     event UnexpectedValueChange(bytes32 indexed strategyId, uint256 expected, uint256 actual, uint256 withdrawn, string reason);
     event AccountingDesyncDetected(bytes32 indexed strategyId, uint256 decrease, uint256 totalAvailable);
+    event EmergencyModeEnabled(uint256 timestamp, string reason);
+    event EmergencyModeDisabled(uint256 timestamp, uint256 duration);
+
+    // NOTE: ExternalDepositsSynced event removed - proportional syncing across all strategies is unrealistic
+    // Use syncExternalDepositsPerStrategy() with ExternalDepositSyncedPerStrategy events instead
 
     /* ERRORS */
 
@@ -67,6 +72,9 @@ interface IUniversalAdapterEscrow is IAdapter {
     error SlippageTooHigh();
     error ExcessiveBalanceLoss();
     error ValuationUnavailable();
+    error EmergencyModeAlreadyEnabled();
+    error EmergencyModeNotEnabled();
+    error ValuerStillUnavailable();
 
     /* EXTERNAL FUNCTIONS */
 
@@ -140,10 +148,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @param newValues Array of new external deposit values for each strategy
     function syncExternalDepositsPerStrategy(bytes32[] calldata strategyIds, uint256[] calldata newValues) external;
 
-    /// @notice Manually sync totalExternalDeposits to remove ghost amounts
-    /// @param newTotalExternalDeposits The corrected external deposits value (must be <= current)
-    function syncExternalDeposits(uint256 newTotalExternalDeposits) external;
-
     /* VIEW FUNCTIONS */
 
     /// @notice Get strategy configuration
@@ -201,4 +205,24 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return timestamp When the valuation was cached
     /// @return isStale Whether the cached value is too old (>1 hour)
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale);
+
+    /// @notice Enable emergency mode when valuer is unavailable
+    /// @dev Applies conservative haircut to prevent arbitrage during valuer downtime
+    function enableEmergencyMode() external;
+
+    /// @notice Disable emergency mode when valuer is restored
+    /// @dev Requires valuer to be working before disabling
+    function disableEmergencyMode() external;
+
+    /// @notice Check if emergency mode is active
+    /// @return Whether emergency mode is active
+    function emergencyMode() external view returns (bool);
+
+    /// @notice Get when emergency mode was activated
+    /// @return Timestamp of emergency mode activation (0 if not active)
+    function emergencyModeActivatedAt() external view returns (uint256);
+
+    /// @notice Get the emergency haircut percentage in basis points
+    /// @return Haircut in basis points (e.g., 500 = 5%)
+    function EMERGENCY_HAIRCUT() external view returns (uint256);
 }

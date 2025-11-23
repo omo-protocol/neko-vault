@@ -196,10 +196,20 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
-        // Should use cached valuation (1000e18) instead of reverting
-        // This is the time-bounded fallback in action
+        // SECURITY FIX Issue #2 (Cached Valuation Exploitation):
+        // In normal mode, should REVERT when valuer returns 0 (forces explicit emergency mode activation)
+        // This prevents silent use of stale cache which could enable arbitrage
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
+        adapter.realAssets();
+
+        // Enable emergency mode to allow cached valuation with 5% haircut
+        vm.prank(owner);
+        adapter.enableEmergencyMode();
+
+        // Should now use cached valuation with 5% haircut (1000e18 * 0.95 = 950e18)
         uint256 reportedAssets = adapter.realAssets();
-        assertEq(reportedAssets, 1000e18, "Should use cached valuation when valuer returns 0");
+        uint256 expectedWithHaircut = 1000e18 * 9500 / 10000; // 5% haircut
+        assertEq(reportedAssets, expectedWithHaircut, "Should use cached valuation with haircut in emergency mode");
     }
 
     /**
