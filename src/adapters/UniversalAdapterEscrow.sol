@@ -128,6 +128,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /* EXTERNAL FUNCTIONS - ADAPTER INTERFACE */
 
     /// @inheritdoc IAdapter
+    /// @notice Allocate assets from vault to strategy
+    /// @dev SECURITY FIX: liquidityData MUST contain empty calls array
+    ///      This prevents deposit failures when calls have hardcoded amounts that don't match actual deposits.
+    ///      Agents execute strategies separately via executeStrategy() with dynamic amounts based on actual balance.
+    /// @param data Encoded: (bytes32 strategyId, uint256 ignored, bool ignored, Call[] calls)
+    ///             - calls MUST be empty array (enforced)
+    /// @param assets Amount of assets transferred from vault
     function allocate(
         bytes memory data,
         uint256 assets,
@@ -136,13 +143,20 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
-        // Decode allocation data (executeNow and calls are ignored - kept for backward compatibility)
-        (bytes32 strategyId, , , ) =
+        // Decode allocation data
+        (bytes32 strategyId, , , Call[] memory calls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
         // Validate strategy exists and is active
         if (!strategies[strategyId].active) revert StrategyNotActive();
         if (assets == 0) revert InvalidAmount();
+
+        // SECURITY: Enforce empty calls array in liquidityData
+        // Prevents curator from configuring hardcoded amounts that mismatch actual deposits
+        // Agents execute strategies separately with correct amounts via executeStrategy()
+        if (calls.length > 0) {
+            revert LiquidityDataMustHaveEmptyCalls();
+        }
 
         // Update allocation tracking with transferred amount
         allocations[strategyId] += assets;
@@ -522,7 +536,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bytes32 strategyId,
         Call[] calldata calls
     ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
-        // SECURITY FIX (security_issues_5nov2025_4.md Issue #1): Prevent balance increases
         // Balance increases (withdrawals) must use executeStrategyWithSlippage() or deallocate()
         // to ensure proper externalDeposits accounting via symmetric reduction
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
@@ -723,8 +736,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit ExternalDepositsSyncedBatch(msg.sender, totalDelta, totalExternalDeposits);
     }
 
-
-
     /// @notice Reduce per-strategy externalDeposits to clear irrecoverable external exposure
     /// @dev SECURITY FIX Issue #4 (FIXING_ISSUES.md): Enables removal of stuck strategies after losses
     /// @param strategyId The strategy to update
@@ -822,6 +833,26 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @inheritdoc IUniversalAdapterEscrow
     function getActiveStrategies() external view returns (bytes32[] memory) {
         return activeStrategies.values();
+    }
+
+    /// @notice Get idle balance for a specific strategy
+    /// @dev Idle balance = assets allocated to strategy but not yet deployed to external protocol
+    ///      This helps agents monitor which strategies need execution.
+    ///      After liquidityData empty calls enforcement, all allocations start as idle
+    ///      until agents manually execute via executeStrategy().
+    /// @param strategyId Strategy to check
+    /// @return idle Amount of idle assets available for execution
+    function getIdleBalance(bytes32 strategyId) external view returns (uint256 idle) {
+        uint256 allocated = allocations[strategyId];
+        uint256 deployed = externalDeposits[strategyId];
+
+        // Idle = allocated but not deployed
+        if (allocated > deployed) {
+            return allocated - deployed;
+        }
+
+        // Safety: if deployed >= allocated, no idle balance
+        return 0;
     }
 
     /// @notice Get idle assets that are not allocated to any strategy

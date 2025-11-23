@@ -75,6 +75,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error EmergencyModeAlreadyEnabled();
     error EmergencyModeNotEnabled();
     error ValuerStillUnavailable();
+    error LiquidityDataMustHaveEmptyCalls();
 
     /* EXTERNAL FUNCTIONS */
 
@@ -169,6 +170,11 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Get all active strategy IDs
     /// @return Array of active strategy IDs
     function getActiveStrategies() external view returns (bytes32[] memory);
+
+    /// @notice Get idle balance for a specific strategy (allocated but not deployed)
+    /// @param strategyId Strategy to check
+    /// @return idle Amount of idle assets available for execution
+    function getIdleBalance(bytes32 strategyId) external view returns (uint256 idle);
 
     /// @notice Check if contract is paused
     /// @return Whether the contract is paused
