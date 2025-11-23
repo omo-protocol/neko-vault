@@ -136,21 +136,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
-        // Decode allocation data
-        (bytes32 strategyId, , bool executeNow, Call[] memory calls) =
+        // Decode allocation data (executeNow and calls are ignored - kept for backward compatibility)
+        (bytes32 strategyId, , , ) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
 
         // Validate strategy exists and is active
         if (!strategies[strategyId].active) revert StrategyNotActive();
-
-        // L-13 FIX: Use full assets amount to prevent locked tokens
-        // Unlike old architecture where only partial amount was used, we utilize 100% of transferred assets
-        // This prevents the issue where assets > amount would leave tokens stuck in adapter
         if (assets == 0) revert InvalidAmount();
-
-        // SIMPLIFIED ALLOCATION: Standard ERC20 tokens only
-        // Fee-on-transfer and rebase tokens are not supported by underlying protocols
-        // (Morpho Vault, Pendle, etc.) so we don't need complex tracking logic
 
         // Update allocation tracking with transferred amount
         allocations[strategyId] += assets;
@@ -158,15 +150,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Add to active strategies if not already present (O(1) operation)
         activeStrategies.add(strategyId);
-
-        // Optionally execute strategy immediately after allocation
-        if (executeNow && calls.length > 0) {
-            _executeMulticall(strategyId, calls, false);
-        }
-
-        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
-        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
-        // after updating the valuer with fresh data.
 
         // Return results
         ids = new bytes32[](1);
