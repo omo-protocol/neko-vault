@@ -197,28 +197,33 @@ contract UniversalAdapterEscrowE2E is Test {
         // Verify limited adapter balance
         assertEq(asset.balanceOf(address(adapter)), 100e6);
 
-        // Create withdrawal calls
+        // LAZY DEALLOCATION: Agent withdraws from protocol FIRST
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
         withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(defiProtocol),
-            data: abi.encodeWithSignature("withdraw(uint256)", 1000e6),
+            data: abi.encodeWithSignature("withdraw(uint256)", 900e6), // Withdraw what's needed (1000 - 100)
             value: 0
         });
 
-        // Deallocate more than adapter balance - should trigger protocol withdrawal
-        bytes memory deallocData = abi.encode(LENDING_STRATEGY, 0, false, withdrawCalls);
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(LENDING_STRATEGY, withdrawCalls, 900e6);
+
+        // Verify agent withdrawal succeeded
+        assertEq(asset.balanceOf(address(adapter)), 1000e6, "Adapter should have 100 + 900 = 1000 after agent withdrawal");
+        assertEq(defiProtocol.balances(address(adapter)), 100e6, "Protocol should have 1000 - 900 = 100 remaining");
+
+        // User deallocates (calls ignored in lazy deallocation)
+        bytes memory deallocData = abi.encode(LENDING_STRATEGY, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 1000e6, bytes4(0), address(0));
 
         assertEq(ids[0], LENDING_STRATEGY);
-        // UPDATED: MockTarget now transfers tokens, so we get the full amount
-        // Security Fix Issue #2: All-or-nothing enforcement means we get full 1000e6 or revert
-        assertEq(change, -int256(1000e6));
-        assertEq(adapter.getAllocation(LENDING_STRATEGY), 0); // 1000 - 1000 = 0 remaining
+        assertEq(change, -int256(1000e6), "Should deallocate full 1000e6");
+        assertEq(adapter.getAllocation(LENDING_STRATEGY), 0, "Allocation should be 0 after full deallocation");
 
-        // Protocol balance should be reduced since withdrawal was executed
-        assertEq(defiProtocol.balances(address(adapter)), 0);
+        // Protocol balance should remain at 100e6 (unchanged by user deallocate)
+        assertEq(defiProtocol.balances(address(adapter)), 100e6, "Protocol balance unchanged by user deallocate");
     }
 
     function testMultiStrategyManagement() public {

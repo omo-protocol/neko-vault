@@ -52,6 +52,8 @@ interface IUniversalAdapterEscrow is IAdapter {
     event AccountingDesyncDetected(bytes32 indexed strategyId, uint256 decrease, uint256 totalAvailable);
     event EmergencyModeEnabled(uint256 timestamp, string reason);
     event EmergencyModeDisabled(uint256 timestamp, uint256 duration);
+    event PartialDeallocate(bytes32 indexed strategyId, uint256 requested, uint256 actual);
+    event StrategyWithdrawn(bytes32 indexed strategyId, uint256 amount, address indexed executor);
 
     // NOTE: ExternalDepositsSynced event removed - proportional syncing across all strategies is unrealistic
     // Use syncExternalDepositsPerStrategy() with ExternalDepositSyncedPerStrategy events instead
@@ -76,6 +78,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error EmergencyModeNotEnabled();
     error ValuerStillUnavailable();
     error LiquidityDataMustHaveEmptyCalls();
+    error InsufficientAdapterBalance(uint256 available, uint256 requested);
 
     /* EXTERNAL FUNCTIONS */
 
@@ -134,6 +137,21 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Execute a pre-configured strategy
     /// @param strategyId The strategy with pre-configured calldata
     function executePreConfigured(bytes32 strategyId) external;
+
+    /// @notice Withdraw assets from external protocol to refill adapter balance
+    /// @dev SECURITY FIX (Unbounded Gas): Agents call this to pull liquidity before user withdrawals
+    ///      - Called by strategy agent or owner (not in user withdrawal path)
+    ///      - No gas limit constraints (can execute complex multicalls)
+    ///      - Updates externalDeposits tracking via valuer sync
+    ///      - Enables lazy deallocation pattern for cross-chain safety
+    /// @param strategyId The strategy to withdraw from
+    /// @param withdrawCalls Array of calls to execute protocol withdrawals
+    /// @param minBalanceIncrease Minimum balance increase required (slippage protection)
+    function withdrawFromStrategy(
+        bytes32 strategyId,
+        Call[] calldata withdrawCalls,
+        uint256 minBalanceIncrease
+    ) external;
 
     /// @notice Sweep tokens that are not the primary asset
     /// @param token Token address to sweep

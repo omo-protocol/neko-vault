@@ -1551,15 +1551,23 @@ contract UniversalAdapterEscrowTest is Test {
         // Test: Request more than adapter balance (200e6 when adapter only has 50e6)
         uint256 deallocateAmount = 200e6;
 
-        // Create withdrawal call to get funds from protocol
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION PATTERN: Agent withdraws from protocol BEFORE user deallocate
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 150e6),
             value: 0
         });
 
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, calls);
+        vm.prank(strategyAgent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 150e6);
+
+        // Verify funds were pulled from protocol by agent
+        assertEq(asset.balanceOf(address(adapter)), 200e6, "Adapter should have received funds from agent withdrawal");
+        assertEq(asset.balanceOf(address(mockProtocol)), 300e6, "Protocol should have 150e6 less");
+
+        // Now user can deallocate (withdrawCalls ignored in new implementation)
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
@@ -1571,10 +1579,6 @@ contract UniversalAdapterEscrowTest is Test {
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
         assertEq(change, -int256(deallocateAmount), "Should report correct change");
-
-        // Verify funds were pulled from protocol
-        assertEq(asset.balanceOf(address(mockProtocol)), 300e6, "Protocol should have 150e6 less");
-        assertEq(asset.balanceOf(address(adapter)), 200e6, "Adapter should have received funds");
     }
 
     function testDeallocateProfitsAccessible() public {

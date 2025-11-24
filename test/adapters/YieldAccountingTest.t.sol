@@ -69,7 +69,7 @@ contract YieldAccountingTest is Test {
         adapter.executeStrategy(_strategyId, calls);
     }
     
-    /// @notice Test 1: Ghost funds prevented
+    /// @notice Test 1: Ghost funds prevented (LAZY DEALLOCATION)
     function testGhostFundsPrevention() public {
         _allocateAndDeposit(strategyId, 1000e18);
         assertEq(adapter.externalDeposits(strategyId), 1000e18);
@@ -85,7 +85,7 @@ contract YieldAccountingTest is Test {
         uint256 adapterBalance = asset.balanceOf(address(adapter));
         asset.burn(address(adapter), adapterBalance - 50e18);
         
-        // Withdraw 500 - must come from protocol
+        // LAZY DEALLOCATION: Agent withdraws 450 from protocol
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
         withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
@@ -96,15 +96,19 @@ contract YieldAccountingTest is Test {
         // After withdrawal, protocol has 1200 - 450 = 750 remaining
         valuer.setValue(strategyId, 750e18);
         
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 450e18);
+        
+        // User deallocates 500
         vm.prank(address(vault));
-        adapter.deallocate(abi.encode(strategyId, 0, false, withdrawCalls), 500e18, bytes4(0), address(0));
+        adapter.deallocate(abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0)), 500e18, bytes4(0), address(0));
         
         // With fix: syncs to 750 (actual remaining)
         // Without fix: would be 550 (1000 - 450), creating 200 ghost tokens
         assertEq(adapter.externalDeposits(strategyId), 750e18, "Should sync to actual value");
     }
     
-    /// @notice Test 2: Yield tracking
+    /// @notice Test 2: Yield tracking (LAZY DEALLOCATION)
     function testYieldTracking() public {
         _allocateAndDeposit(strategyId, 1000e18);
         
@@ -116,9 +120,9 @@ contract YieldAccountingTest is Test {
         uint256 adapterBalance = asset.balanceOf(address(adapter));
         asset.burn(address(adapter), adapterBalance - 10e18);
         
-        // Withdraw 100 - must come from protocol
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws 90 from protocol
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 90e18),
             value: 0
@@ -126,13 +130,17 @@ contract YieldAccountingTest is Test {
         
         valuer.setValue(strategyId, 1110e18); // 1200 - 90
         
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 90e18);
+        
+        // User deallocates 100
         vm.prank(address(vault));
-        adapter.deallocate(abi.encode(strategyId, 0, false, calls), 100e18, bytes4(0), address(0));
+        adapter.deallocate(abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0)), 100e18, bytes4(0), address(0));
         
         assertEq(adapter.externalDeposits(strategyId), 1110e18, "Should include yield");
     }
     
-    /// @notice Test 3: Conservative fallback without valuer
+    /// @notice Test 3: Conservative fallback without valuer (LAZY DEALLOCATION)
     function testConservativeFallback() public {
         // Deploy adapter without valuer
         UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
@@ -169,7 +177,7 @@ contract YieldAccountingTest is Test {
         uint256 adapterBalance = asset.balanceOf(address(noValuerAdapter));
         asset.burn(address(noValuerAdapter), adapterBalance - 50e18);
         
-        // Withdraw 500 - forces protocol withdrawal
+        // LAZY DEALLOCATION: Agent withdraws 450 from protocol
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
         withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
@@ -177,14 +185,18 @@ contract YieldAccountingTest is Test {
             value: 0
         });
         
+        vm.prank(agent);
+        noValuerAdapter.withdrawFromStrategy(sid, withdrawCalls, 450e18);
+        
+        // User deallocates 500
         vm.prank(address(vault));
-        noValuerAdapter.deallocate(abi.encode(sid, 0, false, withdrawCalls), 500e18, bytes4(0), address(0));
+        noValuerAdapter.deallocate(abi.encode(sid, 0, false, new IUniversalAdapterEscrow.Call[](0)), 500e18, bytes4(0), address(0));
         
         // Uses conservative fallback: 1000 - 450 = 550
         assertEq(noValuerAdapter.externalDeposits(sid), 550e18, "Conservative fallback");
     }
     
-    /// @notice Test 4: Sync event emission
+    /// @notice Test 4: Sync event emission (LAZY DEALLOCATION)
     function testSyncEvent() public {
         _allocateAndDeposit(strategyId, 1000e18);
         
@@ -195,9 +207,9 @@ contract YieldAccountingTest is Test {
         uint256 adapterBalance = asset.balanceOf(address(adapter));
         asset.burn(address(adapter), adapterBalance - 10e18);
         
-        // Withdraw from protocol
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws from protocol
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 90e18),
             value: 0
@@ -207,13 +219,17 @@ contract YieldAccountingTest is Test {
         vm.expectEmit(true, false, false, true);
         emit ExternalDepositsValuerSynced(strategyId, 1000e18, 800e18, -200e18);
         
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 90e18);
+        
+        // User deallocates
         vm.prank(address(vault));
-        adapter.deallocate(abi.encode(strategyId, 0, false, calls), 100e18, bytes4(0), address(0));
+        adapter.deallocate(abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0)), 100e18, bytes4(0), address(0));
         
         assertEq(adapter.externalDeposits(strategyId), 800e18);
     }
     
-    /// @notice Test 5: Complete withdrawal with yield
+    /// @notice Test 5: Complete withdrawal with yield (LAZY DEALLOCATION)
     function testCompleteWithdrawal() public {
         _allocateAndDeposit(strategyId, 1000e18);
         
@@ -233,9 +249,9 @@ contract YieldAccountingTest is Test {
         uint256 adapterBalance = asset.balanceOf(address(adapter));
         asset.burn(address(adapter), adapterBalance - 100e18);
         
-        // Withdraw everything from protocol
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws everything from protocol
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 1400e18),
             value: 0
@@ -243,8 +259,12 @@ contract YieldAccountingTest is Test {
         
         valuer.setValue(strategyId, 0);
         
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 1400e18);
+        
+        // User deallocates everything
         vm.prank(address(vault));
-        adapter.deallocate(abi.encode(strategyId, 0, false, calls), 1500e18, bytes4(0), address(0));
+        adapter.deallocate(abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0)), 1500e18, bytes4(0), address(0));
         
         // Should be completely withdrawn
         assertEq(adapter.externalDeposits(strategyId), 0, "Complete withdrawal");

@@ -70,10 +70,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     // Access control
     address public owner;
 
-    // Transient variable used during deallocate to enable early exit when sufficient assets recovered
-    // Set to target withdrawal amount before multicall, reset to 0 after
-    uint256 private withdrawTarget;
-
     // (Cached Valuation Exploitation): Emergency mode state
     // When enabled, applies conservative haircut to all valuations
     // Prevents arbitrage during valuer downtime while maintaining vault liveness
@@ -176,11 +172,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /// @inheritdoc IAdapter
     /// @notice Deallocate assets from a strategy
     /// @param data Encoded data: (bytes32 strategyId, uint256 minAmountOut, bool ignored, Call[] withdrawCalls)
-    ///             - minAmountOut: Minimum amount to receive (slippage protection). Set to 0 to disable check.
+    ///             - minAmountOut: Ignored in new implementation (kept for backward compatibility)
     ///             - ignored: Previously used for executeNow, now ignored for backward compatibility
-    /// @dev SECURITY FIX: minAmountOut parameter enables slippage protection for liquidity adapter withdrawals
-    ///      This prevents MEV sandwich attacks when adapter executes DEX swaps during deallocate.
-    ///      Set minAmountOut = 0 to disable slippage check (backward compatible).
+    ///             - withdrawCalls: Ignored - agents must call withdrawFromStrategy() separately
+    /// @dev SECURITY FIX (Unbounded Gas): Simplified to O(1) gas to prevent LayerZero cross-chain DoS
+    ///      - Gas cost: ~30-50k (constant, safe for cross-chain calls)
+    ///      - No multicalls executed in user withdrawal path
+    ///      - Agents must pre-fill adapter balance via withdrawFromStrategy()
+    ///      - If insufficient balance: reverts (user retries after agent refills)
+    ///      - For forceDeallocate: returns partial amount (whatever is available)
     function deallocate(
         bytes memory data,
         uint256 assets,
@@ -189,30 +189,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ) external override onlyVault notPaused returns (bytes32[] memory ids, int256 change) {
         if (data.length == 0) revert InvalidData();
 
-        // SECURITY FIX Issue #3 (FIXING_ISSUES.md): Prevent OOG from oversized Call[] payload
-        // The operator could accidentally store liquidityData with massive Call[] array
-        // Decoding large arrays can OOG even when calls aren't needed
-        // Limit to reasonable size (~100KB) to preserve withdrawal availability
-        if (data.length > 100000) revert InvalidData(); // ~100KB max
-
-        // Decode deallocation data with slippage protection parameter
-        (bytes32 strategyId, uint256 minAmountOut, , Call[] memory withdrawCalls) =
-            abi.decode(data, (bytes32, uint256, bool, Call[]));
-
-        // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Cap withdraw calls to bound gas
-        // Prevents DoS from excessively long multicalls that can OOG
-        if (withdrawCalls.length > 64) revert InvalidData();
+        // Decode deallocation data (withdrawCalls are ignored but decoded for backward compatibility)
+        (bytes32 strategyId, , , ) = abi.decode(data, (bytes32, uint256, bool, Call[]));
 
         // IMPORTANT: No allocation validation here - users should be able to withdraw
         // idle assets, profits, or do emergency withdrawals even from strategies with 0 allocation
 
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
         uint256 actualAmount;
-        bool withdrawalsExecuted = false; // Track if we actually executed withdrawals
 
-        // SECURITY FIX Issue #3: For forceDeallocate, ignore calls but use same data format
+        // SECURITY FIX: For forceDeallocate, allow partial withdrawals
         if (caller == FORCE_DEALLOCATE_SELECTOR) {
-            // SECURITY FIX Issue #3: Only allow force deallocate up to slack amount
+            // Only allow force deallocate up to slack amount
             // Slack = allocations - externalDeposits (assets in adapter, not in external protocols)
             // This prevents donation-assisted force-deallocate attacks
             uint256 slack = allocations[strategyId] > externalDeposits[strategyId]
@@ -223,132 +211,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 revert InvalidAmount();
             }
 
-            // Only allow if sufficient balance is available in adapter
+            // Force deallocate returns whatever balance is available (partial fulfillment)
             // Vault has approval to pull tokens directly via transferFrom
             if (assets > adapterBalance) {
-                revert InvalidAmount();
-            }
-            actualAmount = assets;
-            // No external calls executed - withdrawCalls are ignored for security
-        } else {
-            // Normal deallocate: Handle three balance scenarios explicitly
-
-            if (assets <= adapterBalance) {
-                // Scenario 1: Balance covers entire withdrawal
-                actualAmount = assets;
-                // No external calls needed - we have sufficient balance
-
+                // Return whatever is available (partial)
+                actualAmount = adapterBalance;
+                emit PartialDeallocate(strategyId, assets, actualAmount);
             } else {
-                // Scenario 2: Insufficient balance - need to withdraw from protocol
-                // SECURITY FIX Issues #1 & #2: Removed restrictive valuer cap
-
-                // SECURITY FIX Issue #7: Try-catch multicall to prevent revert-on-failure DoS
-                // If protocol withdrawal fails (no liquidity, paused, etc.), we can still
-                // return whatever balance we have instead of reverting entire deallocate
-                if (withdrawCalls.length > 0) {
-                    withdrawalsExecuted = true; // Mark that we executed withdrawals
-
-                    // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Set early-exit target
-                    // Enables _executeMulticall to break early when sufficient assets recovered
-                    withdrawTarget = assets;
-
-                    try this.externalExecuteMulticall(strategyId, withdrawCalls) {
-                        // Success - balance increased from protocol withdrawal
-                    } catch {
-                        // Failure - protocol couldn't provide liquidity
-                        // Continue with current balance (partial fulfillment)
-                        // Vault's transferFrom will naturally limit to available balance
-                    }
-
-                    // SECURITY FIX Issue #1: Reset target regardless of success/failure
-                    withdrawTarget = 0;
-                }
-
-                uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-
-                // SECURITY FIX Issue #2: Enforce all-or-nothing
-                // If still insufficient after attempted withdrawals, revert
-                // This ensures VaultV2 always pulls exactly what we report
-                if (balanceAfter < assets) {
-                    revert InvalidAmount();
-                }
-
-                // Ensure VaultV2 pulls exactly what we report as change
                 actualAmount = assets;
-
-                // NOTE: Removed valuer cap (was Issue #2) - physical availability is the only limit
-                // If we don't have enough, vault's transferFrom will revert with insufficient balance
-
-                // SECURITY FIX: Valuer-based synchronization after withdrawal
-                // Sync externalDeposits to actual remaining value in protocol using valuer
-                // This prevents ghost funds by accurately tracking principal + yield
-                //
-                // Benefits over old symmetric reduction:
-                // 1. Handles yield correctly (increase in value tracked)
-                // 2. Self-correcting (syncs to actual on-chain value)
-                // 3. Protocol-agnostic (no protocol-specific queries needed)
-                // 4. Uses existing valuer infrastructure
-                //
-                // Note: balanceAfter already defined at line 262
-                if (balanceAfter > adapterBalance) {
-                    uint256 withdrawnAmount = balanceAfter - adapterBalance;
-                    if (withdrawnAmount > assets) withdrawnAmount = assets;
-
-                    // Sync externalDeposits to actual protocol value via valuer
-                    _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, assets);
-                }
             }
-        }
-
-        // SECURITY FIX (security_issues_5nov2025_7.md Issue #1): Effective slippage protection
-        // Enforce minimum balance INCREASE achieved by withdrawCalls (deltaIncrease) to protect against MEV/slippage
-        //
-        // VULNERABILITY (OLD APPROACH):
-        // - Checked total balance >= minAmountOut (ineffective)
-        // - Constrained by minAmountOut <= assets (made it redundant)
-        // - Didn't measure actual delta from withdrawCalls
-        // - Allowed MEV bots to sandwich DEX swaps while transaction still succeeds
-        // - Loss absorbed by remaining depositors as reduced pool value
-        //
-        // NEW APPROACH:
-        // - Measure actual delta increase from withdrawCalls execution
-        // - Compare delta to minAmountOut (slippage tolerance)
-        // - Only enforce when withdrawals were actually executed
-        // - Protects against silent principal loss from poor execution prices
-        //
-        // Only enforce when:
-        // 1. Not force deallocate (force ignores calls anyway)
-        // 2. minAmountOut > 0 (slippage protection requested)
-        // 3. We actually executed withdrawCalls (withdrawalsExecuted == true)
-        //
-        if (
-            caller != FORCE_DEALLOCATE_SELECTOR &&
-            minAmountOut > 0 &&
-            withdrawalsExecuted
-        ) {
-            // Measure delta increase from before withdrawCalls (adapterBalance) to current balance
-            uint256 balanceAfterCheck = IERC20(asset).balanceOf(address(this));
-            uint256 deltaIncrease = balanceAfterCheck > adapterBalance
-                ? balanceAfterCheck - adapterBalance
-                : 0;
-
-            // Enforce minimum delta increase to protect against MEV/slippage
-            // This ensures the withdrawCalls achieved acceptable execution price
-            if (deltaIncrease < minAmountOut) {
-                revert SlippageTooHigh();
+        } else {
+            // Normal deallocate: All-or-nothing (revert if insufficient)
+            if (assets > adapterBalance) {
+                // LAZY DEALLOCATION: Insufficient balance - user should retry after agent refills
+                // Agent monitors getIdleBalance() and calls withdrawFromStrategy() to refill
+                revert InsufficientAdapterBalance(adapterBalance, assets);
             }
-        }
 
-        // SECURITY FIX (security_issues_5nov2025_6.md Issue #1): Forward surplus to vault
-        // If withdrawals returned more than requested assets, forward the surplus immediately.
-        // This prevents externalDeposits from staying overstated and underpricing totalAssets.
-        // Done after slippage checks so availability checks use the full balance.
-        // Only forward if we actually executed withdrawals (not in Scenario 1 where balance covers all).
-        if (caller != FORCE_DEALLOCATE_SELECTOR && withdrawalsExecuted) {
-            uint256 _bal = IERC20(asset).balanceOf(address(this));
-            if (_bal > assets) {
-                SafeERC20Lib.safeTransfer(asset, parentVault, _bal - assets);
-            }
+            actualAmount = assets;
         }
 
         // Update allocation - handle case where actualAmount exceeds tracked allocation
@@ -358,7 +238,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         allocations[strategyId] -= allocationDecrease;
         totalAllocations -= allocationDecrease;
 
-        // SECURITY FIX Issue #3: Remove from active strategies if BOTH allocation AND externalDeposits are zero
+        // Remove from active strategies if BOTH allocation AND externalDeposits are zero
         // This prevents valuer from excluding strategies that still have external deposits
         if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
             _removeFromActiveStrategies(strategyId);
@@ -366,10 +246,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         // Transfer assets back to vault
         // The vault will pull the assets using transferFrom
-
-        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
-        // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
-        // after updating the valuer with fresh data.
 
         // Return results
         ids = new bytes32[](1);
@@ -379,14 +255,47 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }
 
-    /// @notice External wrapper for _executeMulticall to enable try-catch in deallocate
-    /// @dev SECURITY FIX Issue #7: Allows deallocate to gracefully handle protocol withdrawal failures
-    ///      This function is external to enable try-catch, but can only be called by this contract
-    /// @param strategyId The strategy identifier
-    /// @param calls Array of calls to execute
-    function externalExecuteMulticall(bytes32 strategyId, Call[] memory calls) external {
-        require(msg.sender == address(this), "Only self");
-        _executeMulticall(strategyId, calls, false);
+    /// @notice Withdraw assets from external protocol to refill adapter balance
+    /// @dev SECURITY FIX (Unbounded Gas): Agents call this to pull liquidity before user withdrawals
+    ///      - Called by strategy agent or owner (not in user withdrawal path)
+    ///      - No gas limit constraints (can execute complex multicalls)
+    ///      - Updates externalDeposits tracking via valuer sync
+    ///      - Enables lazy deallocation pattern for cross-chain safety
+    /// @param strategyId The strategy to withdraw from
+    /// @param withdrawCalls Array of calls to execute protocol withdrawals
+    /// @param minBalanceIncrease Minimum balance increase required (slippage protection)
+    function withdrawFromStrategy(
+        bytes32 strategyId,
+        Call[] calldata withdrawCalls,
+        uint256 minBalanceIncrease
+    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        if (withdrawCalls.length == 0) revert InvalidData();
+        if (withdrawCalls.length > 64) revert InvalidData(); // Reasonable limit
+
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
+        // Execute withdrawal calls
+        _executeMulticall(strategyId, withdrawCalls, false);
+
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+
+        // Ensure balance increased (withdrawal successful)
+        if (balanceAfter <= balanceBefore) {
+            revert InvalidAmount();
+        }
+
+        uint256 withdrawnAmount = balanceAfter - balanceBefore;
+
+        // Enforce minimum balance increase (slippage protection)
+        if (withdrawnAmount < minBalanceIncrease) {
+            revert SlippageTooHigh();
+        }
+
+        // Sync externalDeposits to actual protocol value via valuer
+        // This prevents ghost funds by accurately tracking principal + yield
+        _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, minBalanceIncrease);
+
+        emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
     }
 
     /// @inheritdoc IAdapter
@@ -973,20 +882,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // Execute the call
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
             if (!success) {
-                // Best-effort during deallocate: when withdrawTarget is set, skip failed subcalls
-                // to allow subsequent calls to recover sufficient assets. For other flows,
-                // preserve strict revert-on-failure semantics.
-                if (withdrawTarget == 0) revert CallFailed(i, returnData);
-            }
-
-            // SECURITY FIX Issue #1 (security_issues_5nov2025.md): Early exit optimization
-            // If withdrawTarget is set (deallocate flow) and we've recovered enough assets, break early
-            // This prevents DoS from executing expensive remaining calls when already sufficient
-            if (
-                withdrawTarget != 0 &&
-                IERC20(asset).balanceOf(address(this)) >= withdrawTarget
-            ) {
-                break;
+                revert CallFailed(i, returnData);
             }
         }
 
@@ -1320,8 +1216,4 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         emit EmergencyModeDisabled(block.timestamp, duration);
     }
-
-    /// @notice Receive ETH
-    /// @dev COMMENTED OUT FOR NOW AS WE DON'T ACCEPT ETH
-    // receive() external payable {}
 }
