@@ -633,9 +633,22 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (success && data.length >= 32) {
             uint256 valuerValue = abi.decode(data, (uint256));
 
-            // SAFETY CHECK: New minimum shouldn't be too far below valuer value
-            // Allow up to 20% below valuer for safety margin (more conservative than 10% tolerance)
-            require(valuerValue >= (newMinKnown * 8000) / 10000, "New value too low vs valuer");
+            // WARNING-ONLY CHECK: Emit event if deviation exceeds 20% but don't block
+            // Rationale: During emergencies (when sync is most needed), valuer may be stale/broken
+            //            Owner must be able to fix accounting even with large deviations
+            //            Off-chain monitoring can alert on suspicious syncs
+            uint256 minExpected = (newMinKnown * 8000) / 10000; // 80% threshold (20% tolerance)
+            if (valuerValue < minExpected) {
+                uint256 deviation = newMinKnown - valuerValue;
+                uint256 deviationBps = (deviation * 10000) / newMinKnown; // basis points
+                
+                emit SyncDeviationWarning(
+                    newMinKnown,
+                    valuerValue,
+                    deviation,
+                    deviationBps
+                );
+            }
         }
 
         // SECURITY FIX: Invalidate stale cache (removed _updateCachedValuation() call)

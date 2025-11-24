@@ -45,6 +45,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     event ExternalDepositsReduced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
     event ExternalDepositSyncedPerStrategy(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
     event ExternalDepositsSyncedBatch(address indexed syncer, uint256 totalDelta, uint256 newTotalValue);
+    event SyncDeviationWarning(uint256 newMinKnown, uint256 valuerValue, uint256 deviation, uint256 deviationBps);
     event CachedValuationRefreshed(uint256 newValue, uint256 timestamp);
     event ExternalDepositsValuerSynced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, int256 delta);
     event YieldAccrued(bytes32 indexed strategyId, uint256 yieldAmount);
