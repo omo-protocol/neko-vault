@@ -471,7 +471,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
         if (balanceAfter > balanceBefore) revert InvalidAmount();
 
-        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
@@ -736,7 +735,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
         }
 
-        // SECURITY FIX: Invalidate stale cache (removed _updateCachedValuation() call)
         // Keepers should call refreshCachedValuation() after updating valuer with fresh data
         cachedValuationTimestamp = 0;
 
@@ -770,7 +768,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _removeFromActiveStrategies(strategyId);
         }
 
-        // SECURITY FIX: Removed _updateCachedValuation() call to prevent cache poisoning
         // from stale off-chain valuer data. Keepers should call refreshCachedValuation()
         // after updating the valuer with fresh data.
 
@@ -1219,49 +1216,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             // Fallback to allocation if valuer call fails
             value = allocations[strategyId];
         }
-    }
-
-    /// @notice Update cached valuation from fresh valuer call
-    /// @dev Called by state-modifying functions to refresh cache for time-bounded fallback
-    function _updateCachedValuation() internal {
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-
-        // Donation-resistant calculation (same as realAssets)
-        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
-            ? totalAllocations - totalExternalDeposits
-            : 0;
-
-        uint256 excessIdle = balance > allocatedInAdapter
-            ? balance - allocatedInAdapter
-            : 0;
-
-        // Use single aggregated strategy ID
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-
-        // Try to get fresh valuation
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
-            abi.encodeWithSignature("getValue(bytes32)", totalId)
-        );
-
-        if (success && data.length >= 32) {
-            uint256 totalValue = abi.decode(data, (uint256));
-
-            // Semantic-agnostic adjustment
-            // Same logic as realAssets() to handle both valuer semantic interpretations
-            uint256 totalValueAdj;
-            if (totalValue >= excessIdle) {
-                totalValueAdj = totalValue - excessIdle;
-            } else {
-                totalValueAdj = totalValue + allocatedInAdapter;
-            }
-
-            if (totalValueAdj > 0) {
-                // Update cache with fresh valuation
-                cachedValuation = totalValueAdj;
-                cachedValuationTimestamp = block.timestamp;
-            }
-        }
-        // If valuer call fails, keep existing cache (don't update)
     }
 
     /// @inheritdoc IUniversalAdapterEscrow
