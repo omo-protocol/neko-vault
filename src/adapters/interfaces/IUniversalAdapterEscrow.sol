@@ -168,6 +168,11 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @param newValues Array of new external deposit values for each strategy
     function syncExternalDepositsPerStrategy(bytes32[] calldata strategyIds, uint256[] calldata newValues) external;
 
+    /// @notice Manually sync strategy with valuer for drift correction (owner-only)
+    /// @dev Simple manual sync when drift accumulates from fees/slippage/yield
+    /// @param strategyId Strategy to sync with valuer
+    function syncStrategyWithValuer(bytes32 strategyId) external;
+
     /* VIEW FUNCTIONS */
 
     /// @notice Get strategy configuration

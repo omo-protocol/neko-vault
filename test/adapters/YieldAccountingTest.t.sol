@@ -99,12 +99,18 @@ contract YieldAccountingTest is Test {
         vm.prank(agent);
         adapter.withdrawFromStrategy(strategyId, withdrawCalls, 450e18);
         
+        // SOLUTION 4 (Simplified): Immediate symmetric reduction applied
+        // externalDeposits now = 1000 - 450 = 550 (symmetric reduction)
+        assertEq(adapter.externalDeposits(strategyId), 550e18, "Immediate symmetric reduction");
+        
+        // Owner manually syncs with valuer to capture yield
+        adapter.syncStrategyWithValuer(strategyId);
+        
         // User deallocates 500
         vm.prank(address(vault));
         adapter.deallocate(abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0)), 500e18, bytes4(0), address(0));
         
-        // With fix: syncs to 750 (actual remaining)
-        // Without fix: would be 550 (1000 - 450), creating 200 ghost tokens
+        // After manual sync: now shows 750 (actual remaining with yield)
         assertEq(adapter.externalDeposits(strategyId), 750e18, "Should sync to actual value");
     }
     
@@ -132,6 +138,12 @@ contract YieldAccountingTest is Test {
         
         vm.prank(agent);
         adapter.withdrawFromStrategy(strategyId, withdrawCalls, 90e18);
+        
+        // SOLUTION 4 (Simplified): Immediate symmetric reduction gives 1000 - 90 = 910
+        assertEq(adapter.externalDeposits(strategyId), 910e18, "Immediate symmetric reduction");
+        
+        // Owner manually syncs with valuer to capture yield
+        adapter.syncStrategyWithValuer(strategyId);
         
         // User deallocates 100
         vm.prank(address(vault));
@@ -215,12 +227,16 @@ contract YieldAccountingTest is Test {
             value: 0
         });
         
-        // Expect sync event: 1000 -> 800, delta = -200e18
-        vm.expectEmit(true, false, false, true);
-        emit ExternalDepositsValuerSynced(strategyId, 1000e18, 800e18, -200e18);
-        
         vm.prank(agent);
         adapter.withdrawFromStrategy(strategyId, withdrawCalls, 90e18);
+        
+        // SOLUTION 4 (Simplified): Immediate symmetric reduction gives 1000 - 90 = 910
+        assertEq(adapter.externalDeposits(strategyId), 910e18, "After symmetric reduction");
+        
+        // Owner manually syncs with valuer - expect sync event: 910 -> 800, delta = -110e18
+        vm.expectEmit(true, false, false, true);
+        emit ExternalDepositsValuerSynced(strategyId, 910e18, 800e18, -110e18);
+        adapter.syncStrategyWithValuer(strategyId);
         
         // User deallocates
         vm.prank(address(vault));

@@ -291,9 +291,26 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             revert SlippageTooHigh();
         }
 
-        // Sync externalDeposits to actual protocol value via valuer
-        // This prevents ghost funds by accurately tracking principal + yield
-        _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, minBalanceIncrease);
+        // Immediate symmetric reduction prevents TOCTOU
+        // Directly reduce externalDeposits by withdrawn amount
+        // Owner can manually sync with valuer later if drift correction needed
+        uint256 oldExtDeposits = externalDeposits[strategyId];
+        uint256 reduction = withdrawnAmount;
+
+        // Cap reduction to prevent underflow (handle desync cases)
+        if (reduction > oldExtDeposits) {
+            reduction = oldExtDeposits;
+        }
+        if (reduction > totalExternalDeposits) {
+            reduction = totalExternalDeposits;
+        }
+
+        if (reduction > 0) {
+            externalDeposits[strategyId] = oldExtDeposits - reduction;
+            totalExternalDeposits -= reduction;
+
+            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+        }
 
         emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
     }
@@ -480,8 +497,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 uint256 withdrawnAmount = balanceAfter - balanceBefore;
                 if (withdrawnAmount > minBalanceIncrease) withdrawnAmount = minBalanceIncrease;
 
-                // Sync externalDeposits to actual protocol value via valuer
-                _syncExternalDepositsWithValuer(strategyId, withdrawnAmount, minBalanceIncrease);
+                // Immediate symmetric reduction
+                uint256 oldExtDeposits = externalDeposits[strategyId];
+                uint256 reduction = withdrawnAmount;
+
+                // Cap reduction to prevent underflow (handle desync cases)
+                if (reduction > oldExtDeposits) {
+                    reduction = oldExtDeposits;
+                }
+                if (reduction > totalExternalDeposits) {
+                    reduction = totalExternalDeposits;
+                }
+
+                if (reduction > 0) {
+                    externalDeposits[strategyId] = oldExtDeposits - reduction;
+                    totalExternalDeposits -= reduction;
+
+                    emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+                }
             }
 
             if (balanceAfter > balanceBefore + minBalanceIncrease) {
@@ -556,6 +589,57 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         owner = newOwner;
     }
 
+    /// @notice Manually sync strategy with valuer for drift correction (owner-only)
+    /// @dev Simple manual sync when needed
+    ///      - Owner calls this periodically if drift accumulates from fees/slippage/yield
+    ///      - Much simpler than automated keeper system
+    ///      - Immediate symmetric reduction handles 99% of accuracy needs
+    /// @param strategyId Strategy to sync with valuer
+    function syncStrategyWithValuer(bytes32 strategyId) external onlyOwner {
+        if (!strategies[strategyId].active) revert StrategyNotActive();
+
+        // Query valuer for actual current value
+        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+            abi.encodeWithSignature("getValue(bytes32)", strategyId)
+        );
+
+        if (!success || data.length < 32) {
+            revert ValuationUnavailable();
+        }
+
+        uint256 valuerValue = abi.decode(data, (uint256));
+        uint256 trackedValue = externalDeposits[strategyId];
+
+        // Sync to valuer value (corrects drift)
+        if (valuerValue != trackedValue) {
+            int256 delta;
+
+            if (valuerValue > trackedValue) {
+                // Positive drift: yield accrued or fees were lower than expected
+                uint256 increase = valuerValue - trackedValue;
+                externalDeposits[strategyId] = valuerValue;
+                totalExternalDeposits += increase;
+                delta = int256(increase);
+
+                emit YieldAccrued(strategyId, increase);
+            } else {
+                // Negative drift: fees/slippage were higher than immediate reduction
+                uint256 decrease = trackedValue - valuerValue;
+                externalDeposits[strategyId] = valuerValue;
+
+                if (decrease > totalExternalDeposits) {
+                    totalExternalDeposits = 0;
+                } else {
+                    totalExternalDeposits -= decrease;
+                }
+
+                delta = -int256(decrease);
+            }
+
+            emit ExternalDepositsValuerSynced(strategyId, trackedValue, valuerValue, delta);
+        }
+    }
+
     /// @inheritdoc IUniversalAdapterEscrow
     /// @notice Manually adjust totalExternalDeposits to remove accounting drift
     /// @dev
@@ -581,7 +665,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     ///      - During pause, realAssets() still returns (balance + totalExternalDeposits)
     ///      - If totalExternalDeposits has ghost, it causes persistent overpricing
     ///      - Owner needs ability to fix accounting during pause for accurate emergency operations
-    ///      - forceDeallocate and other emergency functions rely on accurate realAssets()
+    ///      - force
+    /// Deallocate and other emergency functions rely on accurate realAssets()
     ///
     ///      WORKFLOW:
     ///      1. Monitor getGhostAmount() for significant ghosts
@@ -641,7 +726,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (valuerValue < minExpected) {
                 uint256 deviation = newMinKnown - valuerValue;
                 uint256 deviationBps = (deviation * 10000) / newMinKnown; // basis points
-                
+
                 emit SyncDeviationWarning(
                     newMinKnown,
                     valuerValue,
@@ -659,7 +744,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /// @notice Reduce per-strategy externalDeposits to clear irrecoverable external exposure
-    /// @dev SECURITY FIX Issue #4 (FIXING_ISSUES.md): Enables removal of stuck strategies after losses
+    /// @dev Enables removal of stuck strategies after losses
     /// @param strategyId The strategy to update
     /// @param newPerStrategy The new per-strategy externalDeposits value (must be <= current)
     function reduceExternalDeposits(bytes32 strategyId, uint256 newPerStrategy) external onlyOwner {
@@ -948,7 +1033,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             externalDeposits[strategyId] += deposited;
             totalExternalDeposits += deposited;
         }
-        // SECURITY FIX Issue #2 (security_issues_5nov2025.md): Do NOT adjust on balance increases
+        // Do NOT adjust on balance increases
         // Previous code treated balance increases as withdrawals and reduced totalExternalDeposits
         // This enabled two attack vectors:
         //   1. Double counting: Stale valuer includes strategy value + increased balance counted twice
@@ -960,7 +1045,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         // If balanceAfter == balanceBefore: No accounting update
         // NOTE: This misses cases where deposit+withdrawal happened in same multicall
 
-        // SECURITY FIX Issue #3 (security_issues_5nov2025.md): Maintain activeStrategies invariant
+        // Maintain activeStrategies invariant
         // Remove strategy when BOTH allocations and externalDeposits are zero
         // This prevents stale entries that cause:
         //   - Valuer mispricing (includes stale strategy values)
