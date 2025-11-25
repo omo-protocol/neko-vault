@@ -722,8 +722,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             //            Owner must be able to fix accounting even with large deviations
             //            Off-chain monitoring can alert on suspicious syncs
             uint256 minExpected = (newMinKnown * 8000) / 10000; // 80% threshold (20% tolerance)
-            if (valuerValue < minExpected) {
-                uint256 deviation = newMinKnown - valuerValue;
+            uint256 maxExpected = (newMinKnown * 12000) / 10000; // 120% threshold (20% tolerance up)
+            
+            // Check if deviation is too large (either too low OR too high)
+            if (valuerValue < minExpected || valuerValue > maxExpected) {
+                // Calculate absolute deviation safely
+                uint256 deviation;
+                if (valuerValue > newMinKnown) {
+                    deviation = valuerValue - newMinKnown;
+                } else {
+                    deviation = newMinKnown - valuerValue;
+                }
+                
                 uint256 deviationBps = (deviation * 10000) / newMinKnown; // basis points
 
                 emit SyncDeviationWarning(
