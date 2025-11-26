@@ -135,10 +135,6 @@ interface IUniversalAdapterEscrow is IAdapter {
         Call[] calldata calls
     ) external;
 
-    /// @notice Execute a pre-configured strategy
-    /// @param strategyId The strategy with pre-configured calldata
-    function executePreConfigured(bytes32 strategyId) external;
-
     /// @notice Withdraw assets from external protocol to refill adapter balance
     /// @dev SECURITY FIX (Unbounded Gas): Agents call this to pull liquidity before user withdrawals
     ///      - Called by strategy agent or owner (not in user withdrawal path)
@@ -216,12 +212,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return The valuer address
     function valuer() external view returns (address);
 
-    /// @notice Check if using offchain valuer
-    /// @return Whether using offchain valuer
-    function useOffchainValuer() external view returns (bool);
-
     /// @notice Get idle assets that are not allocated to any strategy
-    /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
     /// @return idleAssets Amount of assets sitting idle in the adapter
     function getIdleAssets() external view returns (uint256 idleAssets);
 

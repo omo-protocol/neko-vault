@@ -84,7 +84,6 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(adapter.parentVault(), address(vault));
         assertEq(adapter.asset(), address(asset));
         assertEq(adapter.valuer(), address(valuer));
-        assertEq(adapter.useOffchainValuer(), false);
         assertEq(adapter.owner(), owner);
         assertEq(adapter.paused(), false);
     }
@@ -601,7 +600,6 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Execute pre-configured
         vm.prank(agent);
-        adapter.executePreConfigured(STRATEGY_1);
     }
 
     /* OWNERSHIP TESTS */

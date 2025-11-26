@@ -321,53 +321,6 @@ contract UniversalAdapterEscrowE2E is Test {
         assertEq(defiProtocol.balances(address(adapter)), 1000e6);
     }
 
-    function testPreConfiguredStrategy() public {
-        // Create pre-configured calls (deposit 100e6 which is <10% of 5000e6 balance)
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](2);
-        calls[0] = IUniversalAdapterEscrow.Call({
-            target: address(asset),
-            data: abi.encodeWithSignature("approve(address,uint256)", address(defiProtocol), 100e6),
-            value: 0
-        });
-        calls[1] = IUniversalAdapterEscrow.Call({
-            target: address(defiProtocol),
-            data: abi.encodeWithSignature("deposit(uint256)", 100e6),
-            value: 0
-        });
-
-        bytes memory preConfigData = abi.encode(calls);
-
-        // Setup strategy with pre-configured data
-        vm.startPrank(owner);
-        adapter.setStrategy(YIELD_STRATEGY, agent, preConfigData, 10000e6);
-        adapter.updateWhitelist(address(asset), bytes4(0), true, 10000e6);
-        adapter.updateWhitelist(address(defiProtocol), bytes4(0), true, 10000e6);
-        vm.stopPrank();
-
-        // Allocate
-        bytes memory allocData = abi.encode(
-            YIELD_STRATEGY,
-            1000e6,
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
-
-        asset.mint(address(vault), 1000e6);
-        vm.startPrank(address(vault));
-        asset.transfer(address(adapter), 1000e6);
-        adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
-        vm.stopPrank();
-
-        // Fund for execution - give more balance to avoid circuit breaker (100/5000 = 2%)
-        asset.mint(address(adapter), 4000e6);
-
-        // Execute pre-configured strategy
-        vm.prank(agent);
-        adapter.executePreConfigured(YIELD_STRATEGY);
-
-        assertEq(defiProtocol.balances(address(adapter)), 100e6);
-    }
-
     function testSweepRewards() public {
         // Simulate rewards accumulation
         rewardToken.mint(address(adapter), 1000e18);
