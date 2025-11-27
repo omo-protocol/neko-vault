@@ -501,7 +501,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     deviation = newMinKnown - valuerValue;
                 }
 
-                uint256 deviationBps = (deviation * 10000) / newMinKnown; // basis points
+                uint256 deviationBps = newMinKnown == 0 ? 0 : (deviation * 10000) / newMinKnown; // basis points
 
                 emit SyncDeviationWarning(
                     newMinKnown,
