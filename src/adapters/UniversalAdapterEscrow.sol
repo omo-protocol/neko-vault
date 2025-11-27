@@ -190,11 +190,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 return 0;  // Legitimate 0 value when nothing allocated
             }
             if (emergencyMode) {
-                if (cachedValuationTimestamp > 0 &&
-                    block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
-                    return cachedValuation * (10000 - EMERGENCY_HAIRCUT) / 10000;
-                }
-
                 return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
             }
 
@@ -204,11 +199,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             return 0;
         }
         if (emergencyMode) {
-            if (cachedValuationTimestamp > 0 &&
-                block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
-                return cachedValuation * (10000 - EMERGENCY_HAIRCUT) / 10000;
-            }
-
             return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
         }
 
