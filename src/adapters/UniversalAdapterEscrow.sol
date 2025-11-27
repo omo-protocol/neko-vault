@@ -11,7 +11,6 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
 contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     using SafeERC20Lib for IERC20;
     using EnumerableSet for EnumerableSet.Bytes32Set;
-
     /* CONSTANTS */
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
@@ -19,12 +18,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     uint256 private constant VALUER_GAS_STIPEND = 200000;
     uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
-
     /* IMMUTABLES */
     address public immutable parentVault;
     address public immutable asset;
     address public immutable valuer;
-
     /* STORAGE */
     mapping(bytes32 => StrategyConfig) public strategies;
     mapping(bytes32 => uint256) public allocations;
@@ -77,7 +74,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* EXTERNAL FUNCTIONS */
-
     function allocate(
         bytes memory data,
         uint256 assets,
@@ -158,53 +154,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }
 
-    /// @notice Withdraw assets from external protocol to refill adapter balance
-    /// @param strategyId The strategy to withdraw from
-    /// @param withdrawCalls Array of calls to execute protocol withdrawals
-    /// @param minBalanceIncrease Minimum balance increase required (slippage protection)
-    function withdrawFromStrategy(
-        bytes32 strategyId,
-        Call[] calldata withdrawCalls,
-        uint256 minBalanceIncrease
-    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
-        if (withdrawCalls.length == 0) revert InvalidData();
-        if (withdrawCalls.length > 64) revert InvalidData(); // Reasonable limit
-
-        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
-
-        _executeMulticall(strategyId, withdrawCalls, false);
-
-        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-
-        if (balanceAfter <= balanceBefore) {
-            revert InvalidAmount();
-        }
-
-        uint256 withdrawnAmount = balanceAfter - balanceBefore;
-
-        if (withdrawnAmount < minBalanceIncrease) {
-            revert SlippageTooHigh();
-        }
-
-        uint256 oldExtDeposits = externalDeposits[strategyId];
-        uint256 reduction = withdrawnAmount;
-
-        if (reduction > oldExtDeposits) {
-            reduction = oldExtDeposits;
-        }
-        if (reduction > totalExternalDeposits) {
-            reduction = totalExternalDeposits;
-        }
-        if (reduction > 0) {
-            externalDeposits[strategyId] = oldExtDeposits - reduction;
-            totalExternalDeposits -= reduction;
-
-            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
-        }
-
-        emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
-    }
-
     function realAssets() external view override returns (uint256 assets) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
 
@@ -233,7 +182,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
             if (totalValueAdj > 0) {
                 if (emergencyMode) {
-                    // Apply 5% conservative haircut during emergency mode
                     return totalValueAdj * (10000 - EMERGENCY_HAIRCUT) / 10000;
                 }
                 return totalValueAdj;
@@ -268,7 +216,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
-
     function setStrategy(
         bytes32 strategyId,
         address agent,
@@ -313,7 +260,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY EXECUTION */
-
     function executeStrategy(
         bytes32 strategyId,
         Call[] calldata calls
@@ -396,8 +342,54 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit StrategyExecuted(strategyId, msg.sender);
     }
 
-    /* EXTERNAL FUNCTIONS - ADMIN */
+    /// @notice Withdraw assets from external protocol to refill adapter balance
+    /// @param strategyId The strategy to withdraw from
+    /// @param withdrawCalls Array of calls to execute protocol withdrawals
+    /// @param minBalanceIncrease Minimum balance increase required (slippage protection)
+    function withdrawFromStrategy(
+        bytes32 strategyId,
+        Call[] calldata withdrawCalls,
+        uint256 minBalanceIncrease
+    ) external onlyStrategyAgentOrOwner(strategyId) notPaused {
+        if (withdrawCalls.length == 0) revert InvalidData();
+        if (withdrawCalls.length > 64) revert InvalidData(); // Reasonable limit
 
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
+        _executeMulticall(strategyId, withdrawCalls, false);
+
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+
+        if (balanceAfter <= balanceBefore) {
+            revert InvalidAmount();
+        }
+
+        uint256 withdrawnAmount = balanceAfter - balanceBefore;
+
+        if (withdrawnAmount < minBalanceIncrease) {
+            revert SlippageTooHigh();
+        }
+
+        uint256 oldExtDeposits = externalDeposits[strategyId];
+        uint256 reduction = withdrawnAmount;
+
+        if (reduction > oldExtDeposits) {
+            reduction = oldExtDeposits;
+        }
+        if (reduction > totalExternalDeposits) {
+            reduction = totalExternalDeposits;
+        }
+        if (reduction > 0) {
+            externalDeposits[strategyId] = oldExtDeposits - reduction;
+            totalExternalDeposits -= reduction;
+
+            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+        }
+
+        emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
+    }
+
+    /* EXTERNAL FUNCTIONS - ADMIN */
     function sweep(address token, address recipient) external onlyOwner {
         if (token == asset) revert CannotSweepAsset();
 
@@ -591,7 +583,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* VIEW FUNCTIONS */
-
     function getStrategy(bytes32 strategyId) external view returns (StrategyConfig memory) {
         return strategies[strategyId];
     }
@@ -666,7 +657,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* INTERNAL FUNCTIONS */
-
     function _executeMulticall(bytes32 strategyId, Call[] memory calls, bool bypassCircuitBreaker) internal {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
@@ -841,7 +831,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* EMERGENCY MODE FUNCTIONS */
-
     function enableEmergencyMode() external onlyOwner {
         if (emergencyMode) revert EmergencyModeAlreadyEnabled();
 
