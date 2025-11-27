@@ -599,18 +599,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         return activeStrategies.values();
     }
 
-    /// @notice Get idle balance for a specific strategy
-    function getIdleBalance(bytes32 strategyId) external view returns (uint256 idle) {
-        uint256 allocated = allocations[strategyId];
-        uint256 deployed = externalDeposits[strategyId];
-
-        if (allocated > deployed) {
-            return allocated - deployed;
-        }
-
-        return 0;
-    }
-
     function getIdleAssets() external view returns (uint256 idleAssets) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
 
@@ -623,37 +611,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         return 0;
-    }
-
-    function getGhostAmount() external view returns (uint256 ghost) {
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-
-        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
-            ? totalAllocations - totalExternalDeposits
-            : 0;
-
-        uint256 excessIdle = balance > allocatedInAdapter
-            ? balance - allocatedInAdapter
-            : 0;
-
-        uint256 minKnown = totalAllocations;
-
-        (bool success, bytes memory data) = valuer.staticcall(
-            abi.encodeWithSignature("getTotalValue(address)", address(this))
-        );
-
-        if (success && data.length >= 32) {
-            uint256 valuerValue = abi.decode(data, (uint256));
-
-            uint256 valuerValueAdj = valuerValue > excessIdle
-                ? valuerValue - excessIdle
-                : 0;
-
-            if (minKnown > valuerValueAdj) {
-                return minKnown - valuerValueAdj; // Amount of ghost (overpricing)
-            }
-        }
-        return 0; // No ghost detected
     }
 
     /* INTERNAL FUNCTIONS */

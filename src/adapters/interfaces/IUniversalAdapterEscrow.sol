@@ -191,11 +191,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return Array of active strategy IDs
     function getActiveStrategies() external view returns (bytes32[] memory);
 
-    /// @notice Get idle balance for a specific strategy (allocated but not deployed)
-    /// @param strategyId Strategy to check
-    /// @return idle Amount of idle assets available for execution
-    function getIdleBalance(bytes32 strategyId) external view returns (uint256 idle);
-
     /// @notice Check if contract is paused
     /// @return Whether the contract is paused
     function paused() external view returns (bool);
@@ -215,11 +210,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Get idle assets that are not allocated to any strategy
     /// @return idleAssets Amount of assets sitting idle in the adapter
     function getIdleAssets() external view returns (uint256 idleAssets);
-
-    /// @notice Calculate current ghost amount (overpricing) if any
-    /// @dev Helper function to monitor when manual sync might be needed
-    /// @return ghost The amount by which minKnownValue exceeds valuer's reported value
-    function getGhostAmount() external view returns (uint256 ghost);
 
     /// @notice Get cached valuation info for monitoring
     /// @return value The cached valuation value

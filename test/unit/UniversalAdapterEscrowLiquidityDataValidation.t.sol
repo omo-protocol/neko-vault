@@ -143,87 +143,6 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
         adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
     }
 
-    /* IDLE BALANCE TESTS */
-
-    function testGetIdleBalanceAfterAllocation() public {
-        // Allocate with empty calls
-        IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
-
-        asset.mint(address(vault), 1000e6);
-        vm.prank(address(vault));
-        adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
-
-        // All allocated assets should be idle (not deployed yet)
-        uint256 idle = adapter.getIdleBalance(strategyId);
-        assertEq(idle, 1000e6, "All allocated assets should be idle");
-    }
-
-    function testGetIdleBalanceCalculation() public {
-        // Test that idle balance calculation is correct
-        IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
-
-        // Allocate 1000
-        asset.mint(address(vault), 1000e6);
-        vm.prank(address(vault));
-        adapter.allocate(allocData, 1000e6, bytes4(0), address(0));
-
-        // All should be idle (allocated - externalDeposits = 1000 - 0)
-        assertEq(adapter.getIdleBalance(strategyId), 1000e6);
-        
-        // Allocate another 500
-        asset.mint(address(vault), 500e6);
-        vm.prank(address(vault));
-        adapter.allocate(allocData, 500e6, bytes4(0), address(0));
-
-        // Now idle should be 1500 (allocated - externalDeposits = 1500 - 0)
-        assertEq(adapter.getIdleBalance(strategyId), 1500e6);
-    }
-
-    function testGetIdleBalanceMultipleStrategies() public {
-        // Setup second strategy
-        bytes32 strategy2 = keccak256("strategy-2");
-        vm.prank(owner);
-        adapter.setStrategy(strategy2, agent, "", type(uint256).max);
-
-        IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-
-        // Allocate 500 to strategy 1
-        bytes memory allocData1 = abi.encode(strategyId, 0, false, emptyCalls);
-        asset.mint(address(vault), 500e6);
-        vm.prank(address(vault));
-        adapter.allocate(allocData1, 500e6, bytes4(0), address(0));
-
-        // Allocate 300 to strategy 2
-        bytes memory allocData2 = abi.encode(strategy2, 0, false, emptyCalls);
-        asset.mint(address(vault), 300e6);
-        vm.prank(address(vault));
-        adapter.allocate(allocData2, 300e6, bytes4(0), address(0));
-
-        // Check idle balances
-        assertEq(adapter.getIdleBalance(strategyId), 500e6, "Strategy 1 idle should be 500");
-        assertEq(adapter.getIdleBalance(strategy2), 300e6, "Strategy 2 idle should be 300");
-    }
-
-    function testGetIdleBalanceZeroWhenNotAllocated() public {
-        // Strategy exists but nothing allocated
-        uint256 idle = adapter.getIdleBalance(strategyId);
-        assertEq(idle, 0, "Idle should be 0 for unallocated strategy");
-    }
-
-    function testGetIdleBalanceWithNoAllocation() public {
-        // Test strategy with no allocation has zero idle
-        bytes32 unusedStrategy = keccak256("unused-strategy");
-        
-        vm.prank(owner);
-        adapter.setStrategy(unusedStrategy, agent, "", type(uint256).max);
-
-        // Should return 0 for strategy with no allocation
-        uint256 idle = adapter.getIdleBalance(unusedStrategy);
-        assertEq(idle, 0, "Unused strategy should have 0 idle balance");
-    }
-
     /* EDGE CASES */
 
     function testAllocateZeroAmountStillEnforcesEmptyCalls() public {
@@ -258,7 +177,6 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
         assertEq(ids[0], strategyId);
         assertEq(uint256(change), amount);
         assertEq(adapter.getAllocation(strategyId), amount);
-        assertEq(adapter.getIdleBalance(strategyId), amount);
     }
 
     /* INTEGRATION TEST - Full Workflow */
@@ -274,18 +192,8 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
 
         // 2. Verify assets are allocated but idle
         assertEq(adapter.getAllocation(strategyId), 1000e6, "Should be allocated");
-        assertEq(adapter.getIdleBalance(strategyId), 1000e6, "Should be idle");
 
-        // 3. Agent monitors idle balance and decides to execute
-        uint256 idleToExecute = adapter.getIdleBalance(strategyId);
-        assertGt(idleToExecute, 0, "Agent should see idle balance");
-
-        // 4. Verify accounting is correct
-        assertEq(adapter.getAllocation(strategyId), idleToExecute, "Allocation should match idle");
+        // 3. Verify accounting is correct
         assertEq(adapter.totalAllocations(), 1000e6, "Total allocations should be 1000");
-        
-        // 5. In real scenario, agent would call executeStrategy() with dynamic amount
-        //    based on the idle balance returned from getIdleBalance()
-        //    This test validates the core security fix: empty calls validation works
     }
 }

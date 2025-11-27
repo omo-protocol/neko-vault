@@ -155,9 +155,6 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // NEW logic: minKnown = totalAllocations = 1000, ghost = 1000 - 800 = 200
         valuer.setReturnValue(800e18);
 
-        uint256 ghostBefore = adapter.getGhostAmount();
-        assertEq(ghostBefore, 200e18, "Should have 200e18 ghost");
-
         // Pause the adapter
         vm.prank(owner);
         adapter.setPaused(true);
@@ -172,8 +169,6 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         newValues[0] = 0;
         adapter.syncExternalDepositsPerStrategy(strategyIds, newValues);
 
-        uint256 ghostAfter = adapter.getGhostAmount();
-        assertEq(ghostAfter, 0, "Ghost should be removed even during pause");
         assertEq(adapter.totalExternalDeposits(), 0, "totalExternalDeposits should be updated");
     }
 
