@@ -197,11 +197,10 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
-        // SECURITY FIX Issue #2 (Cached Valuation Exploitation):
-        // In normal mode, should REVERT when valuer returns 0 (forces explicit emergency mode activation)
-        // This prevents silent use of stale cache which could enable arbitrage
-        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
-        adapter.realAssets();
+        // UPDATED BEHAVIOR: In normal mode with fresh cache, uses cached valuation as fallback
+        // instead of reverting. This allows vault to continue operating.
+        uint256 cachedValue = adapter.realAssets();
+        assertEq(cachedValue, 1000e18, "Should use cached valuation when valuer returns 0");
 
         // Enable emergency mode - SECURITY FIX (issues_27Nove2025.md):
         // This now invalidates the cached valuation (sets cachedValuationTimestamp = 0)

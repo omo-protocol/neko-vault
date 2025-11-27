@@ -192,8 +192,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (emergencyMode) {
                 return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
             }
+            if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <=MAX_CACHED_VALUATION_AGE) {
+                return cachedValuation;
+            }
 
-            revert ValuationUnavailable();
+            return (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
         }
         if (totalAllocations == 0) {
             return 0;
@@ -201,8 +204,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (emergencyMode) {
             return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
         }
+        if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <=MAX_CACHED_VALUATION_AGE) {
+            return cachedValuation;
+        }
 
-        revert ValuationUnavailable();
+        return (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */

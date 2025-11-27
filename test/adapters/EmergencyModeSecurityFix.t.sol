@@ -174,9 +174,9 @@ contract EmergencyModeSecurityFixTest is Test {
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // In normal mode, should revert with ValuationUnavailable
-        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
-        adapter.realAssets();
+        // In normal mode with fresh cache, should use cached valuation as fallback
+        uint256 normalValue = adapter.realAssets();
+        assertEq(normalValue, 1000e6, "Should use cached valuation when valuer returns 0");
 
         // Enable emergency mode - SECURITY FIX: This now invalidates the cached valuation
         // to prevent attackers from pre-caching favorable values before emergency mode
@@ -197,16 +197,18 @@ contract EmergencyModeSecurityFixTest is Test {
     // The externalDeposits floor fallback is already tested indirectly in other tests
     // and is a secondary fallback mechanism after cached valuation
 
-    function testRealAssetsRevertsInNormalModeWhenValuerDown() public {
+    function testRealAssetsUsesHaircutFallbackInNormalModeWhenValuerDown() public {
         // Allocate funds
         _allocate(strategyId, 1000e6);
 
         // Valuer is down (returns 0)
         _setValuerValue(0);
 
-        // Should revert in normal mode
-        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
-        adapter.realAssets();
+        // With updated logic: when valuer returns 0 in normal mode,
+        // it falls back to cached valuation (if fresh) or haircut on totalExternalDeposits
+        // Since no cache and no external deposits, should return 0
+        uint256 value = adapter.realAssets();
+        assertEq(value, 0, "Should return 0 with no external deposits and no cache");
     }
 
     function testRealAssetsWorksWithZeroAllocations() public {
