@@ -165,6 +165,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             ? balance - allocatedInAdapter
             : 0;
 
+        uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
+
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
         (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
@@ -186,29 +188,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 }
                 return totalValueAdj;
             }
-            if (totalAllocations == 0) {
-                return 0;  // Legitimate 0 value when nothing allocated
-            }
-            if (emergencyMode) {
-                return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
-            }
-            if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <=MAX_CACHED_VALUATION_AGE) {
-                return cachedValuation;
-            }
-
-            return (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
         }
         if (totalAllocations == 0) {
-            return 0;
+            return 0; // Legitimate 0 value when nothing allocated
         }
         if (emergencyMode) {
-            return totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000;
+            return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
         }
         if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <=MAX_CACHED_VALUATION_AGE) {
             return cachedValuation;
         }
 
-        return (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+        return allocatedInAdapterBounded + (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */

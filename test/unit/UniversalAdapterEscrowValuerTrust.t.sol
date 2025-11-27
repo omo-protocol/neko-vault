@@ -212,10 +212,19 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         (, , bool isStale) = adapter.getCachedValuation();
         assertTrue(isStale, "Cache should be stale after emergency mode enabled");
 
-        // Should now use totalExternalDeposits fallback with 5% haircut
-        // Since no external deposits were made in this test, totalExternalDeposits = 0
+        // Should now use emergency fallback with 5% haircut
+        // In emergency mode when valuer fails, realAssets returns:
+        // (allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT) / 10000
+        // Since no external deposits were made:
+        // - totalAllocations = 1000e18
+        // - totalExternalDeposits = 0
+        // - balance = 1000e18
+        // - allocatedInAdapter = totalAllocations - totalExternalDeposits = 1000e18
+        // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = 1000e18
+        // Expected = (1000e18 + 0) * 9500 / 10000 = 950e18
         uint256 reportedAssets = adapter.realAssets();
-        assertEq(reportedAssets, 0, "Should use totalExternalDeposits fallback (0) in emergency mode");
+        uint256 expectedEmergencyValue = (1000e18 * (10000 - adapter.EMERGENCY_HAIRCUT())) / 10000;
+        assertEq(reportedAssets, expectedEmergencyValue, "Should use emergency fallback with haircut in emergency mode");
     }
 
     /**

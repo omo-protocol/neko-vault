@@ -993,8 +993,18 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
         uint256 realAssetsValue = escrow.realAssets();
 
-        // Should be totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT) / 10000
-        uint256 expected = externalDepositsAmount * (10000 - EMERGENCY_HAIRCUT) / 10000;
+        // In emergency mode when valuer fails, realAssets returns:
+        // (allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT) / 10000
+        // where:
+        // - totalAllocations = externalDepositsAmount * 2
+        // - totalExternalDeposits = externalDepositsAmount
+        // - balance = INITIAL_BALANCE - externalDepositsAmount (tokens sent to external)
+        // - allocatedInAdapter = totalAllocations - totalExternalDeposits = externalDepositsAmount
+        // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = externalDepositsAmount (since balance > allocatedInAdapter)
+        uint256 balance = INITIAL_BALANCE - externalDepositsAmount;
+        uint256 allocatedInAdapter = externalDepositsAmount; // totalAllocations - totalExternalDeposits
+        uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
+        uint256 expected = (allocatedInAdapterBounded + externalDepositsAmount) * (10000 - EMERGENCY_HAIRCUT) / 10000;
         assertEq(realAssetsValue, expected);
     }
 
