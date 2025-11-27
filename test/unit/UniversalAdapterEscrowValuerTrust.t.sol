@@ -172,9 +172,10 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     }
 
     /**
-     * @notice Test that zero value correctly triggers time-bounded cache fallback
+     * @notice Test that zero value triggers fallback and emergency mode invalidates cache
      * @dev TIME-BOUNDED FALLBACK FIX (FIXING.md): Uses cached value instead of principal
-     * @dev SECURITY FIX: Cache must be explicitly refreshed by keeper (not auto-populated)
+     * @dev SECURITY FIX (issues_27Nove2025.md): Emergency mode invalidates cached valuation
+     *      to prevent attackers from pre-caching favorable values before emergency mode
      */
     function testZeroValueTriggersFallback() public {
         // Set valuer to return correct value BEFORE allocation
@@ -202,14 +203,20 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.realAssets();
 
-        // Enable emergency mode to allow cached valuation with 5% haircut
+        // Enable emergency mode - SECURITY FIX (issues_27Nove2025.md):
+        // This now invalidates the cached valuation (sets cachedValuationTimestamp = 0)
+        // to prevent attackers from pre-caching favorable values before emergency mode
         vm.prank(owner);
         adapter.enableEmergencyMode();
 
-        // Should now use cached valuation with 5% haircut (1000e18 * 0.95 = 950e18)
+        // Verify cache was invalidated by enabling emergency mode
+        (, , bool isStale) = adapter.getCachedValuation();
+        assertTrue(isStale, "Cache should be stale after emergency mode enabled");
+
+        // Should now use totalExternalDeposits fallback with 5% haircut
+        // Since no external deposits were made in this test, totalExternalDeposits = 0
         uint256 reportedAssets = adapter.realAssets();
-        uint256 expectedWithHaircut = 1000e18 * 9500 / 10000; // 5% haircut
-        assertEq(reportedAssets, expectedWithHaircut, "Should use cached valuation with haircut in emergency mode");
+        assertEq(reportedAssets, 0, "Should use totalExternalDeposits fallback (0) in emergency mode");
     }
 
     /**

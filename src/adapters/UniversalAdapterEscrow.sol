@@ -792,6 +792,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (emergencyMode) revert EmergencyModeAlreadyEnabled();
 
         emergencyMode = true;
+        cachedValuationTimestamp = 0; // Disable cached valuation usage during emergency fallback
         emergencyModeActivatedAt = block.timestamp;
 
         emit EmergencyModeEnabled(block.timestamp, "Valuer unavailable");

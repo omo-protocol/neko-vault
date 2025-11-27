@@ -158,7 +158,7 @@ contract EmergencyModeSecurityFixTest is Test {
         assertEq(emergencyValue, 950e6, "Emergency value should be 950");
     }
 
-    function testRealAssetsWithEmergencyModeUsesCache() public {
+    function testRealAssetsWithEmergencyModeInvalidatesCache() public {
         // Allocate and set initial valuer value
         _allocate(strategyId, 1000e6);
         _setValuerValue(1000e6);
@@ -178,13 +178,18 @@ contract EmergencyModeSecurityFixTest is Test {
         vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.realAssets();
 
-        // Enable emergency mode
+        // Enable emergency mode - SECURITY FIX: This now invalidates the cached valuation
+        // to prevent attackers from pre-caching favorable values before emergency mode
         adapter.enableEmergencyMode();
 
-        // Should now use cached value with haircut
+        // Verify cache was invalidated
+        (, , bool isStaleAfter) = adapter.getCachedValuation();
+        assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
+
+        // Should now use totalExternalDeposits fallback with haircut
+        // Since no external deposits were made, totalExternalDeposits = 0
         uint256 emergencyValue = adapter.realAssets();
-        uint256 expectedValue = 1000e6 * (10000 - EMERGENCY_HAIRCUT) / 10000;
-        assertEq(emergencyValue, expectedValue, "Should use cached value with haircut");
+        assertEq(emergencyValue, 0, "Should use totalExternalDeposits fallback (0) with haircut");
     }
 
     // NOTE: testRealAssetsWithEmergencyModeUsesExternalDepositsFloor removed
