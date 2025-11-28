@@ -269,6 +269,9 @@ contract UniversalAdapterEscrowTest is Test {
     }
 
     function testDeallocateWithYield() public {
+        // SECURITY FIX: change is now capped at allocationDecrease to prevent cap bypass
+        // VaultV2 can still transfer the full amount, but cap accounting stays accurate
+
         // Setup: allocate first
         vm.prank(owner);
         adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
@@ -285,15 +288,16 @@ contract UniversalAdapterEscrowTest is Test {
         // Transfer extra assets to adapter to cover yield withdrawal
         asset.mint(address(adapter), 50e6);
 
-        // Deallocate with yield - should be able to withdraw 120e6 even though only 100e6 was allocated
+        // Deallocate with yield - request 120e6 but change capped at allocation (100e6)
         bytes memory deallocData = abi.encode(STRATEGY_1, 120e6, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 120e6, bytes4(0), address(0));
 
         assertEq(ids[0], STRATEGY_1);
-        assertEq(change, -int256(120e6), "Should be able to withdraw yield");
-        assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after withdrawing more than allocated");
+        // SECURITY FIX: change capped at allocation (100e6), not requested amount (120e6)
+        assertEq(change, -int256(100e6), "Change capped at allocation to prevent cap bypass");
+        assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after deallocating");
     }
 
     function testFeeOnTransferTokensNotSupported() public {
@@ -1580,7 +1584,8 @@ contract UniversalAdapterEscrowTest is Test {
     }
 
     function testDeallocateProfitsAccessible() public {
-        // SECURITY FIX: Test that profits are fully accessible via deallocate
+        // SECURITY FIX: change is capped at allocation to prevent cap bypass
+        // VaultV2 can still transfer the full amount, but cap accounting stays accurate
 
         // Setup strategy
         bytes32 strategyId = STRATEGY_1;
@@ -1605,7 +1610,7 @@ contract UniversalAdapterEscrowTest is Test {
         // Balance should now be initial + profits
         assertEq(asset.balanceOf(address(adapter)), initialAllocation + profits, "Should have allocation + profits");
 
-        // Test: Can deallocate full amount including profits without external calls
+        // Request more than allocation (600e6 when allocation is 500e6)
         uint256 deallocateWithProfits = initialAllocation + 100e6; // Take initial + half of profits
         bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
@@ -1618,16 +1623,16 @@ contract UniversalAdapterEscrowTest is Test {
         );
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
-        assertEq(change, -int256(deallocateWithProfits), "Should be able to withdraw with profits");
+        // SECURITY FIX: change capped at allocation (500e6), not requested (600e6)
+        assertEq(change, -int256(initialAllocation), "Change capped at allocation to prevent cap bypass");
 
         // Balance stays in adapter until vault pulls it
-        // The key is that deallocate correctly reported the full amount including profits
         uint256 remainingBalance = asset.balanceOf(address(adapter));
         assertEq(remainingBalance, 700e6, "Balance remains until vault pulls it");
 
-        // Verify allocation was fully depleted since we took more than initial
+        // Verify allocation was fully depleted
         uint256 remainingAllocation = adapter.getAllocation(strategyId);
-        assertEq(remainingAllocation, 0, "Allocation should be zero after withdrawing more than initial");
+        assertEq(remainingAllocation, 0, "Allocation should be zero");
     }
 }
 

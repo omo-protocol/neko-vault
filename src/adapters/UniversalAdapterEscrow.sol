@@ -149,7 +149,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         ids = new bytes32[](1);
         ids[0] = strategyId;
-        change = -int256(actualAmount);
+        change = -int256(allocationDecrease);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }
