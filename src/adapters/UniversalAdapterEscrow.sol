@@ -307,6 +307,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     totalExternalDeposits -= reduction;
 
                     emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+
+                    if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+                        _removeFromActiveStrategies(strategyId);
+                    }
                 }
             }
 
@@ -381,6 +385,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             totalExternalDeposits -= reduction;
 
             emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+
+            if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+                _removeFromActiveStrategies(strategyId);
+            }
         }
 
         emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
@@ -447,6 +455,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             }
 
             emit ExternalDepositsValuerSynced(strategyId, trackedValue, valuerValue, delta);
+
+            if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+                _removeFromActiveStrategies(strategyId);
+            }
         }
     }
 
