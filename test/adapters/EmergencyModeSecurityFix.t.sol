@@ -174,22 +174,28 @@ contract EmergencyModeSecurityFixTest is Test {
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // In normal mode with fresh cache, should use cached valuation as fallback
+        // SECURITY FIX: When valuer is down, cached valuation is capped by haircutted baseline.
+        // In this test:
+        // - allocatedInAdapterBounded = 0 (tokens minted to vault, not transferred to adapter)
+        // - totalExternalDeposits = 0
+        // - haircuttedBaseline = 0 + (0 * 95%) = 0
+        // - result = min(cachedValuation=1000e6, haircuttedBaseline=0) = 0
+        // This prevents attackers from keeping cache warm to avoid haircut during outages.
         uint256 normalValue = adapter.realAssets();
-        assertEq(normalValue, 1000e6, "Should use cached valuation when valuer returns 0");
+        assertEq(normalValue, 0, "Should cap cached valuation by haircutted baseline (0) when valuer down");
 
-        // Enable emergency mode - SECURITY FIX: This now invalidates the cached valuation
-        // to prevent attackers from pre-caching favorable values before emergency mode
+        // Enable emergency mode - This invalidates the cached valuation timestamp
         adapter.enableEmergencyMode();
 
         // Verify cache was invalidated
         (, , bool isStaleAfter) = adapter.getCachedValuation();
         assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
 
-        // Should now use totalExternalDeposits fallback with haircut
-        // Since no external deposits were made, totalExternalDeposits = 0
+        // In emergency mode with valuer down, uses emergency fallback with haircut
+        // allocatedInAdapterBounded = 0, totalExternalDeposits = 0
+        // Result = (0 + 0) * 95% = 0
         uint256 emergencyValue = adapter.realAssets();
-        assertEq(emergencyValue, 0, "Should use totalExternalDeposits fallback (0) with haircut");
+        assertEq(emergencyValue, 0, "Should use emergency fallback (0) with haircut");
     }
 
     // NOTE: testRealAssetsWithEmergencyModeUsesExternalDepositsFloor removed

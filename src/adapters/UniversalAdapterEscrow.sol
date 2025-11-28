@@ -193,7 +193,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             return 0; // Legitimate 0 value when nothing allocated
         }
         if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
-            return cachedValuation;
+            uint256 haircuttedBaseline = allocatedInAdapterBounded +
+                (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+            return cachedValuation < haircuttedBaseline ? cachedValuation : haircuttedBaseline;
         }
         if (emergencyMode) { // gate deposits via EmergencyGate
             return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
