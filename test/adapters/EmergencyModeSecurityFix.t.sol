@@ -174,15 +174,11 @@ contract EmergencyModeSecurityFixTest is Test {
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // SECURITY FIX: When valuer is down, cached valuation is capped by haircutted baseline.
-        // In this test:
-        // - allocatedInAdapterBounded = 0 (tokens minted to vault, not transferred to adapter)
-        // - totalExternalDeposits = 0
-        // - haircuttedBaseline = 0 + (0 * 95%) = 0
-        // - result = min(cachedValuation=1000e6, haircuttedBaseline=0) = 0
-        // This prevents attackers from keeping cache warm to avoid haircut during outages.
-        uint256 normalValue = adapter.realAssets();
-        assertEq(normalValue, 0, "Should cap cached valuation by haircutted baseline (0) when valuer down");
+        // SECURITY FIX: When valuer is down and NOT in emergency mode, realAssets() reverts.
+        // This forces admin to explicitly enable emergency mode before any fallback is used,
+        // preventing attackers from exploiting automatic fallbacks during outages.
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
+        adapter.realAssets();
 
         // Enable emergency mode - This invalidates the cached valuation timestamp
         adapter.enableEmergencyMode();
@@ -191,7 +187,7 @@ contract EmergencyModeSecurityFixTest is Test {
         (, , bool isStaleAfter) = adapter.getCachedValuation();
         assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
 
-        // In emergency mode with valuer down, uses emergency fallback with haircut
+        // In emergency mode with valuer down and stale cache, uses emergency fallback with haircut
         // allocatedInAdapterBounded = 0, totalExternalDeposits = 0
         // Result = (0 + 0) * 95% = 0
         uint256 emergencyValue = adapter.realAssets();

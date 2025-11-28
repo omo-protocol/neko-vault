@@ -172,10 +172,10 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     }
 
     /**
-     * @notice Test that zero value triggers fallback and emergency mode invalidates cache
-     * @dev TIME-BOUNDED FALLBACK FIX (FIXING.md): Uses cached value instead of principal
-     * @dev SECURITY FIX (issues_27Nove2025.md): Emergency mode invalidates cached valuation
-     *      to prevent attackers from pre-caching favorable values before emergency mode
+     * @notice Test that zero value triggers revert in normal mode and emergency mode enables fallback
+     * @dev SECURITY FIX: Cached valuation fallback now ONLY available in emergency mode.
+     *      This prevents attackers from exploiting automatic fallbacks during valuer outages.
+     *      Admin must explicitly enable emergency mode before any fallback is used.
      */
     function testZeroValueTriggersFallback() public {
         // Set valuer to return correct value BEFORE allocation
@@ -197,14 +197,14 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
-        // UPDATED BEHAVIOR: In normal mode with fresh cache, uses cached valuation as fallback
-        // instead of reverting. This allows vault to continue operating.
-        uint256 cachedValue = adapter.realAssets();
-        assertEq(cachedValue, 1000e18, "Should use cached valuation when valuer returns 0");
+        // SECURITY FIX: When valuer fails and NOT in emergency mode, realAssets() REVERTS.
+        // This forces admin to explicitly enable emergency mode before any fallback is used,
+        // preventing attackers from exploiting automatic fallbacks during outages.
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
+        adapter.realAssets();
 
-        // Enable emergency mode - SECURITY FIX (issues_27Nove2025.md):
-        // This now invalidates the cached valuation (sets cachedValuationTimestamp = 0)
-        // to prevent attackers from pre-caching favorable values before emergency mode
+        // Enable emergency mode - This invalidates the cached valuation timestamp
+        // and enables the fallback mechanism
         vm.prank(owner);
         adapter.enableEmergencyMode();
 
