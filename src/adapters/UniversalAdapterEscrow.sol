@@ -192,14 +192,20 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (totalAllocations == 0) {
             return 0; // Legitimate 0 value when nothing allocated
         }
-        if (emergencyMode) {
-            return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
-        }
-        if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <=MAX_CACHED_VALUATION_AGE) {
+        if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
             return cachedValuation;
         }
+        if (emergencyMode) { // gate deposits via EmergencyGate
+            return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+        }
 
-        return allocatedInAdapterBounded + (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+        // By reverting, we force the system to pause until:
+        // 1. Valuer recovers and returns valid data, OR
+        // 2. Cached valuation is refreshed (keeper calls refreshCachedValuation), OR
+        // 3. Admin enables emergencyMode (with expectation to also gate deposits via EmergencyGate)
+        // This prevents both dilution (no deposits at underpriced valuation) and unfair
+        // withdrawals (no exits at underpriced valuation either).
+        revert ValuationUnavailable();
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
