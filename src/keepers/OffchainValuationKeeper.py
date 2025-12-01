@@ -784,10 +784,20 @@ class OffchainValuationKeeper:
 
         Returns:
             PT price ratio in 18 decimals (1e18 = 1:1, 0.95e18 = 95% of underlying)
+
+        Raises:
+            ValueError: If oracle configuration is missing or price is out of bounds
+            RuntimeError: If oracle query fails
         """
+        # CRITICAL FIX: Do NOT default to hardcoded price!
+        # Hardcoded 0.95 is dangerous during market crashes/oracle failures
+        # Example: PT drops to $0.60, oracle halts → reports $0.95 → 58% over-valuation
+        # This allows users to exit at inflated prices, causing protocol insolvency
         if not market or not oracle:
-            logger.warning("Missing Pendle market or oracle address, using default 0.95 ratio")
-            return int(0.95 * 10**18)
+            raise ValueError(
+                "Missing Pendle market or oracle address - cannot safely price PT. "
+                "Configure pendle_market and pt_oracle in strategy extras."
+            )
 
         try:
             market_cs = Web3.to_checksum_address(market)
@@ -812,19 +822,27 @@ class OffchainValuationKeeper:
             pt_rate = int(oracle_contract.functions.getPtToAssetRate(market_cs, duration).call())
 
             # Sanity check: PT price should be between 0.5 and 1.05 (50% to 105%)
+            # CRITICAL FIX: Raise error instead of returning hardcoded value
             if pt_rate < int(0.5 * 10**18) or pt_rate > int(1.05 * 10**18):
-                logger.warning(
-                    f"PT price {pt_rate/1e18:.4f} outside expected range [0.5, 1.05], "
-                    f"using default 0.95"
+                raise ValueError(
+                    f"PT price {pt_rate/1e18:.4f} outside expected range [0.5, 1.05]. "
+                    f"Oracle may be stale or market conditions are extreme. "
+                    f"Cannot safely value strategy."
                 )
-                return int(0.95 * 10**18)
 
             logger.debug(f"PT price from oracle: {pt_rate/1e18:.6f}")
             return pt_rate
 
+        except ValueError:
+            # Re-raise validation errors
+            raise
         except Exception as e:
-            logger.error(f"Error querying Pendle oracle: {e}, using default 0.95 ratio")
-            return int(0.95 * 10**18)
+            # CRITICAL FIX: Do NOT return hardcoded 0.95 on oracle failure!
+            logger.critical(
+                f"CRITICAL: Pendle oracle query FAILED! "
+                f"Cannot safely price PT tokens. Error: {e}"
+            )
+            raise RuntimeError(f"Pendle oracle query failed - cannot value strategy safely: {e}") from e
 
     def _get_felix_debt(self, felix: str, market_id: str, user: str) -> int:
         """
@@ -896,9 +914,17 @@ class OffchainValuationKeeper:
             return debt_assets
 
         except Exception as e:
-            logger.error(f"Error querying Felix debt: {e}", exc_info=True)
-            # Return 0 to allow strategy to continue (conservative approach)
-            return 0
+            # CRITICAL FIX: Do NOT return 0 on RPC failure!
+            # Returning 0 debt on error causes massive over-reporting of strategy value
+            # Example: $1M assets + $800k debt = $200k net value
+            #          RPC error → reports $0 debt → $1M reported (5x over-valuation)
+            # This could lead to protocol insolvency via arbitrage attacks
+            logger.critical(
+                f"CRITICAL: Felix debt query FAILED for {user}! "
+                f"Cannot safely value strategy without debt data. "
+                f"Error: {e}"
+            )
+            raise RuntimeError(f"Felix debt query failed - cannot value strategy safely: {e}") from e
 
     def _fetch_rate_from_felix_oracle(self, felix_oracle_address: str) -> float:
         """
@@ -1106,8 +1132,13 @@ class OffchainValuationKeeper:
             return debt
 
         except Exception as e:
-            logger.error(f"Error getting Morpho Blue debt: {e}")
-            return 0
+            # CRITICAL FIX: Do NOT return 0 on RPC failure!
+            # Same issue as Felix - returning 0 debt causes massive over-valuation
+            logger.critical(
+                f"CRITICAL: Morpho Blue debt query FAILED for {user}! "
+                f"Cannot safely value strategy without debt data. Error: {e}"
+            )
+            raise RuntimeError(f"Morpho Blue debt query failed - cannot value strategy safely: {e}") from e
 
     def _get_aave_v3_debt(self, pool_address: str, debt_token: str, user: str) -> int:
         """
@@ -1137,8 +1168,13 @@ class OffchainValuationKeeper:
             return debt_balance
 
         except Exception as e:
-            logger.error(f"Error getting Aave V3 debt: {e}")
-            return 0
+            # CRITICAL FIX: Do NOT return 0 on RPC failure!
+            # Same issue as Felix - returning 0 debt causes massive over-valuation
+            logger.critical(
+                f"CRITICAL: Aave V3 debt query FAILED for {user}! "
+                f"Cannot safely value strategy without debt data. Error: {e}"
+            )
+            raise RuntimeError(f"Aave V3 debt query failed - cannot value strategy safely: {e}") from e
 
     def _get_compound_v3_debt(self, comet_address: str, user: str) -> int:
         """
@@ -1168,8 +1204,13 @@ class OffchainValuationKeeper:
             return debt
 
         except Exception as e:
-            logger.error(f"Error getting Compound V3 debt: {e}")
-            return 0
+            # CRITICAL FIX: Do NOT return 0 on RPC failure!
+            # Same issue as Felix - returning 0 debt causes massive over-valuation
+            logger.critical(
+                f"CRITICAL: Compound V3 debt query FAILED for {user}! "
+                f"Cannot safely value strategy without debt data. Error: {e}"
+            )
+            raise RuntimeError(f"Compound V3 debt query failed - cannot value strategy safely: {e}") from e
 
     # ============= End Generic Lending Protocol Dispatcher =============
 
@@ -2228,9 +2269,9 @@ class OffchainValuationKeeper:
 
             # 1. Get PT-kHYPE balance held by escrow
             logger.debug(f"[{s.id_text}] Querying PT balance at {s.escrow}...")
-            pt_token, _ = self._erc20(pt_address)
+            pt_token, pt_decimals = self._erc20(pt_address)
             pt_balance = int(pt_token.functions.balanceOf(s.escrow).call())
-            logger.debug(f"[{s.id_text}] PT balance: {pt_balance / 1e18:.6f}")
+            logger.debug(f"[{s.id_text}] PT balance: {pt_balance / (10 ** pt_decimals):.6f} (decimals={pt_decimals})")
 
             if pt_balance == 0:
                 logger.info(f"[{s.id_text}] No PT balance, returning 0")
@@ -2260,23 +2301,101 @@ class OffchainValuationKeeper:
             logger.debug(f"[{s.id_text}] PT price: {pt_price_ratio / 1e18:.6f}")
 
             # 3. Calculate collateral value in underlying kHYPE
-            collateral_value_underlying = (pt_balance * pt_price_ratio) // 10**18
-            logger.debug(f"[{s.id_text}] Collateral value: {collateral_value_underlying / 1e18:.6f} kHYPE")
+            # HIGH SECURITY FIX: Validate decimals to prevent conversion math errors
+            # The calculation (pt_balance * pt_price_ratio) // 10**18 assumes pt_decimals == underlying_decimals
+            # If this assumption is violated, value could be off by 10^12 or more
+            underlying_decimals = extras.get('underlying_decimals', 18)
+            if pt_decimals != underlying_decimals:
+                logger.warning(
+                    f"[{s.id_text}] PT decimals ({pt_decimals}) != underlying decimals ({underlying_decimals}). "
+                    f"Applying decimal normalization."
+                )
+                # Normalize: convert pt_balance to underlying decimals scale
+                # collateral = (pt_balance * pt_price_ratio * 10^underlying_decimals) / (10^18 * 10^pt_decimals)
+                collateral_value_underlying = (pt_balance * pt_price_ratio * (10 ** underlying_decimals)) // (10**18 * (10 ** pt_decimals))
+            else:
+                # Standard case: pt_decimals == underlying_decimals
+                collateral_value_underlying = (pt_balance * pt_price_ratio) // 10**18
+            logger.debug(f"[{s.id_text}] Collateral value: {collateral_value_underlying / (10 ** underlying_decimals):.6f} kHYPE")
 
             # 4. Get debt from Felix lending
             logger.debug(f"[{s.id_text}] Querying Felix debt...")
             debt_underlying = self._get_felix_debt(felix_lending, felix_market_id, s.escrow)
             logger.debug(f"[{s.id_text}] Debt: {debt_underlying / 1e18:.6f} kHYPE")
 
+            # 4b. MEDIUM FIX: Optionally include underlying dust and rewards
+            # By default, pt_khype_loop only counts PT tokens. This misses:
+            # - Uninvested underlying tokens (kHYPE dust in escrow)
+            # - Claimed reward tokens (PENDLE, MORPHO, etc.)
+            # Enable via: include_underlying_dust: true and/or rewards_tokens: [...]
+            additional_assets = 0
+
+            if extras.get('include_underlying_dust', False):
+                # Add underlying token (kHYPE) balance that isn't in the loop
+                underlying_address = s.underlying or extras.get('underlying_address')
+                if underlying_address and underlying_address != self.wrapper_address:
+                    try:
+                        underlying_token, underlying_dec = self._erc20(underlying_address)
+                        dust_balance = int(underlying_token.functions.balanceOf(s.escrow).call())
+                        if dust_balance > 0:
+                            # Normalize to underlying_decimals if different
+                            if underlying_dec != underlying_decimals:
+                                dust_balance = (dust_balance * (10 ** underlying_decimals)) // (10 ** underlying_dec)
+                            additional_assets += dust_balance
+                            logger.info(
+                                f"[{s.id_text}] Including underlying dust: "
+                                f"{dust_balance / (10 ** underlying_decimals):.6f}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{s.id_text}] Failed to read underlying dust: {e}")
+
+            # Add reward token values if configured
+            rewards_tokens = extras.get('rewards_tokens', [])
+            for reward_config in rewards_tokens:
+                try:
+                    reward_addr = reward_config.get('address')
+                    reward_price = reward_config.get('price_in_underlying', 0)  # Price of 1 reward in underlying
+                    if reward_addr and reward_price > 0:
+                        reward_token, reward_dec = self._erc20(reward_addr)
+                        reward_balance = int(reward_token.functions.balanceOf(s.escrow).call())
+                        if reward_balance > 0:
+                            # value = balance * price (assume price is 18 decimals)
+                            reward_value = (reward_balance * int(reward_price * 1e18)) // (10 ** reward_dec)
+                            # Normalize to underlying_decimals
+                            reward_value = (reward_value * (10 ** underlying_decimals)) // 10**18
+                            additional_assets += reward_value
+                            logger.info(
+                                f"[{s.id_text}] Including reward token {reward_addr[:10]}...: "
+                                f"balance={reward_balance / (10 ** reward_dec):.4f}, "
+                                f"value={reward_value / (10 ** underlying_decimals):.6f} underlying"
+                            )
+                except Exception as e:
+                    logger.warning(f"[{s.id_text}] Failed to read reward token {reward_config}: {e}")
+
+            if additional_assets > 0:
+                logger.info(
+                    f"[{s.id_text}] Total additional assets (dust + rewards): "
+                    f"{additional_assets / (10 ** underlying_decimals):.6f} underlying"
+                )
+
             # 5. Calculate net value (protect against underwater positions)
-            net_underlying = collateral_value_underlying - debt_underlying
+            # Include additional assets in the calculation
+            net_underlying = collateral_value_underlying + additional_assets - debt_underlying
             if net_underlying < 0:
-                logger.warning(
-                    f"[{s.id_text}] UNDERWATER POSITION! "
-                    f"collateral={collateral_value_underlying/1e18:.4f}, "
-                    f"debt={debt_underlying/1e18:.4f}"
+                # MEDIUM SECURITY FIX: Use CRITICAL log level for underwater positions
+                # This alerts operations teams that the strategy is effectively insolvent
+                # Note: Reporting 0 hides bad debt. If vault has idle cash, that cash is
+                # effectively covering this strategy's debt but will appear as "available"
+                loss_amount = abs(net_underlying)
+                logger.critical(
+                    f"CRITICAL_ALERT: [{s.id_text}] UNDERWATER POSITION - STRATEGY INSOLVENT!\n"
+                    f"  Collateral value: {collateral_value_underlying/1e18:.4f} kHYPE\n"
+                    f"  Debt value:       {debt_underlying/1e18:.4f} kHYPE\n"
+                    f"  Shortfall:        {loss_amount/1e18:.4f} kHYPE\n"
+                    f"  ACTION REQUIRED: Review strategy health, consider liquidation or rebalancing."
                 )
                 # Return 0 for underwater positions to prevent bad debt reporting
+                # Note: This masks the negative value - idle vault balance will appear higher
                 return 0
 
             # 6. Convert to wrapper shares (vault's asset denomination)
@@ -2396,9 +2515,9 @@ class OffchainValuationKeeper:
 
             # ===== 2. Get PT token balance held by escrow =====
             logger.debug(f"[{s.id_text}] Querying PT balance at {s.escrow}...")
-            pt_token, _ = self._erc20(pt_address)
+            pt_token, pt_decimals = self._erc20(pt_address)
             pt_balance = int(pt_token.functions.balanceOf(s.escrow).call())
-            logger.debug(f"[{s.id_text}] PT balance: {pt_balance / 1e18:.6f}")
+            logger.debug(f"[{s.id_text}] PT balance: {pt_balance / (10 ** pt_decimals):.6f} (decimals={pt_decimals})")
 
             if pt_balance == 0:
                 logger.info(f"[{s.id_text}] No PT balance, returning 0")
@@ -2426,23 +2545,102 @@ class OffchainValuationKeeper:
             logger.debug(f"[{s.id_text}] PT price: {pt_price_ratio / 1e18:.6f}")
 
             # ===== 4. Calculate collateral value in underlying asset =====
-            collateral_value_underlying = (pt_balance * pt_price_ratio) // 10**18
-            logger.debug(f"[{s.id_text}] Collateral value: {collateral_value_underlying / 1e18:.6f} underlying")
+            # HIGH SECURITY FIX: Validate decimals to prevent conversion math errors
+            # The calculation (pt_balance * pt_price_ratio) // 10**18 assumes pt_decimals == underlying_decimals
+            # If this assumption is violated, value could be off by 10^12 or more
+            underlying_decimals = extras.get('underlying_decimals', 18)
+            if pt_decimals != underlying_decimals:
+                logger.warning(
+                    f"[{s.id_text}] PT decimals ({pt_decimals}) != underlying decimals ({underlying_decimals}). "
+                    f"Applying decimal normalization."
+                )
+                # Normalize: convert pt_balance to underlying decimals scale
+                # collateral = (pt_balance * pt_price_ratio * 10^underlying_decimals) / (10^18 * 10^pt_decimals)
+                collateral_value_underlying = (pt_balance * pt_price_ratio * (10 ** underlying_decimals)) // (10**18 * (10 ** pt_decimals))
+            else:
+                # Standard case: pt_decimals == underlying_decimals
+                collateral_value_underlying = (pt_balance * pt_price_ratio) // 10**18
+            logger.debug(f"[{s.id_text}] Collateral value: {collateral_value_underlying / (10 ** underlying_decimals):.6f} underlying")
 
             # ===== 5. Get debt from lending protocol (generic dispatcher) =====
             logger.debug(f"[{s.id_text}] Querying lending debt via generic dispatcher...")
             debt_underlying = self._get_lending_debt(lending_config, s.escrow)
             logger.debug(f"[{s.id_text}] Debt: {debt_underlying / 1e18:.6f} underlying")
 
+            # ===== 5b. MEDIUM FIX: Optionally include underlying dust and rewards =====
+            # By default, pt_loop only counts PT tokens. This misses:
+            # - Uninvested underlying tokens (dust in escrow)
+            # - Claimed reward tokens (PENDLE, MORPHO, etc.)
+            # Enable via: include_underlying_dust: true and/or rewards_tokens: [...]
+            additional_assets = 0
+
+            if extras.get('include_underlying_dust', False):
+                # Add underlying token balance that isn't in the loop
+                # Use pt_underlying_asset if specified, otherwise fall back to s.underlying
+                underlying_address = extras.get('pt_underlying_asset') or s.underlying
+                if underlying_address and underlying_address.lower() != self.wrapper_address.lower():
+                    try:
+                        underlying_token, underlying_dec = self._erc20(underlying_address)
+                        dust_balance = int(underlying_token.functions.balanceOf(s.escrow).call())
+                        if dust_balance > 0:
+                            # Normalize to underlying_decimals if different
+                            if underlying_dec != underlying_decimals:
+                                dust_balance = (dust_balance * (10 ** underlying_decimals)) // (10 ** underlying_dec)
+                            additional_assets += dust_balance
+                            logger.info(
+                                f"[{s.id_text}] Including underlying dust: "
+                                f"{dust_balance / (10 ** underlying_decimals):.6f}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{s.id_text}] Failed to read underlying dust: {e}")
+
+            # Add reward token values if configured
+            rewards_tokens = extras.get('rewards_tokens', [])
+            for reward_config in rewards_tokens:
+                try:
+                    reward_addr = reward_config.get('address')
+                    reward_price = reward_config.get('price_in_underlying', 0)  # Price of 1 reward in underlying
+                    if reward_addr and reward_price > 0:
+                        reward_token, reward_dec = self._erc20(reward_addr)
+                        reward_balance = int(reward_token.functions.balanceOf(s.escrow).call())
+                        if reward_balance > 0:
+                            # value = balance * price (assume price is 18 decimals)
+                            reward_value = (reward_balance * int(reward_price * 1e18)) // (10 ** reward_dec)
+                            # Normalize to underlying_decimals
+                            reward_value = (reward_value * (10 ** underlying_decimals)) // 10**18
+                            additional_assets += reward_value
+                            logger.info(
+                                f"[{s.id_text}] Including reward token {reward_addr[:10]}...: "
+                                f"balance={reward_balance / (10 ** reward_dec):.4f}, "
+                                f"value={reward_value / (10 ** underlying_decimals):.6f} underlying"
+                            )
+                except Exception as e:
+                    logger.warning(f"[{s.id_text}] Failed to read reward token {reward_config}: {e}")
+
+            if additional_assets > 0:
+                logger.info(
+                    f"[{s.id_text}] Total additional assets (dust + rewards): "
+                    f"{additional_assets / (10 ** underlying_decimals):.6f} underlying"
+                )
+
             # ===== 6. Calculate net value (protect against underwater positions) =====
-            net_underlying = collateral_value_underlying - debt_underlying
+            # Include additional assets in the calculation
+            net_underlying = collateral_value_underlying + additional_assets - debt_underlying
             if net_underlying < 0:
-                logger.warning(
-                    f"[{s.id_text}] UNDERWATER POSITION! "
-                    f"collateral={collateral_value_underlying/1e18:.4f}, "
-                    f"debt={debt_underlying/1e18:.4f}"
+                # MEDIUM SECURITY FIX: Use CRITICAL log level for underwater positions
+                # This alerts operations teams that the strategy is effectively insolvent
+                # Note: Reporting 0 hides bad debt. If vault has idle cash, that cash is
+                # effectively covering this strategy's debt but will appear as "available"
+                loss_amount = abs(net_underlying)
+                logger.critical(
+                    f"CRITICAL_ALERT: [{s.id_text}] UNDERWATER POSITION - STRATEGY INSOLVENT!\n"
+                    f"  Collateral value: {collateral_value_underlying/(10**underlying_decimals):.4f} underlying\n"
+                    f"  Debt value:       {debt_underlying/(10**underlying_decimals):.4f} underlying\n"
+                    f"  Shortfall:        {loss_amount/(10**underlying_decimals):.4f} underlying\n"
+                    f"  ACTION REQUIRED: Review strategy health, consider liquidation or rebalancing."
                 )
                 # Return 0 for underwater positions to prevent bad debt reporting
+                # Note: This masks the negative value - idle vault balance will appear higher
                 return 0
 
             # ===== 7. Convert PT underlying → wrapper (if different assets) =====
