@@ -1070,8 +1070,14 @@ class OffchainValuationKeeper:
             return 0
 
         else:
-            logger.error(f"Unsupported lending protocol: {protocol}")
-            return 0
+            # CRITICAL FIX: Do NOT return 0 for unknown protocols!
+            # Returning 0 causes massive overvaluation: net_value = collateral - 0 = collateral
+            # Instead, fail-closed to prevent incorrect valuations.
+            raise ValueError(
+                f"CRITICAL: Unsupported lending protocol '{protocol}'. "
+                f"Cannot safely calculate debt - strategy may be overvalued if we continue. "
+                f"Supported protocols: felix, morpho, aave_v3, compound_v3, none"
+            )
 
     def _get_morpho_blue_debt(self, morpho_address: str, market_params: Dict, user: str) -> int:
         """
@@ -1393,11 +1399,15 @@ class OffchainValuationKeeper:
 
             # Sanity check: price should be reasonable (0.5x to 2x)
             if converted_amount < amount // 2 or converted_amount > amount * 2:
-                logger.warning(
-                    f"Uniswap V3 TWAP conversion ratio {converted_amount/amount:.4f} outside [0.5, 2.0], "
-                    f"using 1:1"
+                # MEDIUM FIX: Raise error instead of returning 1:1
+                # During market crashes or de-pegs, returning 1:1 causes massive overvaluation
+                # which can lead to protocol insolvency or exploitation.
+                ratio = converted_amount / amount if amount > 0 else 0
+                raise RuntimeError(
+                    f"Uniswap V3 TWAP conversion ratio {ratio:.4f} outside safe bounds [0.5, 2.0]. "
+                    f"This may indicate a market crash, de-peg, or oracle manipulation. "
+                    f"Cannot safely value assets with extreme price deviation."
                 )
-                return amount
 
             logger.debug(
                 f"Uniswap V3 TWAP conversion: {amount/1e18:.6f} → {converted_amount/1e18:.6f} "
@@ -1405,17 +1415,29 @@ class OffchainValuationKeeper:
             )
             return converted_amount
 
+        except RuntimeError:
+            # Re-raise our price deviation errors
+            raise
         except Exception as e:
-            logger.error(f"Error in Uniswap V3 TWAP conversion: {e}, using 1:1")
-            return amount
+            # MEDIUM FIX: Raise error instead of returning 1:1 on general errors
+            raise RuntimeError(f"Uniswap V3 TWAP conversion failed - cannot safely value: {e}") from e
 
     def _convert_via_uniswap_v2_twap(self, amount: int, from_asset: str, config: Dict) -> int:
         """
-        Convert asset using Uniswap V2 cumulative price oracle.
+        Convert asset using Uniswap V2 reserves (SPOT PRICE - NOT TRUE TWAP).
 
-        Note: Uniswap V2 TWAP requires storing previous cumulative price and timestamp.
-        This implementation uses current reserves as an approximation.
-        For production, implement proper TWAP tracking with state storage.
+        ⚠️  SECURITY WARNING: FLASH LOAN VULNERABILITY ⚠️
+        This implementation uses getReserves() which returns the BLOCK SPOT PRICE,
+        NOT a time-weighted average (TWAP). This makes valuations vulnerable to
+        flash loan manipulation within the same block the keeper submits a transaction.
+
+        True Uniswap V2 TWAP requires:
+        1. Storing cumulative price (price0CumulativeLast, price1CumulativeLast) and timestamp
+        2. Computing the time-weighted average over an observation period
+        3. State persistence between keeper runs
+
+        RECOMMENDATION: Avoid using this method for production valuations.
+        Use uniswap_v3_twap or chainlink price feeds instead.
 
         Args:
             amount: Amount in from_asset
@@ -1434,6 +1456,13 @@ class OffchainValuationKeeper:
             return amount
 
         try:
+            # SECURITY WARNING: Log flash loan vulnerability risk
+            logger.warning(
+                "⚠️  USING UNISWAP V2 SPOT PRICE (NOT TWAP) - FLASH LOAN VULNERABLE! "
+                "This valuation can be manipulated within a single block. "
+                "Consider using uniswap_v3_twap or chainlink instead."
+            )
+
             pair_cs = Web3.to_checksum_address(pair_address)
             pair = self.w3.eth.contract(address=pair_cs, abi=UNISWAP_V2_PAIR_ABI)
 
@@ -1450,8 +1479,10 @@ class OffchainValuationKeeper:
             reserve0, reserve1 = int(reserves[0]), int(reserves[1])
 
             if reserve0 == 0 or reserve1 == 0:
-                logger.warning("Uniswap V2 pair has zero reserves, using 1:1")
-                return amount
+                raise RuntimeError(
+                    f"Uniswap V2 pair {pair_cs} has zero reserves - cannot safely value. "
+                    "Pair may be empty, newly created, or manipulated."
+                )
 
             # Calculate spot price ratio
             if token0_is_from:
@@ -1463,11 +1494,14 @@ class OffchainValuationKeeper:
 
             # Sanity check
             if converted_amount < amount // 2 or converted_amount > amount * 2:
-                logger.warning(
-                    f"Uniswap V2 conversion ratio {converted_amount/amount:.4f} outside [0.5, 2.0], "
-                    f"using 1:1"
+                # MEDIUM FIX: Raise error instead of returning 1:1
+                # During market crashes or de-pegs, returning 1:1 causes massive overvaluation.
+                ratio = converted_amount / amount if amount > 0 else 0
+                raise RuntimeError(
+                    f"Uniswap V2 conversion ratio {ratio:.4f} outside safe bounds [0.5, 2.0]. "
+                    f"This may indicate a market crash, de-peg, or flash loan manipulation. "
+                    f"Cannot safely value assets with extreme price deviation."
                 )
-                return amount
 
             logger.debug(
                 f"Uniswap V2 conversion: {amount/1e18:.6f} → {converted_amount/1e18:.6f} "
@@ -1475,9 +1509,12 @@ class OffchainValuationKeeper:
             )
             return converted_amount
 
+        except RuntimeError:
+            # Re-raise our price deviation errors
+            raise
         except Exception as e:
-            logger.error(f"Error in Uniswap V2 conversion: {e}, using 1:1")
-            return amount
+            # MEDIUM FIX: Raise error instead of returning 1:1 on general errors
+            raise RuntimeError(f"Uniswap V2 conversion failed - cannot safely value: {e}") from e
 
     def _convert_via_chainlink(self, amount: int, from_asset: str, config: Dict) -> int:
         """
@@ -1546,20 +1583,25 @@ class OffchainValuationKeeper:
 
             # Sanity check
             if converted_amount < amount // 2 or converted_amount > amount * 2:
-                logger.warning(
-                    f"Chainlink conversion ratio {converted_amount/amount:.4f} outside [0.5, 2.0], "
-                    f"using 1:1"
+                # MEDIUM FIX: Raise error instead of returning 1:1
+                ratio = converted_amount / amount if amount > 0 else 0
+                raise RuntimeError(
+                    f"Chainlink conversion ratio {ratio:.4f} outside safe bounds [0.5, 2.0]. "
+                    f"This may indicate stale oracle data or extreme market conditions. "
+                    f"Cannot safely value assets with extreme price deviation."
                 )
-                return amount
 
             logger.debug(
                 f"Chainlink conversion: {amount/1e18:.6f} → {converted_amount/1e18:.6f}"
             )
             return converted_amount
 
+        except RuntimeError:
+            # Re-raise our price deviation errors
+            raise
         except Exception as e:
-            logger.error(f"Error in Chainlink conversion: {e}, using 1:1")
-            return amount
+            # MEDIUM FIX: Raise error instead of returning 1:1 on general errors
+            raise RuntimeError(f"Chainlink conversion failed - cannot safely value: {e}") from e
 
     def _convert_via_fixed_ratio(self, amount: int, config: Dict) -> int:
         """
@@ -1649,10 +1691,13 @@ class OffchainValuationKeeper:
                 - rate: Non-compounded annual rate (default 0.05 = 5%)
                 - felix_oracle_address: Auto-fetch rate from Felix oracle (overrides rate parameter)
                 - maturity: Unix timestamp of PT maturity (optional if auto_detect_maturity=true)
+                - start_date / issuance_date: Unix timestamp when PT was issued (RECOMMENDED for accurate pricing)
+                - duration: Total duration in seconds from issuance to maturity (alternative to start_date, default 1 year)
                 - auto_detect_maturity: Query maturity from contract (default false)
                 - fallback_to_oracle: Use Pendle oracle if linear fails (default true)
                 - pendle_market, pt_oracle: For fallback pricing
                 - validate_against_felix: Compare calculated price with Felix oracle (default false)
+                - max_divergence_pct: Max allowed divergence from Felix oracle before abort (default 5.0%)
 
         Returns:
             PT price ratio in 18 decimals (e.g., 0.95e18 = 95% of underlying)
@@ -1718,8 +1763,28 @@ class OffchainValuationKeeper:
             years_to_maturity = time_to_maturity / (365.25 * 24 * 3600)
             discount_factor = 1.0 / (1.0 + rate * years_to_maturity)
 
-            # 6. Calculate time fraction: t / T
-            time_fraction = float(current_time) / float(maturity)
+            # 6. Calculate time fraction: elapsed / total_duration
+            # CRITICAL FIX: time_fraction must be relative to issuance, NOT raw timestamps!
+            # Using raw timestamps (current_time / maturity) gives ~0.98 which nullifies the discount.
+            # Correct approach: (current_time - start_date) / (maturity - start_date)
+            start_date = extras.get('start_date', extras.get('issuance_date'))
+            if start_date:
+                # Proper calculation with known start date
+                total_duration = maturity - start_date
+                elapsed_time = current_time - start_date
+                time_fraction = max(0.0, min(1.0, float(elapsed_time) / float(total_duration)))
+                logger.debug(f"Linear discount: start_date={start_date}, elapsed={elapsed_time}, total={total_duration}")
+            else:
+                # Fallback: Use configured duration or derive from time_to_maturity
+                # Default assumption: 1 year duration if not specified
+                configured_duration = extras.get('duration', 365.25 * 24 * 3600)  # Default 1 year in seconds
+                elapsed_time = configured_duration - time_to_maturity
+                time_fraction = max(0.0, min(1.0, float(elapsed_time) / float(configured_duration)))
+                logger.warning(
+                    f"No start_date configured for linear discount model. "
+                    f"Using duration={configured_duration/86400:.1f}d. "
+                    f"For accurate pricing, configure 'start_date' or 'issuance_date' in strategy extras."
+                )
 
             # 7. Apply linear discount formula
             # P(t,T) = previewRedeem(1) × [(1 - discount_factor) × time_fraction + discount_factor]
@@ -1764,20 +1829,30 @@ class OffchainValuationKeeper:
                     felix_price = felix_price_36dec / 1e36
                     divergence = abs(price_ratio - felix_price) / felix_price * 100
 
+                    # Configurable max divergence threshold (default 5%)
+                    max_divergence = extras.get('max_divergence_pct', 5.0)
+
                     logger.info(
                         f"Felix oracle validation: "
                         f"keeper_price={price_ratio:.6f}, "
                         f"felix_price={felix_price:.6f}, "
-                        f"divergence={divergence:.2f}%"
+                        f"divergence={divergence:.2f}% (max allowed: {max_divergence}%)"
                     )
 
-                    if divergence > 5.0:  # Alert if >5% divergence
-                        logger.warning(
-                            f"⚠️  PRICE DIVERGENCE DETECTED: {divergence:.2f}% difference from Felix oracle! "
-                            f"keeper={price_ratio:.6f}, felix={felix_price:.6f}"
+                    if divergence > max_divergence:
+                        # MEDIUM FIX: Abort on high divergence instead of just logging!
+                        # Submitting incorrect prices can lead to protocol insolvency or exploits.
+                        raise RuntimeError(
+                            f"PRICE DIVERGENCE ABORT: {divergence:.2f}% difference from Felix oracle "
+                            f"exceeds max allowed {max_divergence}%! "
+                            f"keeper_price={price_ratio:.6f}, felix_price={felix_price:.6f}. "
+                            f"Review pricing model or adjust max_divergence_pct in config."
                         )
+                except RuntimeError:
+                    # Re-raise our own abort errors
+                    raise
                 except Exception as e:
-                    logger.debug(f"Could not validate against Felix oracle: {e}")
+                    logger.warning(f"Could not validate against Felix oracle (continuing): {e}")
 
             return price_18dec
 
