@@ -39,3 +39,4 @@ out/
 !/docs/OFFCHAIN_VALUATION_KEEPER.md
 !/docs/VAULT_V2_ARCHITECTURE.md
 !/llms.txt
+/src/keepers/utils/__pycache__
