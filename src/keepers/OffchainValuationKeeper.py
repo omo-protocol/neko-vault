@@ -1,20 +1,4 @@
 #!/usr/bin/env python3
-"""
-OffchainValuationKeeper - REFACTORED VERSION
-
-Main file reduced from 3,471 lines to 497 lines (86% reduction).
-
-Key changes from original:
-1. ABIs moved to utils/contract_utils.py ✅
-2. Math functions moved to utils/math_utils.py ✅
-3. Uniswap functions moved to utils/uniswap_utils.py ✅
-4. Lending functions moved to utils/lending_utils.py ✅
-5. Pricing functions moved to utils/pricing_utils.py ✅
-6. Conversion functions moved to utils/conversion_utils.py ✅
-7. Options functions moved to utils/options_utils.py ✅
-
-ALL UTILS MODULES COMPLETE - Production Ready
-"""
 
 import json
 import os
