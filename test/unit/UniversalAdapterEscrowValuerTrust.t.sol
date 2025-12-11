@@ -273,8 +273,8 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     /**
      * @notice Fuzz test: Verify valuer values always accepted if > 0
      * @dev SECURITY FIX: Updated for new security model (no tolerance threshold)
-     * @dev NOTE: This test validates realAssets() directly without cache refresh
-     *            to test the semantic-agnostic adjustment logic independently
+     * @dev NEW TRUST MODEL: realAssets() trusts the off-chain valuer completely
+     *      The off-chain valuer is responsible for handling donation detection/exclusion
      */
     function testFuzzValuerAlwaysTrusted(uint256 realValue, uint256 valuerReturn) public {
         // Skip edge case where realValue is 0 (cold start - no allocations)
@@ -283,7 +283,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Bound inputs - ensure realValue > 0 to avoid cold start edge case
         realValue = bound(realValue, 1000e18, 10000e18);
 
-        // Bound valuerReturn - can be any positive value (semantic-agnostic)
+        // Bound valuerReturn - can be any positive value
         valuerReturn = bound(valuerReturn, 1, realValue * 10);
 
         // Set valuer to return correct value BEFORE allocation
@@ -295,42 +295,17 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
 
-        // NOTE: We don't call refreshCachedValuation() here because:
-        // 1. This test validates realAssets() semantic-agnostic logic
-        // 2. refreshCachedValuation() has sanity checks that would reject extreme fuzz values
-        // 3. We want to test that realAssets() accepts any valuer value > 0
-
-        // Calculate excessIdle (donations) that will be excluded
-        uint256 balance = asset.balanceOf(address(adapter));
-        uint256 allocatedInAdapter = adapter.totalAllocations() - adapter.totalExternalDeposits();
-        uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
-
         // Ensure we actually allocated something
         vm.assume(adapter.totalAllocations() > 0);
-        vm.assume(allocatedInAdapter > 0);
-
-        // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
-        // Calculate expected adjusted value based on the semantic-agnostic logic:
-        // - If valuerReturn >= excessIdle: subtract excessIdle
-        // - If valuerReturn < excessIdle: add allocatedInAdapter
-        uint256 expectedValueAdj;
-        if (valuerReturn >= excessIdle) {
-            expectedValueAdj = valuerReturn - excessIdle;
-        } else {
-            expectedValueAdj = valuerReturn + allocatedInAdapter;
-        }
-
-        // Skip cases where adjustment would result in 0 (triggers ValuationUnavailable)
-        vm.assume(expectedValueAdj > 0);
 
         // Now set the fuzzed valuer return value
         maliciousValuer.setReturnValue(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
 
-        // Semantic-agnostic adjustment always produces a value > 0 (when allocations > 0)
-        // This prevents DoS from donations that would otherwise zero the adjusted value
-        assertEq(reportedAssets, expectedValueAdj, "Should use semantic-agnostic adjusted value");
+        // NEW TRUST MODEL: realAssets() returns exactly what the valuer reports (if > 0)
+        // The off-chain valuer is responsible for donation detection/exclusion
+        assertEq(reportedAssets, valuerReturn, "Should trust valuer value completely");
     }
 }
 

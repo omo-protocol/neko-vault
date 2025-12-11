@@ -161,10 +161,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             ? totalAllocations - totalExternalDeposits
             : 0;
 
-        uint256 excessIdle = balance > allocatedInAdapter
-            ? balance - allocatedInAdapter
-            : 0;
-
         uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
@@ -176,17 +172,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
 
-            uint256 totalValueAdj;
-            if (totalValue >= excessIdle) {
-                totalValueAdj = totalValue - excessIdle;
-            } else {
-                totalValueAdj = totalValue + allocatedInAdapter;
-            }
-            if (totalValueAdj > 0) {
+            if (totalValue > 0) {
                 if (emergencyMode) {
-                    return totalValueAdj * (10000 - EMERGENCY_HAIRCUT) / 10000;
+                    return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
                 }
-                return totalValueAdj;
+                return totalValue;
             }
         }
         if (totalAllocations == 0) {
