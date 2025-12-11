@@ -80,6 +80,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error ValuerStillUnavailable();
     error LiquidityDataMustHaveEmptyCalls();
     error InsufficientAdapterBalance(uint256 available, uint256 requested);
+    error StrategyIdCollisionWithEscrowTotal(); // SECURITY FIX: strategyId cannot equal ESCROW_TOTAL ID
 
     /* EXTERNAL FUNCTIONS */
 

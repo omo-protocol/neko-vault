@@ -1634,6 +1634,40 @@ contract UniversalAdapterEscrowTest is Test {
         uint256 remainingAllocation = adapter.getAllocation(strategyId);
         assertEq(remainingAllocation, 0, "Allocation should be zero");
     }
+
+    /* SECURITY FIX: ESCROW_TOTAL ID NAMESPACE COLLISION PREVENTION */
+
+    function testSetStrategyRevertsIfStrategyIdEqualsEscrowTotal() public {
+        // SECURITY FIX: Prevent same-escrow collision where owner accidentally sets
+        // strategyId = ESCROW_TOTAL ID, which would allow strategy updates to
+        // overwrite the total valuation
+
+        // Compute the ESCROW_TOTAL ID for this adapter
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+
+        // Trying to set a strategy with ID equal to ESCROW_TOTAL should revert
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.StrategyIdCollisionWithEscrowTotal.selector);
+        adapter.setStrategy(escrowTotalId, agent, "", 1000e6);
+    }
+
+    function testSetStrategySucceedsWithNormalStrategyId() public {
+        // Normal strategy IDs should work fine
+        bytes32 normalStrategyId = keccak256("SOME_STRATEGY");
+
+        // This should NOT equal the ESCROW_TOTAL ID
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        assertTrue(normalStrategyId != escrowTotalId, "Test setup: IDs should be different");
+
+        // Setting strategy should succeed
+        vm.prank(owner);
+        adapter.setStrategy(normalStrategyId, agent, "", 1000e6);
+
+        // Verify strategy was set
+        IUniversalAdapterEscrow.StrategyConfig memory config = adapter.getStrategy(normalStrategyId);
+        assertTrue(config.active, "Strategy should be active");
+        assertEq(config.agent, agent, "Agent should be set correctly");
+    }
 }
 
 // Mock protocol for testing withdrawals and deposits

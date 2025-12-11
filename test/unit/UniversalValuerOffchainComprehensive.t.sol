@@ -1916,6 +1916,156 @@ contract UniversalValuerOffchainComprehensive is Test {
     }
 
     event DefaultConfidenceThresholdUpdated(uint256 newThreshold);
+
+    /* ESCROW_TOTAL ID NAMESPACE COLLISION SECURITY FIX TESTS */
+
+    function testRegisterEscrowTotal() public {
+        // Create a mock escrow address
+        address mockEscrow = address(0xBEEF);
+
+        // Compute the expected total ID for the mock escrow
+        bytes32 expectedTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
+
+        // Mock escrow registers its total ID
+        vm.prank(mockEscrow);
+        valuer.registerEscrowTotal(expectedTotalId);
+
+        // Verify registration
+        address registeredEscrow = valuer.getRegisteredEscrow(expectedTotalId);
+        assertEq(registeredEscrow, mockEscrow, "Escrow should be registered for its total ID");
+    }
+
+    function testRegisterEscrowTotalInvalidIdReverts() public {
+        address mockEscrow = address(0xBEEF);
+
+        // Try to register a different ID than the expected one
+        bytes32 wrongTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(0xDEAD)));
+
+        vm.prank(mockEscrow);
+        vm.expectRevert(IUniversalValuerOffchain.InvalidEscrowTotalRegistration.selector);
+        valuer.registerEscrowTotal(wrongTotalId);
+    }
+
+    function testCannotUpdateRegisteredEscrowTotalId() public {
+        // Create a mock escrow and register its total ID
+        address mockEscrow = address(0xBEEF);
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
+
+        vm.prank(mockEscrow);
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Try to update the registered ESCROW_TOTAL ID via strategy update
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(
+            escrowTotalId, // Using the registered ESCROW_TOTAL ID as strategyId
+            1000e18,
+            95,
+            1,
+            block.timestamp + 1 hours,
+            signer1Key
+        );
+
+        // Should revert because the ID is reserved
+        vm.expectRevert(IUniversalValuerOffchain.CannotUpdateReservedEscrowTotal.selector);
+        valuer.updateValue(escrowTotalId, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
+    }
+
+    function testCannotBatchUpdateRegisteredEscrowTotalId() public {
+        // Create a mock escrow and register its total ID
+        address mockEscrow = address(0xBEEF);
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
+
+        vm.prank(mockEscrow);
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Try to batch update including the registered ESCROW_TOTAL ID
+        bytes32[] memory strategyIds = new bytes32[](2);
+        strategyIds[0] = STRATEGY_A;
+        strategyIds[1] = escrowTotalId; // Reserved ID
+
+        uint256[] memory values = new uint256[](2);
+        values[0] = 1000e18;
+        values[1] = 2000e18;
+
+        uint256[] memory confidences = new uint256[](2);
+        confidences[0] = 95;
+        confidences[1] = 95;
+
+        // Generate batch hash and sign
+        bytes32 batchHash = keccak256(abi.encode(
+            strategyIds,
+            values,
+            confidences,
+            1, // nonce
+            block.timestamp + 1 hours, // expiry
+            block.chainid,
+            address(valuer)
+        ));
+
+        bytes32 ethSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            batchHash
+        ));
+
+        bytes[] memory signatures = new bytes[](1);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signer1Key, ethSignedHash);
+        signatures[0] = abi.encodePacked(r, s, v);
+
+        // Should revert because one of the IDs is reserved
+        vm.expectRevert(IUniversalValuerOffchain.CannotUpdateReservedEscrowTotal.selector);
+        valuer.batchUpdateValues(strategyIds, values, confidences, 1, block.timestamp + 1 hours, signatures);
+    }
+
+    function testCrossEscrowCollisionPrevention() public {
+        // Scenario: Attacker tries to manipulate victim escrow's total valuation
+        address attackerEscrow = address(0xA77AC6E4);
+        address victimEscrow = address(0xBEEF);
+
+        // Victim escrow registers its ESCROW_TOTAL ID
+        bytes32 victimTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", victimEscrow));
+        vm.prank(victimEscrow);
+        valuer.registerEscrowTotal(victimTotalId);
+
+        // Attacker cannot use victim's ESCROW_TOTAL ID as a strategy ID because it's reserved
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(victimTotalId, 1e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+
+        vm.expectRevert(IUniversalValuerOffchain.CannotUpdateReservedEscrowTotal.selector);
+        valuer.updateValue(victimTotalId, 1e18, 95, 1, block.timestamp + 1 hours, signatures);
+    }
+
+    function testReRegistrationIsIdempotent() public {
+        address mockEscrow = address(0xBEEF);
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
+
+        // First registration
+        vm.prank(mockEscrow);
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Same escrow can re-register (idempotent)
+        vm.prank(mockEscrow);
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Verify still registered
+        assertEq(valuer.getRegisteredEscrow(escrowTotalId), mockEscrow);
+    }
+
+    function testDifferentEscrowCannotHijackRegistration() public {
+        address legitimateEscrow = address(0xBEEF);
+        address attackerEscrow = address(0xBAD);
+
+        bytes32 legitimateTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", legitimateEscrow));
+
+        // Legitimate escrow registers first
+        vm.prank(legitimateEscrow);
+        valuer.registerEscrowTotal(legitimateTotalId);
+
+        // Attacker cannot register the same ID (even though the check would fail anyway)
+        // This tests the additional guard in registerEscrowTotal
+        vm.prank(attackerEscrow);
+        vm.expectRevert(IUniversalValuerOffchain.InvalidEscrowTotalRegistration.selector);
+        valuer.registerEscrowTotal(legitimateTotalId);
+    }
 }
 
 contract SimpleMockAdapter {

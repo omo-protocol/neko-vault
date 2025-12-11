@@ -51,6 +51,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     // Absolute staleness limit (beyond this, don't use stale values to prevent double-counting)
     uint256 public constant ABSOLUTE_MAX_STALENESS = 48 hours; // Hard limit on stale value usage
 
+    // SECURITY FIX: Reserved ESCROW_TOTAL IDs to prevent namespace collision
+    // Maps totalId => escrow address (address(0) means not reserved)
+    mapping(bytes32 => address) public registeredEscrowTotals;
+
     /* MODIFIERS */
 
     modifier onlyOwner() {
@@ -82,6 +86,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 expiry,
         bytes[] calldata signatures
     ) external override notEmergency {
+        // SECURITY FIX: Prevent strategy updates from overwriting ESCROW_TOTAL IDs
+        // This prevents namespace collision attacks where an attacker could set a strategyId
+        // equal to another escrow's ESCROW_TOTAL ID and manipulate its valuation
+        if (registeredEscrowTotals[strategyId] != address(0)) {
+            revert CannotUpdateReservedEscrowTotal();
+        }
+
         ValueReport memory lastReport = latestReports[strategyId];
 
         // Validate nonce to prevent replay
@@ -263,6 +274,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             revert ArrayLengthMismatch();
         }
 
+        // SECURITY FIX: Check all IDs are not reserved ESCROW_TOTAL IDs before processing
+        for (uint256 i = 0; i < strategyIds.length; i++) {
+            if (registeredEscrowTotals[strategyIds[i]] != address(0)) {
+                revert CannotUpdateReservedEscrowTotal();
+            }
+        }
+
         // Validate signature expiry
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
@@ -333,6 +351,35 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             emit ValueUpdated(strategyId, values[i], confidences[i], block.timestamp, true);
         }
+    }
+
+    /* ESCROW TOTAL REGISTRATION */
+
+    /// @notice Register an ESCROW_TOTAL ID to prevent collision with strategy IDs
+    /// @dev Called by escrow contracts during deployment. Only the escrow matching the totalId can register.
+    /// @param totalId The ESCROW_TOTAL ID (must match keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender)))
+    function registerEscrowTotal(bytes32 totalId) external {
+        // SECURITY FIX: Verify caller is the escrow that owns this totalId
+        // This prevents attackers from registering arbitrary IDs as ESCROW_TOTAL
+        bytes32 expectedId = keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender));
+        if (totalId != expectedId) {
+            revert InvalidEscrowTotalRegistration();
+        }
+
+        // Allow re-registration (idempotent) but must be same escrow
+        if (registeredEscrowTotals[totalId] != address(0) && registeredEscrowTotals[totalId] != msg.sender) {
+            revert InvalidEscrowTotalRegistration();
+        }
+
+        registeredEscrowTotals[totalId] = msg.sender;
+        emit EscrowTotalRegistered(totalId, msg.sender);
+    }
+
+    /// @notice Check if an ID is a registered ESCROW_TOTAL
+    /// @param id The ID to check
+    /// @return escrow The escrow address that registered this ID (address(0) if not registered)
+    function getRegisteredEscrow(bytes32 id) external view returns (address escrow) {
+        return registeredEscrowTotals[id];
     }
 
     /* ADMIN FUNCTIONS */

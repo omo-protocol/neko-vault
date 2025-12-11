@@ -81,6 +81,8 @@ interface IUniversalValuerOffchain {
 
     event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
 
+    event EscrowTotalRegistered(bytes32 indexed totalId, address indexed escrow);
+
     /* ERRORS */
 
     error NotAuthorized();
@@ -105,6 +107,8 @@ interface IUniversalValuerOffchain {
     error InitialValueExceedsMax(uint256 value, uint256 maxInitialValue);
     error UpdateIntervalExceedsStaleness(); // L-03 FIX: minUpdateInterval must be < maxStaleness
     error StrategyNotConfigured();
+    error CannotUpdateReservedEscrowTotal(); // SECURITY FIX: Cannot update ESCROW_TOTAL IDs via strategy updates
+    error InvalidEscrowTotalRegistration(); // SECURITY FIX: Only valid ESCROW_TOTAL IDs can be registered
 
     /* FUNCTIONS */
 
@@ -163,4 +167,14 @@ interface IUniversalValuerOffchain {
     /// @param strategyId The strategy identifier
     /// @return The full value report
     function getReport(bytes32 strategyId) external view returns (ValueReport memory);
+
+    /// @notice Register an ESCROW_TOTAL ID to prevent collision with strategy IDs
+    /// @dev Called by escrow contracts during deployment to protect their total ID
+    /// @param totalId The ESCROW_TOTAL ID (must match keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender)))
+    function registerEscrowTotal(bytes32 totalId) external;
+
+    /// @notice Check if an ID is a registered ESCROW_TOTAL
+    /// @param id The ID to check
+    /// @return escrow The escrow address that registered this ID (address(0) if not registered)
+    function getRegisteredEscrow(bytes32 id) external view returns (address escrow);
 }

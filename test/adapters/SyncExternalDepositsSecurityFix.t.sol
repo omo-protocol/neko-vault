@@ -23,9 +23,12 @@ contract SyncExternalDepositsSecurityFixTest is Test {
         vm.mockCall(mockVault, abi.encodeWithSignature("asset()"), abi.encode(mockAsset));
         vm.mockCall(mockVault, abi.encodeWithSignature("owner()"), abi.encode(owner));
         vm.mockCall(mockAsset, abi.encodeWithSignature("approve(address,uint256)"), abi.encode(true));
-        
+
+        // Mock the registerEscrowTotal call that the constructor makes when _useOffchainValuer is true
+        vm.mockCall(mockValuer, abi.encodeWithSignature("registerEscrowTotal(bytes32)"), abi.encode());
+
         adapter = new UniversalAdapterEscrow(mockVault, mockValuer, true);
-        
+
         vm.startPrank(owner);
         adapter.setStrategy(strategyA, owner, "", 0);
         adapter.setStrategy(strategyB, owner, "", 0);
