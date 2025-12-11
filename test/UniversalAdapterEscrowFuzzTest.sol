@@ -1235,7 +1235,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     // ============================================
 
     /// @notice Fuzz test: refreshCachedValuation updates cache
-    /// @dev The valuer value must account for the excessIdle calculation
+    /// @dev refreshCachedValuation() still has excessIdle adjustment for sanity checking
     function testFuzz_RefreshCachedValuation(uint256 allocAmount) public {
         // Bound allocation amount to reasonable range
         allocAmount = bound(allocAmount, 1000e18, INITIAL_BALANCE / 2);
@@ -1250,16 +1250,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
-        // Calculate what valuer value should be:
-        // balance = INITIAL_BALANCE
-        // allocatedInAdapter = totalAllocations - totalExternalDeposits = allocAmount - 0 = allocAmount
-        // excessIdle = balance - allocatedInAdapter = INITIAL_BALANCE - allocAmount
-        // If totalValue >= excessIdle: totalValueAdj = totalValue - excessIdle
-        // We need: 80% * allocAmount <= totalValueAdj <= 150% * allocAmount
-        // So: totalValue = totalValueAdj + excessIdle = allocAmount + (INITIAL_BALANCE - allocAmount) = INITIAL_BALANCE
-        // This is for 100% - let's use that
-        uint256 excessIdle = INITIAL_BALANCE - allocAmount;
-        uint256 valuerValue = allocAmount + excessIdle; // = INITIAL_BALANCE
+        // NEW TRUST MODEL: refreshCachedValuation() now trusts the valuer completely (no adjustment)
+        // It checks that totalValue is within 75-150% of totalAllocations
+        // Off-chain valuer handles donation exclusion, so it reports just the allocated value
+        uint256 valuerValue = allocAmount; // Valuer reports actual value (excluding donations)
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
         valuer.setValue(totalId, valuerValue);
@@ -1289,9 +1283,8 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
-        // Calculate correct valuer value (see testFuzz_RefreshCachedValuation for logic)
-        uint256 excessIdle = INITIAL_BALANCE - allocAmount;
-        uint256 valuerValue = allocAmount + excessIdle; // = INITIAL_BALANCE
+        // NEW TRUST MODEL: refreshCachedValuation() trusts valuer completely (see testFuzz_RefreshCachedValuation)
+        uint256 valuerValue = allocAmount;
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
         valuer.setValue(totalId, valuerValue);

@@ -545,11 +545,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @notice Refresh cached valuation from current valuer state
     function refreshCachedValuation() external {
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-        uint256 allocatedInAdapter = totalAllocations > totalExternalDeposits
-            ? totalAllocations - totalExternalDeposits : 0;
-        uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
-
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
         (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
@@ -558,23 +553,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (success && data.length >= 32) {
             uint256 totalValue = abi.decode(data, (uint256));
-            uint256 totalValueAdj;
-
-            if (totalValue >= excessIdle) {
-                totalValueAdj = totalValue - excessIdle;
-            } else {
-                totalValueAdj = totalValue + allocatedInAdapter;
-            }
 
             if (totalAllocations > 0) {
-                require(totalValueAdj >= (totalAllocations * 80) / 100, "Valuation too low - check valuer");
-                require(totalValueAdj <= (totalAllocations * 150) / 100, "Valuation too high - check valuer");
+                require(totalValue >= (totalAllocations * 75) / 100, "Valuation too low - check valuer");
+                require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high - check valuer");
             }
 
-            if (totalValueAdj > 0) {
-                cachedValuation = totalValueAdj;
+            if (totalValue > 0) {
+                cachedValuation = totalValue;
                 cachedValuationTimestamp = block.timestamp;
-                emit CachedValuationRefreshed(totalValueAdj, block.timestamp);
+                emit CachedValuationRefreshed(totalValue, block.timestamp);
             }
         } else {
             revert("Valuer call failed");
