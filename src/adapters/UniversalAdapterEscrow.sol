@@ -73,18 +73,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         SafeERC20Lib.safeApprove(asset, _parentVault, type(uint256).max);
 
-        // SECURITY FIX: Register this escrow's ESCROW_TOTAL ID with the valuer
-        // This prevents cross-escrow namespace collision attacks where an attacker
-        // could set their strategyId = victim's ESCROW_TOTAL ID and manipulate valuations
         if (_useOffchainValuer && _valuer != address(0)) {
             bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-            // Use try-catch to make deployment resilient if valuer doesn't support registration
-            // (e.g., older valuer versions or mock valuers in tests)
             try IUniversalValuerOffchain(_valuer).registerEscrowTotal(escrowTotalId) {
-                // Successfully registered
             } catch {
-                // Registration failed - valuer may not support this feature
-                // Continue deployment but log for awareness (handled at integration level)
             }
         }
     }
@@ -209,12 +201,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
         }
 
-        // By reverting, we force the system to pause until:
-        // 1. Valuer recovers and returns valid data, OR
-        // 2. Cached valuation is refreshed (keeper calls refreshCachedValuation), OR
-        // 3. Admin enables emergencyMode (with expectation to also gate deposits via EmergencyGate)
-        // This prevents both dilution (no deposits at underpriced valuation) and unfair
-        // withdrawals (no exits at underpriced valuation either).
         revert ValuationUnavailable();
     }
 
@@ -225,9 +211,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bytes calldata preConfiguredData,
         uint256 dailyLimit
     ) external onlyOwner {
-        // SECURITY FIX: Prevent strategyId from colliding with this escrow's ESCROW_TOTAL ID
-        // This prevents same-escrow collision where owner accidentally sets strategyId = ESCROW_TOTAL
-        // which would allow strategy updates to overwrite the total valuation
         bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
         if (strategyId == escrowTotalId) {
             revert StrategyIdCollisionWithEscrowTotal();

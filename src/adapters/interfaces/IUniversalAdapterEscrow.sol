@@ -56,9 +56,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     event PartialDeallocate(bytes32 indexed strategyId, uint256 requested, uint256 actual);
     event StrategyWithdrawn(bytes32 indexed strategyId, uint256 amount, address indexed executor);
 
-    // NOTE: ExternalDepositsSynced event removed - proportional syncing across all strategies is unrealistic
-    // Use syncExternalDepositsPerStrategy() with ExternalDepositSyncedPerStrategy events instead
-
     /* ERRORS */
 
     error NotAuthorized();
@@ -137,11 +134,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     ) external;
 
     /// @notice Withdraw assets from external protocol to refill adapter balance
-    /// @dev SECURITY FIX (Unbounded Gas): Agents call this to pull liquidity before user withdrawals
-    ///      - Called by strategy agent or owner (not in user withdrawal path)
-    ///      - No gas limit constraints (can execute complex multicalls)
-    ///      - Updates externalDeposits tracking via valuer sync
-    ///      - Enables lazy deallocation pattern for cross-chain safety
     /// @param strategyId The strategy to withdraw from
     /// @param withdrawCalls Array of calls to execute protocol withdrawals
     /// @param minBalanceIncrease Minimum balance increase required (slippage protection)

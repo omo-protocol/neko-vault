@@ -43,44 +43,31 @@ interface IUniversalValuerOffchain {
         uint256 timestamp,
         bool isPush
     );
-
     event UpdateRequested(
         bytes32 indexed strategyId,
         address requester,
         UpdateReason reason
     );
-
     event SignerConfigured(
         address indexed signer,
         bool authorized,
         uint256 weight
     );
-
     event StrategyConfigured(
         bytes32 indexed strategyId,
         uint256 minUpdateInterval,
         uint256 maxStaleness,
         uint256 pushThreshold
     );
-
     event RequiredWeightUpdated(uint256 newWeight);
-
     event DefaultConfidenceThresholdUpdated(uint256 newThreshold);
-
     event FallbackValueSet(bytes32 indexed strategyId, uint256 value);
-
     event EmergencyModeToggled(bool enabled);
-
     event EmergencyValueUpdate(bytes32 indexed strategyId, uint256 value);
-
     event SignerRemovalInitiated(address indexed signer, uint256 executeTimestamp);
-
     event SignerRemovalCancelled(address indexed signer);
-
     event PriceChangeBoundsSet(bytes32 indexed strategyId, uint256 maxChangeBps);
-
     event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
-
     event EscrowTotalRegistered(bytes32 indexed totalId, address indexed escrow);
 
     /* ERRORS */
