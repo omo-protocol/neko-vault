@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IVaultV2} from "./interfaces/IVaultV2.sol";
+import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
 
 /**
  * @title VaultTimeLockWrapper
@@ -145,10 +146,15 @@ contract VaultTimeLockWrapper {
         if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Pull assets from caller
-        asset.transferFrom(from, address(this), assets);
+        SafeERC20Lib.safeTransferFrom(
+            address(asset),
+            from,
+            address(this),
+            assets
+        );
 
         // Approve and deposit to vault
-        asset.approve(address(vault), assets);
+        SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
         uint256 shares = vault.deposit(assets, address(this));
 
         // SECURITY FIX: Reject zero-share deposits (prevents batch spam)
@@ -182,7 +188,13 @@ contract VaultTimeLockWrapper {
         assets = vault.previewMint(shares);
 
         // Pull assets and deposit
-        asset.transferFrom(msg.sender, address(this), assets);
+         SafeERC20Lib.safeTransferFrom(
+            address(asset),
+            msg.sender,
+            address(this),
+            assets
+        );
+
         asset.approve(address(vault), assets);
         vault.mint(shares, address(this));
 

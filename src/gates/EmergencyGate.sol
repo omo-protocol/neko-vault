@@ -165,8 +165,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;  // Allow receiving shares from withdrawals
-        if (mode == Mode.WITHDRAWAL_ONLY) return false;  // Block deposits -> block receiving shares from deposits
+        if (mode == Mode.DEPOSIT_ONLY) return false; 
+        if (mode == Mode.WITHDRAWAL_ONLY) return true;
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
@@ -198,8 +198,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;  // Block deposits (note: vault bypasses this for withdrawals)
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;  // Allow deposits
+        if (mode == Mode.DEPOSIT_ONLY) return true;
+        if (mode == Mode.WITHDRAWAL_ONLY) return false;
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
