@@ -39,8 +39,9 @@ contract UniversalAdapterEscrowE2E is Test {
         // Deploy vault
         vault = new MockVaultV2(address(asset), owner);
 
-        // Deploy factory and adapter
+        // Deploy factory and adapter (must be called by vault owner)
         factory = new UniversalAdapterEscrowFactory();
+        vm.startPrank(owner);
         adapter = UniversalAdapterEscrow(
             payable(factory.deployAdapter(
                 address(vault),
@@ -51,7 +52,6 @@ contract UniversalAdapterEscrowE2E is Test {
         );
 
         // Setup vault
-        vm.startPrank(owner);
         vault.addAdapter(address(adapter));
         vm.stopPrank();
 
@@ -392,7 +392,8 @@ contract UniversalAdapterEscrowE2E is Test {
             keccak256("test-deployment")
         );
 
-        // Deploy with same parameters
+        // Deploy with same parameters (must be called by vault owner)
+        vm.prank(owner);
         address deployed = factory.deployAdapter(
             address(vault),
             address(valuer),

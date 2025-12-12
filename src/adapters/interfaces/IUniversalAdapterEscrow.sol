@@ -200,6 +200,10 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return The valuer address
     function valuer() external view returns (address);
 
+    /// @notice Get the owner address
+    /// @return The owner address
+    function owner() external view returns (address);
+
     /// @notice Get idle assets that are not allocated to any strategy
     /// @return idleAssets Amount of assets sitting idle in the adapter
     function getIdleAssets() external view returns (uint256 idleAssets);

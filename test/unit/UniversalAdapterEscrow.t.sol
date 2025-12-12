@@ -51,7 +51,8 @@ contract UniversalAdapterEscrowTest is Test {
         // Deploy factory
         factory = new UniversalAdapterEscrowFactory();
 
-        // Deploy adapter via factory
+        // Deploy adapter via factory (must be called by vault owner)
+        vm.startPrank(owner);
         adapter = UniversalAdapterEscrow(
             payable(factory.deployAdapter(
                 address(vault),
@@ -62,7 +63,6 @@ contract UniversalAdapterEscrowTest is Test {
         );
 
         // Setup initial state
-        vm.startPrank(owner);
         vault.addAdapter(address(adapter));
         vm.stopPrank();
 
@@ -1633,6 +1633,36 @@ contract UniversalAdapterEscrowTest is Test {
         // Verify allocation was fully depleted
         uint256 remainingAllocation = adapter.getAllocation(strategyId);
         assertEq(remainingAllocation, 0, "Allocation should be zero");
+    }
+
+    /* SECURITY FIX: PERMISSIONLESS CREATE2 DEPLOYMENT PREVENTION */
+
+    function testFactoryDeploymentOnlyByVaultOwner() public {
+        // SECURITY FIX: Verify that only vault owner can deploy adapters
+        // This prevents front-running attacks where an attacker could deploy
+        // with known salt/params and capture adapter ownership
+
+        UniversalAdapterEscrowFactory newFactory = new UniversalAdapterEscrowFactory();
+
+        // Attacker tries to deploy adapter for the vault
+        vm.prank(attacker);
+        vm.expectRevert(UniversalAdapterEscrowFactory.OnlyVaultOwnerCanDeploy.selector);
+        newFactory.deployAdapter(
+            address(vault),
+            address(valuer),
+            false,
+            keccak256("attacker-salt")
+        );
+
+        // Owner can successfully deploy
+        vm.prank(owner);
+        address deployed = newFactory.deployAdapter(
+            address(vault),
+            address(valuer),
+            false,
+            keccak256("owner-salt")
+        );
+        assertTrue(deployed != address(0), "Owner should be able to deploy");
     }
 
     /* SECURITY FIX: ESCROW_TOTAL ID NAMESPACE COLLISION PREVENTION */
