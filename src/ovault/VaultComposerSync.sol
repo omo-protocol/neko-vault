@@ -82,10 +82,6 @@ contract VaultComposerSync is BaseVaultComposerSync {
         uint256 _vaultInAmount,
         SendParam memory _sendParam
     ) external view override returns (MessagingFee memory) {
-        // SECURITY FIX: Removed max* checks - incompatible with VaultV2's conservative design
-        // VaultV2.maxDeposit/maxRedeem return 0 to maintain ERC-4626 revert-free guarantee
-        // Actual gate validation happens at execution time (deposit/redeem calls)
-        
         if (_targetOFT == ASSET_OFT) {
             // Withdrawing: Convert shares to assets estimate
             // VaultV2.previewRedeem calculates assets user would receive for given shares
@@ -98,5 +94,16 @@ contract VaultComposerSync is BaseVaultComposerSync {
         
         // Get LayerZero messaging fee for the cross-chain send
         return IOFT(_targetOFT).quoteSend(_sendParam, false);
+    }
+
+    /// @dev Prevent ETH from being locked on local sends by rejecting non-zero msg.value.
+    function _sendLocal(
+        address _oft,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        uint256 _msgValue
+    ) internal override {
+        require(_msgValue == 0, "NonZeroMsgValueOnLocal");
+        super._sendLocal(_oft, _sendParam, _refundAddress, _msgValue);
     }
 }
