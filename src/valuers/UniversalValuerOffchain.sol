@@ -146,6 +146,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @inheritdoc IUniversalValuerOffchain
     function getValue(bytes32 strategyId) external view override returns (uint256) {
+        // SECURITY FIX: Handle registered ESCROW_TOTAL IDs by computing aggregated value
+        // This fixes the API mismatch where realAssets() calls getValue(ESCROW_TOTAL_ID)
+        // but ESCROW_TOTAL IDs cannot be updated via updateValue()/batchUpdateValues()
+        address escrow = registeredEscrowTotals[strategyId];
+        if (escrow != address(0)) {
+            return _computeTotalValue(escrow);
+        }
+
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
@@ -176,6 +184,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @inheritdoc IUniversalValuerOffchain
     function getTotalValue(address escrow) external view override returns (uint256 totalValue) {
+        return _computeTotalValue(escrow);
+    }
+
+    /// @dev Internal helper to compute total value for an escrow
+    /// @dev Used by both getValue(ESCROW_TOTAL_ID) and getTotalValue(escrow)
+    /// @param escrow The escrow address to compute total value for
+    /// @return totalValue The sum of all strategy values plus idle balance
+    function _computeTotalValue(address escrow) internal view returns (uint256 totalValue) {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {

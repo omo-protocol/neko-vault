@@ -188,4 +188,188 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         uint256 totalValue = valuer.getTotalValue(address(adapter));
         assertEq(totalValue, 0, "Total value is 0 after strategy removal");
     }
+
+    /* SECURITY FIX: getValue(ESCROW_TOTAL_ID) INTEGRATION TESTS */
+
+    /// @notice Test that getValue(ESCROW_TOTAL_ID) returns the same value as getTotalValue(escrow)
+    /// This is the core fix for the API mismatch between UniversalAdapterEscrow and UniversalValuerOffchain
+    function test_getValue_EscrowTotalId_EqualsGetTotalValue() public {
+        // Compute the ESCROW_TOTAL ID for the adapter
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+
+        // Register the ESCROW_TOTAL ID (this is what the adapter does in constructor when useOffchainValuer=true)
+        vm.prank(address(adapter));
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Give adapter some idle assets
+        asset.mint(address(adapter), 100e18);
+
+        // Both functions should return the same value
+        uint256 valueViaGetValue = valuer.getValue(escrowTotalId);
+        uint256 valueViaGetTotalValue = valuer.getTotalValue(address(adapter));
+
+        assertEq(valueViaGetValue, valueViaGetTotalValue, "getValue(ESCROW_TOTAL_ID) should equal getTotalValue(escrow)");
+        assertEq(valueViaGetValue, 100e18, "Should return idle balance");
+    }
+
+    /// @notice Test getValue(ESCROW_TOTAL_ID) returns aggregated strategy values plus idle balance
+    function test_getValue_EscrowTotalId_ReturnsAggregatedValue() public {
+        // Setup signer
+        uint256 signerKey = 0x1234;
+        address signer = vm.addr(signerKey);
+
+        vm.startPrank(owner);
+        valuer.initiateSignerChange(signer, true, 100);
+        valuer.setRequiredWeight(100);
+        vm.stopPrank();
+
+        // Compute and register the ESCROW_TOTAL ID
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        vm.prank(address(adapter));
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Allocate funds to make the strategy active
+        asset.mint(address(vault), 100e18);
+
+        vm.startPrank(owner);
+        bytes memory setAllocatorCall = abi.encodeWithSelector(vault.setIsAllocator.selector, owner, true);
+        vault.submit(setAllocatorCall);
+        vm.warp(block.timestamp + 1);
+        vault.setIsAllocator(owner, true);
+
+        bytes memory idData = bytes("test-strategy");
+        bytes memory setAbsCapCall = abi.encodeWithSelector(vault.increaseAbsoluteCap.selector, idData, 1000e18);
+        vault.submit(setAbsCapCall);
+        vm.warp(block.timestamp + 1);
+        vault.increaseAbsoluteCap(idData, 1000e18);
+
+        bytes memory setRelCapCall = abi.encodeWithSelector(vault.increaseRelativeCap.selector, idData, 1e18);
+        vault.submit(setRelCapCall);
+        vm.warp(block.timestamp + 1);
+        vault.increaseRelativeCap(idData, 1e18);
+
+        bytes memory allocData = abi.encode(
+            strategyId,
+            100e18,
+            false,
+            new IUniversalAdapterEscrow.Call[](0)
+        );
+        vault.allocate(address(adapter), allocData, 100e18);
+        vm.stopPrank();
+
+        // Update the strategy value in the valuer
+        bytes32 hash = keccak256(abi.encode(
+            strategyId,
+            500e18, // value
+            95,     // confidence
+            1,      // nonce
+            block.timestamp + 1 hours, // expiry
+            block.chainid,
+            address(valuer)
+        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            hash
+        ));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = abi.encodePacked(r, s, v);
+
+        valuer.updateValue(strategyId, 500e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // Get idle balance in adapter
+        uint256 idleBalance = asset.balanceOf(address(adapter));
+
+        // getValue(ESCROW_TOTAL_ID) should return strategy value + idle balance
+        uint256 totalValue = valuer.getValue(escrowTotalId);
+        assertEq(totalValue, 500e18 + idleBalance, "Should return strategy value + idle balance");
+    }
+
+    /// @notice Test that unregistered ESCROW_TOTAL IDs still revert (security)
+    function test_getValue_UnregisteredEscrowTotalId_RevertsValueTooStale() public {
+        // Compute ESCROW_TOTAL ID but don't register it
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+
+        // Should revert because it's not registered (treated as regular strategy ID with no report)
+        vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
+        valuer.getValue(escrowTotalId);
+    }
+
+    /// @notice Test getValue(ESCROW_TOTAL_ID) returns idle balance when all strategies are stale
+    function test_getValue_EscrowTotalId_ReturnsIdleBalanceWhenAllStale() public {
+        // Setup signer
+        uint256 signerKey = 0x1234;
+        address signer = vm.addr(signerKey);
+
+        vm.startPrank(owner);
+        valuer.initiateSignerChange(signer, true, 100);
+        valuer.setRequiredWeight(100);
+        vm.stopPrank();
+
+        // Register ESCROW_TOTAL ID
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        vm.prank(address(adapter));
+        valuer.registerEscrowTotal(escrowTotalId);
+
+        // Allocate funds to make strategy active
+        asset.mint(address(vault), 100e18);
+
+        vm.startPrank(owner);
+        bytes memory setAllocatorCall = abi.encodeWithSelector(vault.setIsAllocator.selector, owner, true);
+        vault.submit(setAllocatorCall);
+        vm.warp(block.timestamp + 1);
+        vault.setIsAllocator(owner, true);
+
+        bytes memory idData = bytes("test-strategy");
+        bytes memory setAbsCapCall = abi.encodeWithSelector(vault.increaseAbsoluteCap.selector, idData, 1000e18);
+        vault.submit(setAbsCapCall);
+        vm.warp(block.timestamp + 1);
+        vault.increaseAbsoluteCap(idData, 1000e18);
+
+        bytes memory setRelCapCall = abi.encodeWithSelector(vault.increaseRelativeCap.selector, idData, 1e18);
+        vault.submit(setRelCapCall);
+        vm.warp(block.timestamp + 1);
+        vault.increaseRelativeCap(idData, 1e18);
+
+        bytes memory allocData = abi.encode(
+            strategyId,
+            100e18,
+            false,
+            new IUniversalAdapterEscrow.Call[](0)
+        );
+        vault.allocate(address(adapter), allocData, 100e18);
+        vm.stopPrank();
+
+        // Update strategy value
+        bytes32 hash = keccak256(abi.encode(
+            strategyId,
+            500e18,
+            95,
+            1,
+            block.timestamp + 1 hours,
+            block.chainid,
+            address(valuer)
+        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            hash
+        ));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = abi.encodePacked(r, s, v);
+
+        valuer.updateValue(strategyId, 500e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // Fast forward past ABSOLUTE_MAX_STALENESS (48 hours)
+        vm.warp(block.timestamp + 49 hours);
+
+        // Get idle balance in adapter
+        uint256 idleBalance = asset.balanceOf(address(adapter));
+
+        // getValue(ESCROW_TOTAL_ID) should return just idle balance since strategy value is stale
+        uint256 totalValue = valuer.getValue(escrowTotalId);
+        assertEq(totalValue, idleBalance, "Should return only idle balance when strategies are stale");
+    }
 }
