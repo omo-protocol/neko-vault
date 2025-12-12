@@ -488,28 +488,38 @@ contract VaultTimeLockWrapper {
         uint256 batchesConsumed = 0;
 
         while (remaining > 0 && batchesConsumed < fromDeposits.length) {
-            // SECURITY FIX: Check batch limit BEFORE each push to prevent cap bypass
-            // Previous vulnerability: checked once at start, allowing multiple pushes to exceed limit
-            if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
-
             DepositBatch storage sourceBatch = fromDeposits[batchesConsumed];
 
-            if (sourceBatch.amount <= remaining) {
-                // Transfer entire batch to receiver
+            uint256 transferAmount = sourceBatch.amount <= remaining
+                ? sourceBatch.amount
+                : remaining;
+
+            // SECURITY FIX: Merge batches with same depositTime to prevent transfer spam DoS
+            // Without this fix, an attacker could fill a victim's batch array (max 100)
+            // with tiny transfers, blocking the victim from receiving vTokens
+            bool merged = false;
+            if (toDeposits.length > 0) {
+                DepositBatch storage lastBatch = toDeposits[toDeposits.length - 1];
+                if (lastBatch.depositTime == sourceBatch.depositTime) {
+                    lastBatch.amount += transferAmount;
+                    merged = true;
+                }
+            }
+
+            if (!merged) {
+                // SECURITY FIX: Check batch limit only when creating NEW batch
+                if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
+
                 toDeposits.push(DepositBatch({
-                    amount: sourceBatch.amount,
+                    amount: transferAmount,
                     depositTime: sourceBatch.depositTime // Preserve original deposit time
                 }));
+            }
 
+            if (sourceBatch.amount <= remaining) {
                 remaining -= sourceBatch.amount;
                 batchesConsumed++;
             } else {
-                // Partial batch transfer
-                toDeposits.push(DepositBatch({
-                    amount: remaining,
-                    depositTime: sourceBatch.depositTime // Preserve original deposit time
-                }));
-
                 sourceBatch.amount -= remaining;
                 remaining = 0;
             }
