@@ -376,8 +376,12 @@ contract UniversalTokenWrapper {
     }
 
     function previewWithdraw(uint256 assets) public view returns (uint256) {
-        uint256 shares = convertToShares(assets);
-        return shares > 0 ? shares : 1; // avoid zero shares for dust asset
+        uint256 a = totalAssets();
+        uint256 s = totalSupply;
+        if (s == 0 || a == 0) {
+            return assets;
+        }
+        return assets.mulDivUp(s, a);
     }
 
     function previewRedeem(uint256 shares) public view returns (uint256) {

@@ -195,7 +195,7 @@ contract VaultTimeLockWrapper {
             assets
         );
 
-        asset.approve(address(vault), assets);
+        SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
         vault.mint(shares, address(this));
 
         // Create deposit batch and mint vTokens
