@@ -70,6 +70,19 @@ interface IUniversalValuerOffchain {
     event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
     event EscrowTotalRegistered(bytes32 indexed totalId, address indexed escrow);
     event EmergencyMinConfidenceUpdated(uint256 newThreshold);
+    event StaleStrategySkipped(bytes32 indexed strategyId, uint256 stalenessAge, uint256 maxStaleness);
+    event ValuationHealthChecked(address indexed escrow, bool isHealthy, uint256 freshCount, uint256 staleCount);
+
+    /* STRUCTS - Health Check */
+
+    /// @notice Result of total value computation with staleness metadata
+    struct TotalValueResult {
+        uint256 value;           // Total computed value
+        bool hasStaleData;       // True if any strategy used stale/fallback data
+        uint256 freshCount;      // Number of strategies with fresh values
+        uint256 staleCount;      // Number of strategies with stale values
+        uint256 fallbackCount;   // Number of strategies using fallback values
+    }
 
     /* ERRORS */
 
@@ -166,4 +179,14 @@ interface IUniversalValuerOffchain {
     /// @param id The ID to check
     /// @return escrow The escrow address that registered this ID (address(0) if not registered)
     function getRegisteredEscrow(bytes32 id) external view returns (address escrow);
+
+    /// @notice Get total value with staleness metadata for health-aware callers
+    /// @param escrow The escrow address
+    /// @return result Struct containing value and staleness indicators
+    function getTotalValueWithHealth(address escrow) external view returns (TotalValueResult memory result);
+
+    /// @notice Check if escrow valuation is healthy (no stale data)
+    /// @param escrow The escrow address
+    /// @return healthy True if all strategies have fresh values
+    function isValuationHealthy(address escrow) external view returns (bool healthy);
 }

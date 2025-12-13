@@ -649,9 +649,31 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
         uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // SECURITY FIX: Should still return last known value even if stale to prevent manipulation
-        // This prevents malicious users from exploiting price drops when values go stale
-        assertEq(totalValue, 1000e18);
+        // SECURITY FIX: Stale values WITHOUT fallback should contribute 0 to prevent stale-price exploitation
+        // This fixes the vulnerability where extended 24h-48h staleness window enabled mispricing attacks
+        // Strategies should have fallback values configured to be included when stale
+        assertEq(totalValue, 0); // Only idle balance (0 in mock adapter)
+    }
+
+    function testGetTotalValueStaleReportsWithFallback() public {
+        // Create a simple mock adapter that returns STRATEGY_A as active
+        SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
+
+        // Setup value
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // Set fallback value
+        vm.prank(owner);
+        valuer.setFallbackValue(STRATEGY_A, 800e18);
+
+        // Fast forward to make stale
+        vm.warp(block.timestamp + MAX_STALENESS + 1);
+
+        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
+        // When stale with fallback configured, should use fallback value
+        assertEq(totalValue, 800e18);
     }
 
     function testGetTotalValueLowConfidence() public {

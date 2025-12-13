@@ -188,11 +188,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         return _computeTotalValue(escrow);
     }
 
-    /// @dev Internal helper to compute total value for an escrow
-    /// @dev Used by both getValue(ESCROW_TOTAL_ID) and getTotalValue(escrow)
+    /// @dev Internal helper to compute total value for an escrow with staleness tracking
+    /// @dev SECURITY FIX: Removed Path 2 (24h-48h extended acceptance) to prevent stale-price exploitation
     /// @param escrow The escrow address to compute total value for
-    /// @return totalValue The sum of all strategy values plus idle balance
-    function _computeTotalValue(address escrow) internal view returns (uint256 totalValue) {
+    /// @return result Struct containing value and staleness indicators
+    function _computeTotalValueWithStaleness(address escrow) internal view returns (IUniversalValuerOffchain.TotalValueResult memory result) {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -201,25 +201,47 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             UpdateConfig memory config = updateConfigs[strategyId];
 
             uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
-            // SECURITY FIX: Use config.minConfidence > 0 (not minUpdateInterval) for consistency with getValue()
             uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
+            // PATH 1: Fresh value with high confidence (HEALTHY)
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
-                totalValue += report.value;
-            } else if (stalenessAge <= ABSOLUTE_MAX_STALENESS && report.confidence >= minConfidence) {
-                totalValue += report.value;
-            } else if (fallbackValues[strategyId] > 0) {
-                totalValue += fallbackValues[strategyId];
-            // SECURITY FIX: Path 4 now requires emergencyMinConfidence to prevent accepting 0-confidence values
-            } else if (report.value > 0 && stalenessAge <= ABSOLUTE_MAX_STALENESS && report.confidence >= emergencyMinConfidence) {
-                totalValue += report.value;
+                result.value += report.value;
+                result.freshCount++;
+            }
+            // PATH 2: REMOVED - No longer accept values between maxStaleness and ABSOLUTE_MAX_STALENESS
+            // This was the vulnerability enabling stale-price exploitation (24h-48h window)
+
+            // PATH 3: Fallback value if configured
+            else if (fallbackValues[strategyId] > 0) {
+                result.value += fallbackValues[strategyId];
+                result.hasStaleData = true;
+                result.fallbackCount++;
+            }
+            // PATH 4: Emergency fallback - FIXED to require maxStaleness (not ABSOLUTE_MAX_STALENESS)
+            else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence) {
+                result.value += report.value;
+                result.hasStaleData = true;
+                result.staleCount++;
+            }
+            // PATH 5: Stale with no fallback - strategy contributes 0, emit event for monitoring
+            else {
+                result.hasStaleData = true;
+                result.staleCount++;
+                // Note: Event emission in view function is not possible, handled by getTotalValueWithHealth()
             }
         }
 
-        totalValue += IERC20(asset).balanceOf(escrow);
+        result.value += IERC20(asset).balanceOf(escrow);
+    }
 
-        return totalValue;
+    /// @dev Internal helper to compute total value for an escrow
+    /// @dev Used by both getValue(ESCROW_TOTAL_ID) and getTotalValue(escrow)
+    /// @param escrow The escrow address to compute total value for
+    /// @return totalValue The sum of all strategy values plus idle balance
+    function _computeTotalValue(address escrow) internal view returns (uint256 totalValue) {
+        IUniversalValuerOffchain.TotalValueResult memory result = _computeTotalValueWithStaleness(escrow);
+        return result.value;
     }
 
     /// @inheritdoc IUniversalValuerOffchain
@@ -504,6 +526,17 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Check if signer is authorized
     function isAuthorizedSigner(address signer) external view returns (bool) {
         return signers[signer].authorized;
+    }
+
+    /// @inheritdoc IUniversalValuerOffchain
+    function getTotalValueWithHealth(address escrow) external view override returns (IUniversalValuerOffchain.TotalValueResult memory result) {
+        return _computeTotalValueWithStaleness(escrow);
+    }
+
+    /// @inheritdoc IUniversalValuerOffchain
+    function isValuationHealthy(address escrow) external view override returns (bool healthy) {
+        IUniversalValuerOffchain.TotalValueResult memory result = _computeTotalValueWithStaleness(escrow);
+        return !result.hasStaleData;
     }
 
     /* INTERNAL FUNCTIONS */

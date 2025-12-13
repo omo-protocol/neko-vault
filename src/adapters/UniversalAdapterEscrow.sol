@@ -172,6 +172,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
+        // SECURITY FIX: Check valuation health to detect stale data
+        // Only apply haircut if health check explicitly returns false (unhealthy)
+        // If health check fails (e.g., valuer doesn't implement it), don't auto-haircut
+        bool hasStaleData = false;
+        (bool healthSuccess, bytes memory healthData) = valuer.staticcall(
+            abi.encodeWithSignature("isValuationHealthy(address)", address(this))
+        );
+        if (healthSuccess && healthData.length >= 32) {
+            bool isHealthy = abi.decode(healthData, (bool));
+            hasStaleData = !isHealthy;
+        }
+
         (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
@@ -180,7 +192,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 totalValue = abi.decode(data, (uint256));
 
             if (totalValue > 0) {
-                if (emergencyMode) {
+                // SECURITY FIX: Apply haircut if valuation explicitly has stale data OR in emergency mode
+                // This prevents exploitation through stale valuations
+                if (hasStaleData || emergencyMode) {
                     return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
                 }
                 return totalValue;
