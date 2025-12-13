@@ -16,7 +16,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
     uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
-    uint256 private constant VALUER_GAS_STIPEND = 200000;
     uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
     /* IMMUTABLES */
@@ -173,7 +172,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
@@ -417,7 +416,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function syncStrategyWithValuer(bytes32 strategyId) external onlyOwner {
         if (!strategies[strategyId].active) revert StrategyNotActive();
 
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", strategyId)
         );
 
@@ -493,7 +492,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
@@ -554,7 +553,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function refreshCachedValuation() external {
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
@@ -663,7 +662,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (trackedValue == 0) return;
 
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", strategyId)
         );
 
@@ -796,7 +795,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (!emergencyMode) revert EmergencyModeNotEnabled();
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-        (bool success, bytes memory data) = valuer.staticcall{gas: VALUER_GAS_STIPEND}(
+        (bool success, bytes memory data) = valuer.staticcall(
             abi.encodeWithSignature("getValue(bytes32)", totalId)
         );
 
