@@ -42,6 +42,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     mapping(bytes32 => uint256) public maxPriceChangeBps;
     mapping(bytes32 => uint256) public maxInitialValue;
     uint256 public constant ABSOLUTE_MAX_STALENESS = 48 hours;
+    uint256 public emergencyMinConfidence = 50; // SECURITY FIX: Minimum confidence for Path 4 emergency fallback
     mapping(bytes32 => address) public registeredEscrowTotals;
 
     /* MODIFIERS */
@@ -200,7 +201,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             UpdateConfig memory config = updateConfigs[strategyId];
 
             uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
-            uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
+            // SECURITY FIX: Use config.minConfidence > 0 (not minUpdateInterval) for consistency with getValue()
+            uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
@@ -209,7 +211,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
                 totalValue += report.value;
             } else if (fallbackValues[strategyId] > 0) {
                 totalValue += fallbackValues[strategyId];
-            } else if (report.value > 0 && stalenessAge <= ABSOLUTE_MAX_STALENESS) {
+            // SECURITY FIX: Path 4 now requires emergencyMinConfidence to prevent accepting 0-confidence values
+            } else if (report.value > 0 && stalenessAge <= ABSOLUTE_MAX_STALENESS && report.confidence >= emergencyMinConfidence) {
                 totalValue += report.value;
             }
         }
@@ -409,6 +412,18 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (threshold > 100) revert LowConfidence(); // Reuse existing error for invalid confidence
         defaultConfidenceThreshold = threshold;
         emit DefaultConfidenceThresholdUpdated(threshold);
+    }
+
+    /// @notice Set emergency minimum confidence threshold for Path 4 fallback
+    /// @dev This threshold is used when normal confidence requirements fail but
+    ///      the value is still within ABSOLUTE_MAX_STALENESS
+    /// @param threshold New emergency confidence threshold (0-100)
+    function setEmergencyMinConfidence(uint256 threshold) external onlyOwner {
+        if (threshold > 100) revert InvalidEmergencyConfidence();
+        // Emergency threshold should be lower than normal threshold
+        if (threshold > defaultConfidenceThreshold) revert InvalidEmergencyConfidence();
+        emergencyMinConfidence = threshold;
+        emit EmergencyMinConfidenceUpdated(threshold);
     }
 
     /// @notice Set price change bounds for a strategy

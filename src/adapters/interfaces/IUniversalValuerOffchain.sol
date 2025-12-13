@@ -69,6 +69,7 @@ interface IUniversalValuerOffchain {
     event PriceChangeBoundsSet(bytes32 indexed strategyId, uint256 maxChangeBps);
     event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
     event EscrowTotalRegistered(bytes32 indexed totalId, address indexed escrow);
+    event EmergencyMinConfidenceUpdated(uint256 newThreshold);
 
     /* ERRORS */
 
@@ -96,6 +97,7 @@ interface IUniversalValuerOffchain {
     error StrategyNotConfigured();
     error CannotUpdateReservedEscrowTotal(); // SECURITY FIX: Cannot update ESCROW_TOTAL IDs via strategy updates
     error InvalidEscrowTotalRegistration(); // SECURITY FIX: Only valid ESCROW_TOTAL IDs can be registered
+    error InvalidEmergencyConfidence(); // SECURITY FIX: Invalid emergency confidence threshold
 
     /* FUNCTIONS */
 
