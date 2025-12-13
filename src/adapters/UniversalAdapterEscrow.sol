@@ -206,8 +206,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (emergencyMode && cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
             // NOTE: Valuer unhealthy -> using cached fallback. This value is for internal accounting only.
             // Integrators SHOULD gate user deposits/withdrawals when this branch is used (via a valuation health gate).
-            uint256 haircuttedBaseline = allocatedInAdapterBounded +
-                (totalExternalDeposits * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+            uint256 haircuttedBaseline = ((allocatedInAdapterBounded +
+                totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
             return cachedValuation < haircuttedBaseline ? cachedValuation : haircuttedBaseline;
         }
         if (emergencyMode) { // gate deposits/withdrawals via EmergencyGate
