@@ -300,7 +300,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
             if (balanceAfter > balanceBefore) {
                 uint256 withdrawnAmount = balanceAfter - balanceBefore;
-                if (withdrawnAmount > minBalanceIncrease) withdrawnAmount = minBalanceIncrease;
+                // Use full withdrawnAmount for accounting - slippage check above already validated minimum
+                // This prevents ghost deposits when actual withdrawal exceeds minBalanceIncrease
 
                 uint256 oldExtDeposits = externalDeposits[strategyId];
                 uint256 reduction = withdrawnAmount;
