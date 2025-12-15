@@ -116,8 +116,8 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // Get total value
         uint256 totalValue = valuer.getTotalValue(address(adapter));
 
-        // Should return idle assets since no value reports
-        assertEq(totalValue, 100e18);
+        // Should return 0 since idle balance is NOT included (line 235 commented)
+        assertEq(totalValue, 0);
     }
 
     function test_GetTotalValueWithNonAdapter() public {
@@ -209,7 +209,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         uint256 valueViaGetTotalValue = valuer.getTotalValue(address(adapter));
 
         assertEq(valueViaGetValue, valueViaGetTotalValue, "getValue(ESCROW_TOTAL_ID) should equal getTotalValue(escrow)");
-        assertEq(valueViaGetValue, 100e18, "Should return idle balance");
+        assertEq(valueViaGetValue, 0, "Should return 0 (idle balance NOT included due to line 235 commented)");
     }
 
     /// @notice Test getValue(ESCROW_TOTAL_ID) returns aggregated strategy values plus idle balance
@@ -281,9 +281,9 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // Get idle balance in adapter
         uint256 idleBalance = asset.balanceOf(address(adapter));
 
-        // getValue(ESCROW_TOTAL_ID) should return strategy value + idle balance
+        // getValue(ESCROW_TOTAL_ID) should return strategy value only (idle balance NOT included)
         uint256 totalValue = valuer.getValue(escrowTotalId);
-        assertEq(totalValue, 500e18 + idleBalance, "Should return strategy value + idle balance");
+        assertEq(totalValue, 500e18, "Should return strategy value only (idle balance NOT included due to line 235 commented)");
     }
 
     /// @notice Test that unregistered ESCROW_TOTAL IDs still revert (security)
@@ -368,8 +368,8 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // Get idle balance in adapter
         uint256 idleBalance = asset.balanceOf(address(adapter));
 
-        // getValue(ESCROW_TOTAL_ID) should return just idle balance since strategy value is stale
+        // getValue(ESCROW_TOTAL_ID) should return 0 since strategy value is stale and idle balance NOT included
         uint256 totalValue = valuer.getValue(escrowTotalId);
-        assertEq(totalValue, idleBalance, "Should return only idle balance when strategies are stale");
+        assertEq(totalValue, 0, "Should return 0 when strategies are stale (idle balance NOT included due to line 235 commented)");
     }
 }

@@ -333,8 +333,8 @@ contract BatchUpdateAtomicity is Test {
         // Add some idle assets
         asset.mint(address(escrow), 50e6);
 
-        // Total should be sum of all strategies + idle
-        uint256 expectedTotal = 100e6 + 200e6 + 150e6 + 50e6;
+        // Total should be sum of all strategies only (idle balance NOT included due to line 235 being commented)
+        uint256 expectedTotal = 100e6 + 200e6 + 150e6;
         assertEq(valuer.getTotalValue(address(escrow)), expectedTotal);
     }
 

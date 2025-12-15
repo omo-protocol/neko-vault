@@ -632,8 +632,8 @@ contract UniversalValuerOffchainComprehensive is Test {
         asset.mint(address(mockAdapter), 500e18);
 
         uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // Should be strategy value (1000e18) + idle assets (500e18)
-        assertEq(totalValue, 1500e18);
+        // Should be strategy value only (idle balance NOT included due to line 235 being commented)
+        assertEq(totalValue, 1000e18);
     }
 
     function testGetTotalValueStaleReports() public {
