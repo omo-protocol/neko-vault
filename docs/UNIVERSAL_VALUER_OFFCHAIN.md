@@ -47,7 +47,7 @@ UniversalValuerOffchain.updateValue()
     ▼
 UniversalAdapterEscrow.realAssets()
     │
-    └─── Queries getValue() / getTotalValue()
+    └─── Queries getValue(ESCROW_TOTAL_ID) + isValuationHealthy()
 ```
 
 ---
@@ -220,22 +220,19 @@ function getValue(bytes32 strategyId) external view returns (uint256)
 2. Fallback value (if no report exists)
 3. Revert `ValueTooStale` or `LowConfidence`
 
-#### `getTotalValue`
+#### `isValuationHealthy`
 
 ```solidity
-function getTotalValue(address escrow) external view returns (uint256 totalValue)
+function isValuationHealthy(address escrow) external view returns (bool healthy)
 ```
 
-**Purpose**: Aggregate all strategy values for an escrow.
+**Purpose**: Check if all strategies for an escrow have fresh valuation data.
 
-**Value Selection Priority** (per strategy):
-1. Fresh value (staleness ≤ maxStaleness, confidence ≥ minConfidence)
-2. Moderately stale (staleness ≤ ABSOLUTE_MAX_STALENESS)
-3. Fallback value
-4. Last known value (only if within 48h)
-5. Exclude (return 0 for strategy)
+**Returns**:
+- `true` if all strategies have fresh values (within maxStaleness, confidence >= minConfidence)
+- `false` if any strategy has stale data or uses fallback values
 
-**Includes**: Idle assets via `IERC20(asset).balanceOf(escrow)`
+**Note**: The adapter uses `getValue(ESCROW_TOTAL_ID)` to get the pre-computed total value pushed by the keeper. This function is used by the adapter to determine if a haircut should be applied.
 
 ### Admin Functions
 
@@ -442,7 +439,7 @@ event EmergencyValueUpdate(bytes32 indexed strategyId, uint256 value);
 | **Price Bounds** | Change ≤ maxPriceChangeBps (or first value ≤ maxInitialValue) |
 | **Config Consistency** | `minUpdateInterval < maxStaleness` |
 | **Atomic Batches** | All strategies update or none update |
-| **Absolute Staleness** | Values older than 48h never used in getTotalValue |
+| **Absolute Staleness** | Values older than 48h never used in health checks |
 
 ### Key Assumptions
 

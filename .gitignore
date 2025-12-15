@@ -19,25 +19,11 @@ out/
 /.claude
 *.md
 
-!comprehensive-test-documentation.md
-!security-audit-reference.md
-!UNIVERSAL_ADAPTER_README.md
-!SECURITY_IMPROVEMENTS_SUMMARY.md
-!defi-protocol-rebase-integration.md
-!rebase-token-integration-flow.md
 /venv-keeper
 /src/keepers/__pycache__
 
-!VaultTimeLockWrapper-TechnicalDocumentation.md
-!VaultTimeLockWrapper.md
-
-!/docs/OVAULT_FLOW_DIAGRAMS.md
-!/docs/OVAULT_VISUAL_SUMMARY.md
-!/docs/OVAULT_FRONTEND_INTEGRATION.md
-!/docs/UNIVERSAL_ADAPTER_ESCROW.md
-!/docs/UNIVERSAL_VALUER_OFFCHAIN.md
-!/docs/OFFCHAIN_VALUATION_KEEPER.md
-!/docs/VAULT_V2_ARCHITECTURE.md
 !/llms.txt
 /src/keepers/utils/__pycache__
 keeper/keeper_config_looper_test.json
+
+!/docs/*.md
