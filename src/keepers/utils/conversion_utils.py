@@ -38,6 +38,9 @@ def read_underlying_balance(w3: Web3, erc20_abi: list, token: str, holder: str) 
     """
     Read ERC20 balanceOf(holder) for token.
 
+    WARNING: This reads raw balanceOf() which is vulnerable to donation attacks!
+    For escrow idle assets, use read_escrow_tracked_idle() instead.
+
     Args:
         w3: Web3 instance
         erc20_abi: ERC20 ABI
@@ -54,6 +57,69 @@ def read_underlying_balance(w3: Web3, erc20_abi: list, token: str, holder: str) 
         return int(erc.functions.balanceOf(holder_cs).call())
     except Exception as e:
         raise RuntimeError(f"balanceOf({token}, {holder}) failed: {e}")
+
+
+def read_escrow_tracked_idle(
+    w3: Web3,
+    adapter_abi: list,
+    erc20_abi: list,
+    escrow_address: str,
+    strategy_id: bytes
+) -> int:
+    """
+    Read tracked idle assets from escrow using accounting-based protection.
+
+    DONATION ATTACK PROTECTION:
+    Instead of raw balanceOf(), uses:
+        tracked_idle = allocations[strategyId] - externalDeposits[strategyId]
+    Then bounds by actual balance to prevent over-counting.
+
+    This prevents attackers from inflating valuation by donating assets
+    directly to the escrow contract.
+
+    Args:
+        w3: Web3 instance
+        adapter_abi: UniversalAdapterEscrow ABI (with allocations, externalDeposits)
+        erc20_abi: ERC20 ABI
+        escrow_address: Escrow contract address
+        strategy_id: Strategy ID (bytes32)
+
+    Returns:
+        Tracked idle assets (bounded by actual balance)
+    """
+    try:
+        escrow_cs = Web3.to_checksum_address(escrow_address)
+        escrow = w3.eth.contract(address=escrow_cs, abi=adapter_abi)
+
+        # Read tracked values from escrow accounting
+        allocations = int(escrow.functions.allocations(strategy_id).call())
+        external_deposits = int(escrow.functions.externalDeposits(strategy_id).call())
+
+        # Calculate tracked idle (what should be in escrow for this strategy)
+        tracked_idle = allocations - external_deposits if allocations > external_deposits else 0
+
+        # Get actual balance as upper bound (can't count more than exists)
+        asset_address = escrow.functions.asset().call()
+        asset = w3.eth.contract(address=Web3.to_checksum_address(asset_address), abi=erc20_abi)
+        actual_balance = int(asset.functions.balanceOf(escrow_cs).call())
+
+        # Return minimum of tracked and actual (protects against both over-counting and under-counting)
+        bounded_idle = min(tracked_idle, actual_balance)
+
+        logger.debug(
+            f"Escrow tracked idle: allocations={allocations/1e18:.6f}, "
+            f"externalDeposits={external_deposits/1e18:.6f}, "
+            f"tracked_idle={tracked_idle/1e18:.6f}, "
+            f"actual_balance={actual_balance/1e18:.6f}, "
+            f"bounded_idle={bounded_idle/1e18:.6f}"
+        )
+
+        return bounded_idle
+
+    except Exception as e:
+        logger.error(f"Failed to read escrow tracked idle: {e}")
+        # Fallback to 0 for safety (don't use raw balance as fallback!)
+        return 0
 
 
 def auto_detect_token_order(w3: Web3, uniswap_v3_pool_abi: list, uniswap_v2_pair_abi: list, pool_address: str, from_asset: str, pool_type: str = 'v3') -> bool:

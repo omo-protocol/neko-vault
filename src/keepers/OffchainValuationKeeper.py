@@ -306,27 +306,34 @@ class OffchainValuationKeeper:
         PT-kHYPE looping strategy using Felix lending.
 
         Valuation Logic:
-        1. Read idle kHYPE from escrow (deposited but not yet looped, or unwound)
+        1. Read idle kHYPE from escrow (using tracked accounting, not raw balanceOf)
         2. Read PT-kHYPE balance from escrow
         3. Get PT price
         4. Calculate PT value in underlying
         5. Read debt from Felix
         6. Total value = idle kHYPE + PT value - debt
 
+        DONATION ATTACK PROTECTION:
+        Uses read_escrow_tracked_idle() instead of raw balanceOf() for escrow idle assets.
+        This prevents attackers from inflating valuation by donating directly to escrow.
+
         REFACTORED: Uses utils.pricing_utils and utils.lending_utils ✅
         """
         extras = s.extras or {}
 
-        # 1. Get idle kHYPE from escrow (deposited but not yet converted to PT, or unwound)
+        # 1. Get idle kHYPE from escrow using TRACKED VALUES (donation attack protection)
+        # Uses allocations[strategyId] - externalDeposits[strategyId] instead of raw balanceOf
         escrow_khype_balance = 0
-        if s.escrow and s.underlying:
-            escrow_khype_balance = conversion_utils.read_underlying_balance(
+        if s.escrow:
+            strategy_id = to_strategy_id(s.id_text)
+            escrow_khype_balance = conversion_utils.read_escrow_tracked_idle(
                 w3=self.w3,
+                adapter_abi=ADAPTER_ABI,
                 erc20_abi=ERC20_ABI,
-                token=s.underlying,  # kHYPE (underlying asset)
-                holder=s.escrow
+                escrow_address=s.escrow,
+                strategy_id=strategy_id
             )
-            logger.debug(f"[{s.id_text}] Escrow idle kHYPE: {escrow_khype_balance/1e18:.6f}")
+            logger.debug(f"[{s.id_text}] Escrow tracked idle kHYPE: {escrow_khype_balance/1e18:.6f}")
 
         # 2. Get PT balance from escrow
         pt_address = extras.get('pt_khype_address')
@@ -417,8 +424,8 @@ class OffchainValuationKeeper:
         - When unwinding, only kHYPE returns to Escrow
 
         Valuation Logic:
-        1. Read kHYPE balance from escrow (idle/unwound funds)
-        2. Read kHYPE balance from looper (idle, waiting to loop)
+        1. Read kHYPE balance from escrow (using tracked accounting)
+        2. Read kHYPE balance from looper (bounded by externalDeposits)
         3. Read PT-kHYPE collateral from looper (aToken in HyperLend)
         4. Get PT-kHYPE price
         5. Calculate looper PT value in underlying (kHYPE)
@@ -426,6 +433,12 @@ class OffchainValuationKeeper:
         7. Looper net value = looper kHYPE + PT value - debt
         8. Total value = escrow kHYPE + looper net value
         9. Monitor health factor
+
+        DONATION ATTACK PROTECTION:
+        - Escrow: Uses read_escrow_tracked_idle() (allocations - externalDeposits)
+        - Looper: Bounds raw balance by externalDeposits (can't exceed what was sent)
+        - PT collateral (aToken): Safe - tracked by HyperLend protocol
+        - Debt: Safe - can't be reduced by donation
 
         REFACTORED: Uses utils.pricing_utils and utils.lending_utils
         """
@@ -444,25 +457,69 @@ class OffchainValuationKeeper:
             logger.error(f"[{s.id_text}] Missing looper_address")
             return 0
 
-        # 1. Get kHYPE balance from escrow (idle/unwound funds)
-        escrow_khype_balance = 0
-        if s.escrow:
-            escrow_khype_balance = conversion_utils.read_underlying_balance(
-                w3=self.w3,
-                erc20_abi=ERC20_ABI,
-                token=s.underlying,  # kHYPE
-                holder=s.escrow
-            )
-            logger.debug(f"[{s.id_text}] Escrow kHYPE balance: {escrow_khype_balance/1e18:.6f}")
+        strategy_id = to_strategy_id(s.id_text)
 
-        # 2. Get idle kHYPE from looper (waiting to be looped)
-        looper_khype_balance = conversion_utils.read_underlying_balance(
+        # 1. Get kHYPE from escrow using TRACKED VALUES (donation attack protection)
+        escrow_khype_balance = 0
+        external_deposits = 0
+        if s.escrow:
+            escrow_khype_balance = conversion_utils.read_escrow_tracked_idle(
+                w3=self.w3,
+                adapter_abi=ADAPTER_ABI,
+                erc20_abi=ERC20_ABI,
+                escrow_address=s.escrow,
+                strategy_id=strategy_id
+            )
+            logger.debug(f"[{s.id_text}] Escrow tracked idle kHYPE: {escrow_khype_balance/1e18:.6f}")
+
+            # Read externalDeposits to bound looper balance (donation protection)
+            try:
+                escrow_contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(s.escrow),
+                    abi=ADAPTER_ABI
+                )
+                external_deposits = int(escrow_contract.functions.externalDeposits(strategy_id).call())
+            except Exception as e:
+                logger.warning(f"[{s.id_text}] Failed to read externalDeposits: {e}")
+                external_deposits = 0
+
+        # 2. Get idle kHYPE from looper with DONATION PROTECTION
+        # Read raw balance, but bound to prevent donation attacks while allowing yield
+        looper_khype_raw = conversion_utils.read_underlying_balance(
             w3=self.w3,
             erc20_abi=ERC20_ABI,
             token=s.underlying,  # kHYPE
             holder=looper_address
         )
-        logger.debug(f"[{s.id_text}] Looper idle kHYPE: {looper_khype_balance/1e18:.6f}")
+
+        # Get previous valuer value to allow for yield (yield was already validated by valuer)
+        previous_valuer_value = 0
+        try:
+            report = self.valuer.functions.getReport(strategy_id).call()
+            previous_valuer_value = int(report[0])  # value field
+            logger.debug(f"[{s.id_text}] Previous valuer value: {previous_valuer_value/1e18:.6f}")
+        except Exception as e:
+            logger.debug(f"[{s.id_text}] Could not read previous valuer value: {e}")
+
+        # Calculate maximum allowed looper balance:
+        # 1. externalDeposits = what was sent from escrow (baseline)
+        # 2. previous_valuer_value = includes validated yield (allows growth)
+        # Use the higher of the two to allow yield while preventing donations
+        max_allowed = max(external_deposits, previous_valuer_value)
+
+        # Bound looper balance to prevent donation attacks
+        looper_khype_balance = min(looper_khype_raw, max_allowed) if max_allowed > 0 else looper_khype_raw
+
+        if looper_khype_raw > max_allowed and max_allowed > 0:
+            excess = looper_khype_raw - max_allowed
+            logger.warning(
+                f"[{s.id_text}] DONATION ATTACK DETECTED: "
+                f"Looper has {looper_khype_raw/1e18:.6f} kHYPE but max allowed is {max_allowed/1e18:.6f} "
+                f"(externalDeposits={external_deposits/1e18:.6f}, prevValue={previous_valuer_value/1e18:.6f}). "
+                f"Ignoring excess {excess/1e18:.6f} kHYPE"
+            )
+
+        logger.debug(f"[{s.id_text}] Looper bounded kHYPE: {looper_khype_balance/1e18:.6f}")
 
         # 3. Get PT-kHYPE collateral from looper (aToken in HyperLend)
         atoken_address = extras.get('pt_atoken_address')

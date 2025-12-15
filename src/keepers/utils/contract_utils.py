@@ -117,7 +117,7 @@ VALUER_ABI = [
     {"name": "asset", "inputs": [], "outputs": [{"type": "address"}], "stateMutability": "view", "type": "function"},
 ]
 
-# UniversalAdapterEscrow ABI (for cache refresh)
+# UniversalAdapterEscrow ABI (for cache refresh and donation protection)
 ADAPTER_ABI = [
     {"name": "refreshCachedValuation", "inputs": [], "outputs": [], "stateMutability": "nonpayable", "type": "function"},
     {"name": "getCachedValuation", "inputs": [], "outputs": [
@@ -125,6 +125,17 @@ ADAPTER_ABI = [
         {"name": "timestamp", "type": "uint256"},
         {"name": "isStale", "type": "bool"}
     ], "stateMutability": "view", "type": "function"},
+    # Donation attack protection: Use tracked values instead of raw balanceOf()
+    {"name": "allocations", "inputs": [{"name": "strategyId", "type": "bytes32"}],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"name": "externalDeposits", "inputs": [{"name": "strategyId", "type": "bytes32"}],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"name": "totalAllocations", "inputs": [],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"name": "totalExternalDeposits", "inputs": [],
+     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"name": "asset", "inputs": [],
+     "outputs": [{"type": "address"}], "stateMutability": "view", "type": "function"},
 ]
 
 # Uniswap V3 NonFungiblePositionManager ABI (includes ERC721Enumerable)
