@@ -40,3 +40,4 @@ out/
 !/docs/VAULT_V2_ARCHITECTURE.md
 !/llms.txt
 /src/keepers/utils/__pycache__
+keeper/keeper_config_looper_test.json

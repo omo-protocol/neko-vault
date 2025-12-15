@@ -734,23 +734,54 @@ class OffchainValuationKeeper:
             return 1
 
     def _sign_update(self, strategy_id: bytes, value: int, confidence: int, nonce: int, expiry: int) -> bytes:
-        """Create EIP-191 signature for value update"""
-        # ... original signing logic ...
+        """
+        Create EIP-191 signature for value update.
+
+        The message format must match the contract's _verifySignatures():
+            keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, block.chainid, address(this)))
+
+        Note: The 7th parameter (valuer contract address) is critical for signature validation.
+        """
         message_hash = Web3.keccak(
             abi_encode(
-                ['bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
-                [strategy_id, value, confidence, nonce, expiry, self.chain_id]
+                ['bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'address'],
+                [strategy_id, value, confidence, nonce, expiry, self.chain_id, self.valuer_address]
             )
         )
         message = encode_defunct(primitive=message_hash)
         signed = self.account.sign_message(message)
         return signed.signature
 
-    def _build_tx_params(self, gas_limit: Optional[int] = None) -> Dict[str, Any]:
-        """Build transaction parameters"""
-        nonce = self.w3.eth.get_transaction_count(self.account.address)
-        max_fee = Web3.to_wei(self.max_fee_gwei, 'gwei')
-        max_priority = Web3.to_wei(self.max_priority_gwei, 'gwei')
+    def _build_tx_params(self, gas_limit: Optional[int] = None, nonce_offset: int = 0) -> Dict[str, Any]:
+        """
+        Build transaction parameters with proper nonce and gas handling.
+
+        Args:
+            gas_limit: Optional gas limit override
+            nonce_offset: Offset to add to nonce (for sequential txs in same block)
+        """
+        # Use 'pending' to include pending transactions in nonce calculation
+        # This prevents "replacement transaction underpriced" errors
+        nonce = self.w3.eth.get_transaction_count(self.account.address, 'pending') + nonce_offset
+
+        # Get current gas prices from network and add buffer
+        try:
+            # Try to get current base fee and set appropriate prices
+            latest_block = self.w3.eth.get_block('latest')
+            base_fee = latest_block.get('baseFeePerGas', 0)
+
+            if base_fee > 0:
+                # EIP-1559: Set max fee to 2x base fee + priority fee for safety
+                max_priority = Web3.to_wei(self.max_priority_gwei, 'gwei')
+                max_fee = max(base_fee * 2 + max_priority, Web3.to_wei(self.max_fee_gwei, 'gwei'))
+            else:
+                # Fallback to configured values
+                max_fee = Web3.to_wei(self.max_fee_gwei, 'gwei')
+                max_priority = Web3.to_wei(self.max_priority_gwei, 'gwei')
+        except Exception as e:
+            logger.debug(f"Could not fetch dynamic gas price: {e}, using configured values")
+            max_fee = Web3.to_wei(self.max_fee_gwei, 'gwei')
+            max_priority = Web3.to_wei(self.max_priority_gwei, 'gwei')
 
         return {
             'from': self.account.address,
@@ -761,7 +792,7 @@ class OffchainValuationKeeper:
             'chainId': self.chain_id
         }
 
-    def _refresh_adapter_cache(self, s: StrategyConfig) -> bool:
+    def _refresh_adapter_cache(self, s: StrategyConfig, nonce_offset: int = 0) -> bool:
         """SECURITY: Refresh adapter cache after valuer update"""
         if not s.adapter:
             return True
@@ -769,7 +800,7 @@ class OffchainValuationKeeper:
         try:
             adapter = self._adapter(s.adapter)
             tx = adapter.functions.refreshCachedValuation().build_transaction(
-                self._build_tx_params(gas_limit=100_000)
+                self._build_tx_params(gas_limit=100_000, nonce_offset=nonce_offset)
             )
             signed_tx = self.account.sign_transaction(tx)
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
@@ -781,9 +812,80 @@ class OffchainValuationKeeper:
             logger.error(f"[{s.id_text}] Failed to refresh adapter cache: {e}")
             return False
 
-    def push_strategy_value(self, s: StrategyConfig, retry_count: int = 0) -> Optional[str]:
+    def _compute_escrow_total_id(self, escrow_address: str) -> bytes:
+        """
+        Compute ESCROW_TOTAL_ID for an escrow address.
+
+        This matches the Solidity computation:
+            keccak256(abi.encodePacked("ESCROW_TOTAL", escrow_address))
+        """
+        escrow_bytes = bytes.fromhex(escrow_address[2:].lower())  # Remove 0x prefix
+        packed = b"ESCROW_TOTAL" + escrow_bytes
+        return Web3.keccak(packed)
+
+    def _push_escrow_total(self, s: StrategyConfig, total_value: int, wait_for_receipt: bool = True) -> Optional[str]:
+        """
+        Push the ESCROW_TOTAL value to the valuer.
+
+        This is a workaround for valuers that don't support registerEscrowTotal().
+        The escrow's refreshCachedValuation() calls getValue(ESCROW_TOTAL_ID),
+        so we push the total value directly to that ID.
+
+        Args:
+            s: Strategy configuration
+            total_value: Total value to push
+            wait_for_receipt: Whether to wait for the transaction receipt before returning
+        """
+        if not s.escrow:
+            return None
+
+        try:
+            escrow_total_id = self._compute_escrow_total_id(s.escrow)
+            nonce = self._next_nonce(escrow_total_id)
+            expiry = int(time.time()) + self.ttl_seconds
+
+            signature = self._sign_update(escrow_total_id, total_value, s.confidence, nonce, expiry)
+
+            # No nonce_offset needed - chain state already reflects confirmed txs
+            tx = self.valuer.functions.updateValue(
+                escrow_total_id,
+                total_value,
+                s.confidence,
+                nonce,
+                expiry,
+                [signature]
+            ).build_transaction(self._build_tx_params())
+
+            signed_tx = self.account.sign_transaction(tx)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+
+            logger.info(f"[{s.id_text}] Pushed ESCROW_TOTAL value={total_value}, tx={tx_hash.hex()}")
+
+            # Wait for receipt if requested
+            if wait_for_receipt:
+                try:
+                    receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                    if receipt['status'] == 1:
+                        logger.debug(f"[{s.id_text}] ESCROW_TOTAL confirmed in block {receipt['blockNumber']}")
+                    else:
+                        logger.warning(f"[{s.id_text}] ESCROW_TOTAL reverted: {tx_hash.hex()}")
+                except Exception as e:
+                    logger.warning(f"[{s.id_text}] Could not wait for ESCROW_TOTAL receipt: {e}")
+
+            return tx_hash.hex()
+
+        except Exception as e:
+            logger.warning(f"[{s.id_text}] Failed to push ESCROW_TOTAL: {e}")
+            return None
+
+    def push_strategy_value(self, s: StrategyConfig, retry_count: int = 0, max_retries: int = 3) -> Optional[str]:
         """
         Main method: Compute strategy value, sign, and push to valuer.
+
+        Args:
+            s: Strategy configuration
+            retry_count: Current retry attempt (for internal use)
+            max_retries: Maximum number of retry attempts
         """
         try:
             # Compute value
@@ -811,12 +913,41 @@ class OffchainValuationKeeper:
 
             logger.info(f"[{s.id_text}] Pushed value={value}, tx={tx_hash.hex()}")
 
-            # Refresh adapter cache (SECURITY)
-            self._refresh_adapter_cache(s)
+            # Wait for transaction to be mined before pushing ESCROW_TOTAL and refreshing cache
+            try:
+                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                if receipt['status'] == 1:
+                    logger.debug(f"[{s.id_text}] Transaction confirmed in block {receipt['blockNumber']}")
 
+                    # Push ESCROW_TOTAL value (workaround for valuers without registerEscrowTotal)
+                    # Note: For single-strategy escrows, ESCROW_TOTAL equals the strategy value
+                    # This waits for receipt internally, so nonce will be updated on-chain
+                    self._push_escrow_total(s, value, wait_for_receipt=True)
+
+                    # Refresh adapter cache after confirmed (SECURITY)
+                    # No nonce offset needed since we waited for ESCROW_TOTAL receipt
+                    self._refresh_adapter_cache(s)
+                else:
+                    logger.warning(f"[{s.id_text}] Transaction reverted: {tx_hash.hex()}")
+            except Exception as wait_error:
+                # If we can't confirm the strategy TX, skip ESCROW_TOTAL and cache refresh
+                # to avoid nonce conflicts. They'll be updated on the next cycle.
+                logger.warning(f"[{s.id_text}] Could not confirm strategy TX: {wait_error}")
+                logger.warning(f"[{s.id_text}] Skipping ESCROW_TOTAL and cache refresh - will retry next cycle")
+
+            self.metrics.record_success(s.id_text, tx.get('gas', 0))
             return tx_hash.hex()
 
         except Exception as e:
+            error_msg = str(e)
+
+            # Retry on specific transient errors
+            if retry_count < max_retries and any(err in error_msg.lower() for err in [
+                'underpriced', 'nonce too low', 'already known', 'replacement transaction'
+            ]):
+                logger.warning(f"[{s.id_text}] Transient error, retrying ({retry_count + 1}/{max_retries}): {error_msg}")
+                time.sleep(2 ** retry_count)  # Exponential backoff: 1s, 2s, 4s
+                return self.push_strategy_value(s, retry_count + 1, max_retries)
             logger.error(f"[{s.id_text}] Failed to push value: {e}")
             self.metrics.record_failure(s.id_text, type(e).__name__)
             return None
