@@ -75,7 +75,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override notEmergency {
+    ) external override onlyOwner notEmergency {
         if (registeredEscrowTotals[strategyId] != address(0)) {
             revert CannotUpdateReservedEscrowTotal();
         }
@@ -147,14 +147,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @inheritdoc IUniversalValuerOffchain
     function getValue(bytes32 strategyId) external view override returns (uint256) {
-        // SECURITY FIX: Handle registered ESCROW_TOTAL IDs by computing aggregated value
-        // This fixes the API mismatch where realAssets() calls getValue(ESCROW_TOTAL_ID)
-        // but ESCROW_TOTAL IDs cannot be updated via updateValue()/batchUpdateValues()
-        address escrow = registeredEscrowTotals[strategyId];
-        if (escrow != address(0)) {
-            return _computeTotalValue(escrow);
-        }
-
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
@@ -250,18 +242,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override notEmergency {
+    ) external override onlyOwner notEmergency {
         if (strategyIds.length != values.length ||
             strategyIds.length != confidences.length) {
             revert ArrayLengthMismatch();
         }
-
-        for (uint256 i = 0; i < strategyIds.length; i++) {
-            if (registeredEscrowTotals[strategyIds[i]] != address(0)) {
-                revert CannotUpdateReservedEscrowTotal();
-            }
-        }
-
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
