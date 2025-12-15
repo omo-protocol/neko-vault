@@ -146,17 +146,13 @@ contract EmergencyGateTest is Test {
         vm.prank(owner);
         gate.setMode(EmergencyGate.Mode.DEPOSIT_ONLY);
 
-        // Deposits blocked
+        // Deposits blocked (users can't send assets to deposit, can't receive shares from deposits)
         assertFalse(gate.canSendAssets(user1), "Should block sending assets (deposit)");
+        assertFalse(gate.canReceiveShares(user1), "Should block receiving shares (from deposits)");
 
-        // Withdrawals allowed
+        // Withdrawals allowed (users can send shares to withdraw, can receive assets from withdrawals)
         assertTrue(gate.canSendShares(user1), "Should allow sending shares (withdraw)");
-
-        // Receiving shares allowed (from withdrawal)
-        assertTrue(gate.canReceiveShares(user1), "Should allow receiving shares");
-
-        // Receiving assets blocked
-        assertFalse(gate.canReceiveAssets(user1), "Should block receiving assets");
+        assertTrue(gate.canReceiveAssets(user1), "Should allow receiving assets (from withdrawals)");
     }
 
     /* GATE INTERFACE TESTS - WITHDRAWAL_ONLY MODE */
@@ -165,13 +161,13 @@ contract EmergencyGateTest is Test {
         vm.prank(owner);
         gate.setMode(EmergencyGate.Mode.WITHDRAWAL_ONLY);
 
-        // Deposits allowed
+        // Deposits allowed (users can send assets to deposit, can receive shares from deposits)
         assertTrue(gate.canSendAssets(user1), "Should allow sending assets (deposit)");
-        assertTrue(gate.canSendShares(user1), "Should allow sending shares");
-        assertTrue(gate.canReceiveAssets(user1), "Should allow receiving assets");
+        assertTrue(gate.canReceiveShares(user1), "Should allow receiving shares (from deposits)");
 
-        // Receiving shares blocked (deposit would give shares)
-        assertFalse(gate.canReceiveShares(user1), "Should block receiving shares (deposit)");
+        // Withdrawals blocked (users can send shares for transfers, but can't receive assets from withdrawals)
+        assertTrue(gate.canSendShares(user1), "Should allow sending shares (for transfers, not withdrawals)");
+        assertFalse(gate.canReceiveAssets(user1), "Should block receiving assets (from withdrawals)");
     }
 
     /* GATE INTERFACE TESTS - EMERGENCY MODE */

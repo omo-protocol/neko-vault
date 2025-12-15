@@ -172,18 +172,23 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     }
 
     /**
-     * @notice Test that zero value correctly triggers time-bounded cache fallback
-     * @dev TIME-BOUNDED FALLBACK FIX (FIXING.md): Uses cached value instead of principal
+     * @notice Test that zero value triggers revert in normal mode and emergency mode enables fallback
+     * @dev SECURITY FIX: Cached valuation fallback now ONLY available in emergency mode.
+     *      This prevents attackers from exploiting automatic fallbacks during valuer outages.
+     *      Admin must explicitly enable emergency mode before any fallback is used.
      */
     function testZeroValueTriggersFallback() public {
         // Set valuer to return correct value BEFORE allocation
         maliciousValuer.setReturnValue(1000e18);
 
-        // Setup - allocate funds which creates initial cached valuation
+        // Setup - allocate funds
         bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
-        // After allocation, cache is populated with 1000e18
+
+        // SECURITY FIX: Keeper explicitly refreshes cache after allocation
+        // This simulates the real keeper workflow: allocate → keeper updates valuer → keeper refreshes cache
+        adapter.refreshCachedValuation();
 
         // Verify cache was populated correctly
         uint256 initialAssets = adapter.realAssets();
@@ -192,10 +197,34 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
-        // Should use cached valuation (1000e18) instead of reverting
-        // This is the time-bounded fallback in action
+        // SECURITY FIX: When valuer fails and NOT in emergency mode, realAssets() REVERTS.
+        // This forces admin to explicitly enable emergency mode before any fallback is used,
+        // preventing attackers from exploiting automatic fallbacks during outages.
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
+        adapter.realAssets();
+
+        // Enable emergency mode - This invalidates the cached valuation timestamp
+        // and enables the fallback mechanism
+        vm.prank(owner);
+        adapter.enableEmergencyMode();
+
+        // Verify cache was invalidated by enabling emergency mode
+        (, , bool isStale) = adapter.getCachedValuation();
+        assertTrue(isStale, "Cache should be stale after emergency mode enabled");
+
+        // Should now use emergency fallback with 5% haircut
+        // In emergency mode when valuer fails, realAssets returns:
+        // (allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT) / 10000
+        // Since no external deposits were made:
+        // - totalAllocations = 1000e18
+        // - totalExternalDeposits = 0
+        // - balance = 1000e18
+        // - allocatedInAdapter = totalAllocations - totalExternalDeposits = 1000e18
+        // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = 1000e18
+        // Expected = (1000e18 + 0) * 9500 / 10000 = 950e18
         uint256 reportedAssets = adapter.realAssets();
-        assertEq(reportedAssets, 1000e18, "Should use cached valuation when valuer returns 0");
+        uint256 expectedEmergencyValue = (1000e18 * (10000 - adapter.EMERGENCY_HAIRCUT())) / 10000;
+        assertEq(reportedAssets, expectedEmergencyValue, "Should use emergency fallback with haircut in emergency mode");
     }
 
     /**
@@ -244,6 +273,8 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     /**
      * @notice Fuzz test: Verify valuer values always accepted if > 0
      * @dev SECURITY FIX: Updated for new security model (no tolerance threshold)
+     * @dev NEW TRUST MODEL: realAssets() trusts the off-chain valuer completely
+     *      The off-chain valuer is responsible for handling donation detection/exclusion
      */
     function testFuzzValuerAlwaysTrusted(uint256 realValue, uint256 valuerReturn) public {
         // Skip edge case where realValue is 0 (cold start - no allocations)
@@ -252,9 +283,10 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Bound inputs - ensure realValue > 0 to avoid cold start edge case
         realValue = bound(realValue, 1000e18, 10000e18);
 
-        valuerReturn = bound(valuerReturn, 1, realValue * 2); // Can be under or over
+        // Bound valuerReturn - can be any positive value
+        valuerReturn = bound(valuerReturn, 1, realValue * 10);
 
-        // Set valuer to return correct value BEFORE allocation so cache is populated correctly
+        // Set valuer to return correct value BEFORE allocation
         maliciousValuer.setReturnValue(realValue);
 
         // Setup
@@ -262,37 +294,18 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         bytes memory allocateData = abi.encode(strategyId, realValue, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
-        // Cache is now populated with realValue (donation-adjusted)
 
-        // Calculate excessIdle (donations) that will be excluded
-        uint256 balance = asset.balanceOf(address(adapter));
-        uint256 allocatedInAdapter = adapter.totalAllocations() - adapter.totalExternalDeposits();
-        uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
-        uint256 initialCachedValue = realValue > excessIdle ? realValue - excessIdle : 0;
-
-        // Ensure we actually allocated something and cache is not 0
+        // Ensure we actually allocated something
         vm.assume(adapter.totalAllocations() > 0);
-        vm.assume(initialCachedValue > 0); // Skip edge case where all value is donations
 
         // Now set the fuzzed valuer return value
         maliciousValuer.setReturnValue(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
 
-        // SECURITY FIX (security_issues_5nov2025_6.md Issue #2): Semantic-agnostic adjustment
-        // Adjust valuerReturn based on the new semantic-agnostic logic:
-        // - If valuerReturn >= excessIdle: subtract excessIdle
-        // - If valuerReturn < excessIdle: add allocatedInAdapter
-        uint256 valuerValueAdj;
-        if (valuerReturn >= excessIdle) {
-            valuerValueAdj = valuerReturn - excessIdle;
-        } else {
-            valuerValueAdj = valuerReturn + allocatedInAdapter;
-        }
-
-        // Semantic-agnostic adjustment always produces a value > 0 (when allocations > 0)
-        // This prevents DoS from donations that would otherwise zero the adjusted value
-        assertEq(reportedAssets, valuerValueAdj, "Should use semantic-agnostic adjusted value");
+        // NEW TRUST MODEL: realAssets() returns exactly what the valuer reports (if > 0)
+        // The off-chain valuer is responsible for donation detection/exclusion
+        assertEq(reportedAssets, valuerReturn, "Should trust valuer value completely");
     }
 }
 
@@ -305,10 +318,6 @@ contract MockMaliciousValuer {
 
     function setReturnValue(uint256 _value) external {
         returnValue = _value;
-    }
-
-    function getTotalValue(address) external view returns (uint256) {
-        return returnValue;
     }
 
     function getValue(bytes32) external view returns (uint256) {

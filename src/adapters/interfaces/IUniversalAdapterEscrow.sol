@@ -43,6 +43,18 @@ interface IUniversalAdapterEscrow is IAdapter {
     event StrategyRemoved(bytes32 indexed strategyId);
     event ExternalDepositsSynced(address indexed syncer, uint256 oldValue, uint256 newValue);
     event ExternalDepositsReduced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
+    event ExternalDepositSyncedPerStrategy(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
+    event ExternalDepositsSyncedBatch(address indexed syncer, uint256 totalDelta, uint256 newTotalValue);
+    event SyncDeviationWarning(uint256 newMinKnown, uint256 valuerValue, uint256 deviation, uint256 deviationBps);
+    event CachedValuationRefreshed(uint256 newValue, uint256 timestamp);
+    event ExternalDepositsValuerSynced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, int256 delta);
+    event YieldAccrued(bytes32 indexed strategyId, uint256 yieldAmount);
+    event UnexpectedValueChange(bytes32 indexed strategyId, uint256 expected, uint256 actual, uint256 withdrawn, string reason);
+    event AccountingDesyncDetected(bytes32 indexed strategyId, uint256 decrease, uint256 totalAvailable);
+    event EmergencyModeEnabled(uint256 timestamp, string reason);
+    event EmergencyModeDisabled(uint256 timestamp, uint256 duration);
+    event PartialDeallocate(bytes32 indexed strategyId, uint256 requested, uint256 actual);
+    event StrategyWithdrawn(bytes32 indexed strategyId, uint256 amount, address indexed executor);
 
     /* ERRORS */
 
@@ -60,6 +72,12 @@ interface IUniversalAdapterEscrow is IAdapter {
     error SlippageTooHigh();
     error ExcessiveBalanceLoss();
     error ValuationUnavailable();
+    error EmergencyModeAlreadyEnabled();
+    error EmergencyModeNotEnabled();
+    error ValuerStillUnavailable();
+    error LiquidityDataMustHaveEmptyCalls();
+    error InsufficientAdapterBalance(uint256 available, uint256 requested);
+    error StrategyIdCollisionWithEscrowTotal(); // SECURITY FIX: strategyId cannot equal ESCROW_TOTAL ID
 
     /* EXTERNAL FUNCTIONS */
 
@@ -115,9 +133,15 @@ interface IUniversalAdapterEscrow is IAdapter {
         Call[] calldata calls
     ) external;
 
-    /// @notice Execute a pre-configured strategy
-    /// @param strategyId The strategy with pre-configured calldata
-    function executePreConfigured(bytes32 strategyId) external;
+    /// @notice Withdraw assets from external protocol to refill adapter balance
+    /// @param strategyId The strategy to withdraw from
+    /// @param withdrawCalls Array of calls to execute protocol withdrawals
+    /// @param minBalanceIncrease Minimum balance increase required (slippage protection)
+    function withdrawFromStrategy(
+        bytes32 strategyId,
+        Call[] calldata withdrawCalls,
+        uint256 minBalanceIncrease
+    ) external;
 
     /// @notice Sweep tokens that are not the primary asset
     /// @param token Token address to sweep
@@ -128,9 +152,15 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @param _paused Whether to pause the contract
     function setPaused(bool _paused) external;
 
-    /// @notice Manually sync totalExternalDeposits to remove ghost amounts
-    /// @param newTotalExternalDeposits The corrected external deposits value (must be <= current)
-    function syncExternalDeposits(uint256 newTotalExternalDeposits) external;
+    /// @notice Sync external deposits for specific strategies with actual values
+    /// @param strategyIds Array of strategy IDs to update
+    /// @param newValues Array of new external deposit values for each strategy
+    function syncExternalDepositsPerStrategy(bytes32[] calldata strategyIds, uint256[] calldata newValues) external;
+
+    /// @notice Manually sync strategy with valuer for drift correction (owner-only)
+    /// @dev Simple manual sync when drift accumulates from fees/slippage/yield
+    /// @param strategyId Strategy to sync with valuer
+    function syncStrategyWithValuer(bytes32 strategyId) external;
 
     /* VIEW FUNCTIONS */
 
@@ -170,23 +200,37 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return The valuer address
     function valuer() external view returns (address);
 
-    /// @notice Check if using offchain valuer
-    /// @return Whether using offchain valuer
-    function useOffchainValuer() external view returns (bool);
+    /// @notice Get the owner address
+    /// @return The owner address
+    function owner() external view returns (address);
 
     /// @notice Get idle assets that are not allocated to any strategy
-    /// @dev L-13 FIX: Provides visibility into unused assets to ensure full utilization
     /// @return idleAssets Amount of assets sitting idle in the adapter
     function getIdleAssets() external view returns (uint256 idleAssets);
-
-    /// @notice Calculate current ghost amount (overpricing) if any
-    /// @dev Helper function to monitor when manual sync might be needed
-    /// @return ghost The amount by which minKnownValue exceeds valuer's reported value
-    function getGhostAmount() external view returns (uint256 ghost);
 
     /// @notice Get cached valuation info for monitoring
     /// @return value The cached valuation value
     /// @return timestamp When the valuation was cached
     /// @return isStale Whether the cached value is too old (>1 hour)
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale);
+
+    /// @notice Enable emergency mode when valuer is unavailable
+    /// @dev Applies conservative haircut to prevent arbitrage during valuer downtime
+    function enableEmergencyMode() external;
+
+    /// @notice Disable emergency mode when valuer is restored
+    /// @dev Requires valuer to be working before disabling
+    function disableEmergencyMode() external;
+
+    /// @notice Check if emergency mode is active
+    /// @return Whether emergency mode is active
+    function emergencyMode() external view returns (bool);
+
+    /// @notice Get when emergency mode was activated
+    /// @return Timestamp of emergency mode activation (0 if not active)
+    function emergencyModeActivatedAt() external view returns (uint256);
+
+    /// @notice Get the emergency haircut percentage in basis points
+    /// @return Haircut in basis points (e.g., 500 = 5%)
+    function EMERGENCY_HAIRCUT() external view returns (uint256);
 }

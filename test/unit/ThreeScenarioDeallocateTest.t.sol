@@ -111,7 +111,7 @@ contract ThreeScenarioDeallocateTest is Test {
     }
 
     function testScenario2_PartialCoverage() public {
-        console2.log("=== SCENARIO 2: Adapter balance covers partially ===");
+        console2.log("=== SCENARIO 2: Adapter balance covers partially (LAZY DEALLOCATION) ===");
 
         // Setup: First allocate 600e6 to strategy (this is the strategy value)
         asset.mint(address(adapter), 600e6);
@@ -141,18 +141,24 @@ contract ThreeScenarioDeallocateTest is Test {
         // Verify: 0 < adapterBalance < assets (Scenario 2 condition)
         assertTrue(adapterBalanceBefore > 0 && adapterBalanceBefore < requestAmount, "Should be Scenario 2");
 
-        // Create withdrawal calls to get missing amount (500 - 300 = 200e6)
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws from protocol FIRST
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 200e6), // Exactly what we need
             value: 0
         });
 
-        // Execute deallocate
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls, 200e6);
+
+        // Verify agent withdrawal succeeded
+        assertEq(asset.balanceOf(address(adapter)), 500e6, "Adapter should have 300 + 200 = 500 after agent withdrawal");
+
+        // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
@@ -160,14 +166,13 @@ contract ThreeScenarioDeallocateTest is Test {
 
         // Verify results
         assertEq(change, -int256(requestAmount), "Should withdraw exact requested amount");
-        assertEq(asset.balanceOf(address(adapter)), 500e6, "Adapter should have 300 + 200 = 500");
         assertEq(asset.balanceOf(address(mockProtocol)), 100e6, "Protocol should have 300 - 200 = 100");
 
-        console2.log("[PASS] Scenario 2: Used adapter balance + withdrew missing amount from protocol");
+        console2.log("[PASS] Scenario 2: Agent withdrew from protocol, then user deallocated");
     }
 
     function testScenario3_NoCoverage() public {
-        console2.log("=== SCENARIO 3: No adapter balance available ===");
+        console2.log("=== SCENARIO 3: No adapter balance available (LAZY DEALLOCATION) ===");
 
         // Setup: First allocate 500e6 to strategy, then move all to protocol
         asset.mint(address(adapter), 500e6);
@@ -196,18 +201,25 @@ contract ThreeScenarioDeallocateTest is Test {
         // Verify: adapterBalance = 0 (Scenario 3 condition)
         assertEq(adapterBalanceBefore, 0, "Should be Scenario 3");
 
-        // Create withdrawal calls to get full amount
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws from protocol FIRST
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
-            data: abi.encodeWithSignature("withdraw(uint256)", requestAmount), // Full amount
+            data: abi.encodeWithSignature("withdraw(uint256)", requestAmount), // Full amount needed
             value: 0
         });
 
-        // Execute deallocate
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls, requestAmount);
+
+        // Verify agent withdrawal succeeded
+        assertEq(asset.balanceOf(address(adapter)), requestAmount, "Adapter should have 400e6 after agent withdrawal");
+        assertEq(asset.balanceOf(address(mockProtocol)), 100e6, "Protocol should have 500 - 400 = 100");
+
+        // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
@@ -215,10 +227,9 @@ contract ThreeScenarioDeallocateTest is Test {
 
         // Verify results
         assertEq(change, -int256(requestAmount), "Should withdraw exact requested amount");
-        assertEq(asset.balanceOf(address(adapter)), requestAmount, "Adapter should have withdrawn amount");
-        assertEq(asset.balanceOf(address(mockProtocol)), 100e6, "Protocol should have 500 - 400 = 100");
+        assertEq(asset.balanceOf(address(mockProtocol)), 100e6, "Protocol balance unchanged after deallocate");
 
-        console2.log("[PASS] Scenario 3: Withdrew full amount from protocol");
+        console2.log("[PASS] Scenario 3: Agent withdrew full amount from protocol, then user deallocated");
     }
 
 

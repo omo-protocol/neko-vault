@@ -1,0 +1,40 @@
+{
+  "rpc_url": "https://rpc.hyperliquid.xyz/evm",
+  "chain_id": 998,
+  "valuer_address": "0xYourValuerAddress",
+  "wrapper_address": "0xYourWrapperAddress",
+
+  "keeper_settings": {
+    "update_check_interval": 60,
+    "ttl": 300,
+    "gas_limit": 350000,
+    "max_fee_gwei": 20.0,
+    "max_priority_gwei": 2.0,
+
+    "_comment_cache_refresh": "SECURITY FIX: Enable automatic cache refresh after valuer updates",
+    "enable_cache_refresh": true,
+    "cache_refresh_gas_limit": 200000
+  },
+
+  "strategies": [
+    {
+      "id": "PT_KHYPE_LOOP",
+      "mode": "pt_khype_loop",
+      "escrow": "0xYourEscrowAddress",
+      "adapter": "0xYourAdapterAddress",
+      "underlying": "0xYourUnderlyingTokenAddress",
+      "confidence": 95,
+      "extras": {
+        "pt_token": "0xYourPTTokenAddress",
+        "pricing_model": "pendle_oracle",
+        "pendle_market": "0xYourPendleMarketAddress",
+        "pendle_oracle": "0xYourPendleOracleAddress",
+        "lending": {
+          "protocol": "felix",
+          "address": "0xYourFelixAddress",
+          "market_id": "0xYourMarketId"
+        }
+      }
+    }
+  ]
+}

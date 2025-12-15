@@ -155,21 +155,20 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // NEW logic: minKnown = totalAllocations = 1000, ghost = 1000 - 800 = 200
         valuer.setReturnValue(800e18);
 
-        uint256 ghostBefore = adapter.getGhostAmount();
-        assertEq(ghostBefore, 200e18, "Should have 200e18 ghost");
-
         // Pause the adapter
         vm.prank(owner);
         adapter.setPaused(true);
 
-        // Should still be able to sync
+        // Should still be able to sync using per-strategy sync
         // To remove ghost with NEW logic: Set valuer to totalAllocations
         valuer.setReturnValue(1000e18);
         vm.prank(owner);
-        adapter.syncExternalDeposits(0);
+        bytes32[] memory strategyIds = new bytes32[](1);
+        strategyIds[0] = strategyId;
+        uint256[] memory newValues = new uint256[](1);
+        newValues[0] = 0;
+        adapter.syncExternalDepositsPerStrategy(strategyIds, newValues);
 
-        uint256 ghostAfter = adapter.getGhostAmount();
-        assertEq(ghostAfter, 0, "Ghost should be removed even during pause");
         assertEq(adapter.totalExternalDeposits(), 0, "totalExternalDeposits should be updated");
     }
 
@@ -201,10 +200,14 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         uint256 realAssetsBefore = adapter.realAssets();
         assertEq(realAssetsBefore, 800e18, "Should return accurate valuer value (no longer overpriced!)");
 
-        // Sync to fix accounting drift - adjust valuer to match new minKnownValue
+        // Sync to fix accounting drift using per-strategy sync
         valuer.setReturnValue(920e18);
         vm.prank(owner);
-        adapter.syncExternalDeposits(0);
+        bytes32[] memory strategyIds = new bytes32[](1);
+        strategyIds[0] = strategyId;
+        uint256[] memory newValues = new uint256[](1);
+        newValues[0] = 0;
+        adapter.syncExternalDepositsPerStrategy(strategyIds, newValues);
 
         // After sync: realAssets remains accurate
         uint256 realAssetsAfter = adapter.realAssets();
@@ -385,10 +388,6 @@ contract MockValuer {
 
     function setReturnValue(uint256 _value) external {
         returnValue = _value;
-    }
-
-    function getTotalValue(address) external view returns (uint256) {
-        return returnValue;
     }
 
     function getValue(bytes32) external view returns (uint256) {

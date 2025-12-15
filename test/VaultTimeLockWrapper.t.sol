@@ -266,19 +266,26 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_dos_transferToFullUserReverts() public {
-        // Fill up Alice's batches
+        // Fill up Alice's batches with DIFFERENT timestamps so they don't merge
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 100; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
-        // Bob tries to transfer to Alice
+        assertEq(wrapper.getDepositCount(alice), 100, "Alice should have 100 batches");
+
+        // Bob tries to transfer to Alice (Bob's batch has a different timestamp)
+        vm.warp(baseTime + 200); // Different timestamp than any of Alice's
         vm.startPrank(bob);
         asset.approve(address(wrapper), 10e18);
         wrapper.deposit(10e18);
 
+        // Since Bob's batch has a different timestamp than Alice's last batch,
+        // it won't merge and should hit the cap
         vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
         wrapper.transfer(alice, 10e18);
 
@@ -869,22 +876,28 @@ contract VaultTimeLockWrapperTest is Test {
     // ============================================
 
     function test_security_transferRevertsWhenReceiverNearCap() public {
-        // Fill Alice to 99 batches
+        // Fill Alice to 99 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 99; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
-        // Bob creates 5 batches
+        assertEq(wrapper.getDepositCount(alice), 99, "Alice should have 99 batches");
+
+        // Bob creates 5 batches with different timestamps (continuing from Alice's last)
         vm.startPrank(bob);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 5; i++) {
+            vm.warp(baseTime + 100 + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
 
         // Bob tries to transfer all 5 batches to Alice
+        // Since all batches have different timestamps, they won't merge
         // Should succeed for first batch (Alice goes to 100)
         // Should revert on second batch attempt
         vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
@@ -897,20 +910,25 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_security_transferExactlyToCapSucceeds() public {
-        // Alice has 99 batches
+        // Alice has 99 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 99; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
+        assertEq(wrapper.getDepositCount(alice), 99, "Alice should have 99 batches");
+
         // Bob transfers exactly 1 batch to bring Alice to 100
+        vm.warp(baseTime + 200); // Different timestamp than Alice's
         vm.startPrank(bob);
         asset.approve(address(wrapper), 10e18);
         wrapper.deposit(10e18);
 
-        wrapper.transfer(alice, 10e18); // Should succeed
+        wrapper.transfer(alice, 10e18); // Should succeed (different timestamp, creates new batch)
 
         vm.stopPrank();
 
@@ -918,22 +936,28 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_security_capEnforcedInMiddleOfTransferLoop() public {
-        // Alice has 98 batches
+        // Alice has 98 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 98; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
-        // Bob has 5 batches
+        assertEq(wrapper.getDepositCount(alice), 98, "Alice should have 98 batches");
+
+        // Bob has 5 batches with different timestamps
         vm.startPrank(bob);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 5; i++) {
+            vm.warp(baseTime + 100 + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
 
         // Bob tries to transfer all 5 batches
+        // Since all have different timestamps, no merging occurs
         // First 2 should push successfully (98->99->100)
         // Third should fail at cap check
         vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
@@ -943,24 +967,30 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_security_multipleSmallTransfersRespectsCapEach() public {
-        // Alice has 99 batches
+        // Alice has 99 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 99; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
-        // Bob transfers 1 batch successfully
+        assertEq(wrapper.getDepositCount(alice), 99, "Alice should have 99 batches");
+
+        // Bob transfers 1 batch successfully (different timestamp from Alice's)
+        vm.warp(baseTime + 200); // Different timestamp than Alice's
         vm.startPrank(bob);
         asset.approve(address(wrapper), type(uint256).max);
         wrapper.deposit(1e18);
         wrapper.transfer(alice, 1e18); // Success: Alice at 100
 
-        // Bob tries to transfer another batch
+        // Bob tries to transfer another batch with a DIFFERENT timestamp
+        vm.warp(baseTime + 300); // New timestamp
         wrapper.deposit(1e18);
         vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
-        wrapper.transfer(alice, 1e18); // Fail: Alice already at 100
+        wrapper.transfer(alice, 1e18); // Fail: Alice already at 100 and different timestamp
 
         vm.stopPrank();
     }
@@ -1105,15 +1135,20 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_edge_transferFromRespectsCapLimit() public {
-        // Fill Carol to 100 batches
+        // Fill Carol to 100 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(carol);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 100; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
         vm.stopPrank();
 
-        // Alice approves Bob for transferFrom
+        assertEq(wrapper.getDepositCount(carol), 100, "Carol should have 100 batches");
+
+        // Alice approves Bob for transferFrom (different timestamp than Carol's batches)
+        vm.warp(baseTime + 200); // Different timestamp than Carol's
         vm.startPrank(alice);
         asset.approve(address(wrapper), 10e18);
         wrapper.deposit(10e18);
@@ -1121,6 +1156,7 @@ contract VaultTimeLockWrapperTest is Test {
         vm.stopPrank();
 
         // Bob tries to transferFrom Alice to Carol (who is at cap)
+        // Since timestamps are different, no merge, so should revert
         vm.prank(bob);
         vm.expectRevert(VaultTimeLockWrapper.MaxBatchesReached.selector);
         wrapper.transferFrom(alice, carol, 10e18);
@@ -1300,12 +1336,16 @@ contract VaultTimeLockWrapperTest is Test {
     }
 
     function test_gas_transferWithManyBatchesCompletes() public {
-        // Alice creates 50 batches
+        // Alice creates 50 batches with DIFFERENT timestamps
+        uint256 baseTime = block.timestamp;
         vm.startPrank(alice);
         asset.approve(address(wrapper), type(uint256).max);
         for (uint256 i = 0; i < 50; i++) {
+            vm.warp(baseTime + i); // Different timestamp each time
             wrapper.deposit(1e18);
         }
+
+        assertEq(wrapper.getDepositCount(alice), 50, "Alice should have 50 batches");
 
         // Transfer all to Bob
         uint256 gasBefore = gasleft();
@@ -1314,10 +1354,220 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Should complete without DoS
         assertLt(gasUsed, 5_000_000, "Gas under 5M");
+        // With different timestamps, Bob gets 50 separate batches
         assertEq(wrapper.getDepositCount(bob), 50, "Bob received 50 batches");
         assertEq(wrapper.getDepositCount(alice), 0, "Alice batches cleared");
 
         vm.stopPrank();
+    }
+
+    // ============================================
+    // SECURITY FIX TESTS: TRANSFER SPAM DOS MITIGATION
+    // ============================================
+
+    function test_security_transferMergesSameTimestampBatches() public {
+        // Alice deposits (creates batch with current timestamp)
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        (, uint256 aliceDepositTime,,) = wrapper.getDeposit(alice, 0);
+        vm.stopPrank();
+
+        // Bob receives multiple transfers from Alice's same-timestamp batch
+        // In the same block (same timestamp), all should merge into one batch
+        vm.startPrank(alice);
+        wrapper.transfer(bob, 100e18);
+        wrapper.transfer(bob, 200e18);
+        wrapper.transfer(bob, 300e18);
+        vm.stopPrank();
+
+        // SECURITY CHECK: Bob should have only 1 batch (merged), not 3
+        assertEq(wrapper.getDepositCount(bob), 1, "All transfers merged into 1 batch");
+
+        // Verify total amount is correct
+        (uint256 bobAmt, uint256 bobTime,,) = wrapper.getDeposit(bob, 0);
+        assertEq(bobAmt, 600e18, "Merged amount is correct");
+        assertEq(bobTime, aliceDepositTime, "Timestamp preserved");
+    }
+
+    function test_security_transferSpamMitigated() public {
+        // Attacker deposits small amount to get vTokens
+        vm.startPrank(attacker);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        // ATTACK: Attacker tries to fill victim's batch array with 100 tiny transfers
+        vm.startPrank(attacker);
+        for (uint256 i = 0; i < 100; i++) {
+            wrapper.transfer(alice, 1e18);
+        }
+        vm.stopPrank();
+
+        // SECURITY CHECK: Alice should have only 1 batch (all merged), not 100
+        assertEq(wrapper.getDepositCount(alice), 1, "Attack mitigated - only 1 batch");
+        (uint256 aliceAmt,,,) = wrapper.getDeposit(alice, 0);
+        assertEq(aliceAmt, 100e18, "Total amount correct");
+
+        // Alice can still deposit (not blocked)
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 100e18);
+        wrapper.deposit(100e18); // Should succeed
+        vm.stopPrank();
+
+        assertEq(wrapper.getDepositCount(alice), 2, "Alice can still deposit");
+    }
+
+    function test_security_differentTimestampsCreateSeparateBatches() public {
+        // Alice creates multiple batches at different times
+        // Use explicit timestamps to ensure they're different
+        uint256 startTime = block.timestamp;
+
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 600e18);
+
+        wrapper.deposit(100e18);
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
+
+        vm.warp(startTime + 1 days);
+        wrapper.deposit(200e18);
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
+
+        vm.warp(startTime + 2 days);
+        wrapper.deposit(300e18);
+        (, uint256 time3,,) = wrapper.getDeposit(alice, 2);
+        vm.stopPrank();
+
+        // Verify timestamps are actually different
+        assertTrue(time1 != time2 && time2 != time3, "Timestamps should be different");
+
+        // Transfer each batch to Bob separately
+        vm.startPrank(alice);
+        wrapper.transfer(bob, 100e18); // First batch (time1)
+        wrapper.transfer(bob, 200e18); // Second batch (time2)
+        wrapper.transfer(bob, 300e18); // Third batch (time3)
+        vm.stopPrank();
+
+        // SECURITY CHECK: Bob should have 3 separate batches (different timestamps)
+        assertEq(wrapper.getDepositCount(bob), 3, "Different timestamps create separate batches");
+
+        // Verify each batch has correct timestamp
+        (, uint256 bobTime1,,) = wrapper.getDeposit(bob, 0);
+        (, uint256 bobTime2,,) = wrapper.getDeposit(bob, 1);
+        (, uint256 bobTime3,,) = wrapper.getDeposit(bob, 2);
+
+        assertEq(bobTime1, time1, "First batch timestamp preserved");
+        assertEq(bobTime2, time2, "Second batch timestamp preserved");
+        assertEq(bobTime3, time3, "Third batch timestamp preserved");
+    }
+
+    function test_security_mixedTimestampsMergeCorrectly() public {
+        // Alice creates 2 batches at different times
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 400e18);
+
+        wrapper.deposit(200e18);
+        (, uint256 time1,,) = wrapper.getDeposit(alice, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        wrapper.deposit(200e18);
+        (, uint256 time2,,) = wrapper.getDeposit(alice, 1);
+        vm.stopPrank();
+
+        // Transfer partial amounts in alternating pattern
+        // First 50 from time1, then 50 from time2 (time1 exhausted at 200)
+        vm.startPrank(alice);
+        wrapper.transfer(bob, 250e18); // 200 from time1 + 50 from time2
+        vm.stopPrank();
+
+        // Bob should have 2 batches (different timestamps)
+        assertEq(wrapper.getDepositCount(bob), 2, "Two batches for two timestamps");
+
+        (uint256 amt1, uint256 t1,,) = wrapper.getDeposit(bob, 0);
+        (uint256 amt2, uint256 t2,,) = wrapper.getDeposit(bob, 1);
+
+        assertEq(amt1, 200e18, "First batch amount");
+        assertEq(t1, time1, "First batch timestamp");
+        assertEq(amt2, 50e18, "Second batch amount");
+        assertEq(t2, time2, "Second batch timestamp");
+    }
+
+    function test_security_subsequentSameTimestampMerges() public {
+        uint256 startTime = block.timestamp;
+
+        // Alice creates a batch
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(1000e18);
+        vm.stopPrank();
+
+        // Bob creates a batch at a DIFFERENT timestamp
+        vm.warp(startTime + 1 days);
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 100e18);
+        wrapper.deposit(100e18);
+        vm.stopPrank();
+
+        // Alice transfers to Bob multiple times (all transfers from Alice's batch
+        // have Alice's depositTime, which is different from Bob's batch)
+        vm.startPrank(alice);
+        wrapper.transfer(bob, 100e18);
+        wrapper.transfer(bob, 100e18);
+        wrapper.transfer(bob, 100e18);
+        vm.stopPrank();
+
+        // Bob should have 2 batches: his original + Alice's (merged because all
+        // transfers from Alice share the same depositTime)
+        assertEq(wrapper.getDepositCount(bob), 2, "Bob has 2 batches total");
+
+        // First batch is Bob's original deposit
+        (uint256 amt0,,,) = wrapper.getDeposit(bob, 0);
+        assertEq(amt0, 100e18, "Bob's original deposit unchanged");
+
+        // Second batch is all of Alice's transfers merged
+        (uint256 amt1,,,) = wrapper.getDeposit(bob, 1);
+        assertEq(amt1, 300e18, "Alice's transfers merged");
+    }
+
+    function test_security_capEnforcedAfterMerging() public {
+        // Fill Alice close to cap with different timestamps
+        uint256 baseTime = block.timestamp;
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), type(uint256).max);
+        for (uint256 i = 0; i < 99; i++) {
+            vm.warp(baseTime + i); // Different timestamp each deposit
+            wrapper.deposit(1e18);
+        }
+        vm.stopPrank();
+
+        assertEq(wrapper.getDepositCount(alice), 99, "Alice at 99 batches");
+
+        // Bob creates a batch (different timestamp than all of Alice's batches)
+        vm.warp(baseTime + 200); // Different timestamp than Alice's
+        vm.startPrank(bob);
+        asset.approve(address(wrapper), 10e18);
+        wrapper.deposit(10e18);
+        (, uint256 bobDepositTime,,) = wrapper.getDeposit(bob, 0);
+
+        // Bob transfers to Alice - should succeed (creates 1 new batch since
+        // Bob's depositTime is different from all of Alice's batches)
+        wrapper.transfer(alice, 5e18);
+        vm.stopPrank();
+
+        assertEq(wrapper.getDepositCount(alice), 100, "Alice at 100 batches");
+
+        // Bob tries another transfer - should still succeed because same timestamp
+        // as Alice's batch 99 (which came from Bob's deposit)
+        vm.prank(bob);
+        wrapper.transfer(alice, 5e18); // Same timestamp as Alice's last batch, should merge
+
+        // Alice should still be at 100 (merged into existing batch)
+        assertEq(wrapper.getDepositCount(alice), 100, "Still at 100 after merge");
+
+        // Verify the last batch has the merged amount
+        (uint256 lastAmt, uint256 lastTime,,) = wrapper.getDeposit(alice, 99);
+        assertEq(lastAmt, 10e18, "Last batch has merged amount (5 + 5)");
+        assertEq(lastTime, bobDepositTime, "Last batch has Bob's deposit time");
     }
 }
 

@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {UniversalAdapterEscrow} from "./UniversalAdapterEscrow.sol";
+import {IVaultV2} from "../interfaces/IVaultV2.sol";
 
 /// @title UniversalAdapterEscrowFactory
 /// @notice Factory contract for deploying UniversalAdapterEscrow instances with deterministic addresses
@@ -22,6 +23,7 @@ contract UniversalAdapterEscrowFactory {
     error DeploymentFailed();
     error InvalidVault();
     error InvalidValuer();
+    error OnlyVaultOwnerCanDeploy(); // SECURITY FIX: Prevents front-running attacks
 
     /* STATE */
 
@@ -45,6 +47,12 @@ contract UniversalAdapterEscrowFactory {
         // Validate inputs
         if (parentVault == address(0)) revert InvalidVault();
         if (valuer == address(0)) revert InvalidValuer();
+
+        // SECURITY FIX: Only vault owner can deploy adapters for their vault
+        // This prevents front-running attacks where an attacker deploys first
+        // with known salt/params to capture adapter ownership based on
+        // the then-current vault owner, potentially enabling fund theft/freeze
+        if (IVaultV2(parentVault).owner() != msg.sender) revert OnlyVaultOwnerCanDeploy();
 
         // Deploy using CREATE2
         adapter = _deploy(parentVault, valuer, useOffchainValuer, salt);

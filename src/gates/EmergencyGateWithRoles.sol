@@ -294,8 +294,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canReceiveShares(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;
-        if (mode == Mode.WITHDRAWAL_ONLY) return false;
+        if (mode == Mode.DEPOSIT_ONLY) return false;
+        if (mode == Mode.WITHDRAWAL_ONLY) return true;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }
@@ -303,7 +303,7 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canSendShares(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;
+        if (mode == Mode.DEPOSIT_ONLY) return true;
         if (mode == Mode.WITHDRAWAL_ONLY) return true;
         if (mode == Mode.EMERGENCY) return false;
         return false;
@@ -312,8 +312,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canReceiveAssets(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;
+        if (mode == Mode.DEPOSIT_ONLY) return true;
+        if (mode == Mode.WITHDRAWAL_ONLY) return false;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }

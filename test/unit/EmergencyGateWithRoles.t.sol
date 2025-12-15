@@ -554,20 +554,26 @@ contract EmergencyGateWithRolesTest is Test {
         vm.prank(owner);
         gate.setMode(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY, "Block deposits");
 
-        assertTrue(gate.canReceiveShares(user1));  // Can receive shares from deposits
-        assertFalse(gate.canSendShares(user1));    // Cannot send shares (withdraw)
-        assertFalse(gate.canReceiveAssets(user1)); // Cannot receive assets
-        assertFalse(gate.canSendAssets(user1));    // Cannot send assets (deposit)
+        // Deposits blocked
+        assertFalse(gate.canReceiveShares(user1));  // Cannot receive shares (from deposits)
+        assertFalse(gate.canSendAssets(user1));     // Cannot send assets (deposit)
+
+        // Withdrawals allowed
+        assertTrue(gate.canSendShares(user1));      // Can send shares (withdraw)
+        assertTrue(gate.canReceiveAssets(user1));   // Can receive assets (from withdrawals)
     }
 
     function test_GateInterface_WithdrawalOnlyMode() public {
         vm.prank(owner);
         gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY, "Block withdrawals");
 
-        assertFalse(gate.canReceiveShares(user1)); // Cannot receive shares (deposit)
-        assertTrue(gate.canSendShares(user1));     // Can send shares (withdraw)
-        assertTrue(gate.canReceiveAssets(user1));  // Can receive assets
-        assertTrue(gate.canSendAssets(user1));     // Can send assets
+        // Deposits allowed
+        assertTrue(gate.canReceiveShares(user1));   // Can receive shares (from deposits)
+        assertTrue(gate.canSendAssets(user1));      // Can send assets (deposit)
+
+        // Withdrawals blocked (but transfers allowed)
+        assertTrue(gate.canSendShares(user1));      // Can send shares (for transfers, not withdrawals)
+        assertFalse(gate.canReceiveAssets(user1));  // Cannot receive assets (from withdrawals)
     }
 
     function test_GateInterface_EmergencyMode() public {

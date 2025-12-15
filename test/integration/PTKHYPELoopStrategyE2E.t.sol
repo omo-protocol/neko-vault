@@ -479,18 +479,23 @@ contract PTKHYPELoopStrategyE2ETest is Test {
             data: abi.encodeWithSelector(pendleRouter.swapExactTokenForPt.selector, address(adapter), swapAmount)
         });
 
-        // Allocate with immediate execution
+        // SECURITY FIX: Allocate first (accepts funds), then execute strategy separately
+        // This prevents deposit failures when strategies are unresponsive (paused, at cap, etc.)
         bytes memory allocData = abi.encode(
             PT_KHYPE_LOOP_ID,
             ALLOCATION_AMOUNT,
-            true,  // executeNow
-            calls
+            false,  // executeNow ignored (kept for backward compatibility)
+            new IUniversalAdapterEscrow.Call[](0)  // Empty calls during allocation
         );
 
         vm.prank(allocator);
         // vm.expectEmit(true, true, false, true);
         // emit AllocationUpdated(PT_KHYPE_LOOP_ID, ALLOCATION_AMOUNT, int256(ALLOCATION_AMOUNT));
         vault.allocate(address(adapter), allocData, ALLOCATION_AMOUNT);
+
+        // Now execute strategy separately (agent-triggered)
+        vm.prank(strategyAgent);
+        adapter.executeStrategy(PT_KHYPE_LOOP_ID, calls);
 
         // Verify PT tokens received (should have swapped 45e18)
         assertGt(ptKhype.balanceOf(address(adapter)), 0);

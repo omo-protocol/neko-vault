@@ -43,43 +43,46 @@ interface IUniversalValuerOffchain {
         uint256 timestamp,
         bool isPush
     );
-
     event UpdateRequested(
         bytes32 indexed strategyId,
         address requester,
         UpdateReason reason
     );
-
     event SignerConfigured(
         address indexed signer,
         bool authorized,
         uint256 weight
     );
-
     event StrategyConfigured(
         bytes32 indexed strategyId,
         uint256 minUpdateInterval,
         uint256 maxStaleness,
         uint256 pushThreshold
     );
-
     event RequiredWeightUpdated(uint256 newWeight);
-
     event DefaultConfidenceThresholdUpdated(uint256 newThreshold);
-
     event FallbackValueSet(bytes32 indexed strategyId, uint256 value);
-
     event EmergencyModeToggled(bool enabled);
-
     event EmergencyValueUpdate(bytes32 indexed strategyId, uint256 value);
-
     event SignerRemovalInitiated(address indexed signer, uint256 executeTimestamp);
-
     event SignerRemovalCancelled(address indexed signer);
-
     event PriceChangeBoundsSet(bytes32 indexed strategyId, uint256 maxChangeBps);
-
     event MaxInitialValueSet(bytes32 indexed strategyId, uint256 maxValue);
+    event EscrowTotalRegistered(bytes32 indexed totalId, address indexed escrow);
+    event EmergencyMinConfidenceUpdated(uint256 newThreshold);
+    event StaleStrategySkipped(bytes32 indexed strategyId, uint256 stalenessAge, uint256 maxStaleness);
+    event ValuationHealthChecked(address indexed escrow, bool isHealthy, uint256 freshCount, uint256 staleCount);
+
+    /* STRUCTS - Health Check */
+
+    /// @notice Result of total value computation with staleness metadata
+    struct TotalValueResult {
+        uint256 value;           // Total computed value
+        bool hasStaleData;       // True if any strategy used stale/fallback data
+        uint256 freshCount;      // Number of strategies with fresh values
+        uint256 staleCount;      // Number of strategies with stale values
+        uint256 fallbackCount;   // Number of strategies using fallback values
+    }
 
     /* ERRORS */
 
@@ -105,6 +108,9 @@ interface IUniversalValuerOffchain {
     error InitialValueExceedsMax(uint256 value, uint256 maxInitialValue);
     error UpdateIntervalExceedsStaleness(); // L-03 FIX: minUpdateInterval must be < maxStaleness
     error StrategyNotConfigured();
+    error CannotUpdateReservedEscrowTotal(); // SECURITY FIX: Cannot update ESCROW_TOTAL IDs via strategy updates
+    error InvalidEscrowTotalRegistration(); // SECURITY FIX: Only valid ESCROW_TOTAL IDs can be registered
+    error InvalidEmergencyConfidence(); // SECURITY FIX: Invalid emergency confidence threshold
 
     /* FUNCTIONS */
 
@@ -133,10 +139,6 @@ interface IUniversalValuerOffchain {
     /// @return The latest value
     function getValue(bytes32 strategyId) external view returns (uint256);
 
-    /// @notice Get total value across all strategies for an escrow
-    /// @param escrow The escrow address
-    /// @return totalValue The sum of all strategy values
-    function getTotalValue(address escrow) external view returns (uint256 totalValue);
 
     /// @notice Batch update multiple strategy values
     /// @param strategyIds Array of strategy identifiers
@@ -163,4 +165,20 @@ interface IUniversalValuerOffchain {
     /// @param strategyId The strategy identifier
     /// @return The full value report
     function getReport(bytes32 strategyId) external view returns (ValueReport memory);
+
+    /// @notice Register an ESCROW_TOTAL ID to prevent collision with strategy IDs
+    /// @dev Called by escrow contracts during deployment to protect their total ID
+    /// @param totalId The ESCROW_TOTAL ID (must match keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender)))
+    function registerEscrowTotal(bytes32 totalId) external;
+
+    /// @notice Check if an ID is a registered ESCROW_TOTAL
+    /// @param id The ID to check
+    /// @return escrow The escrow address that registered this ID (address(0) if not registered)
+    function getRegisteredEscrow(bytes32 id) external view returns (address escrow);
+
+
+    /// @notice Check if escrow valuation is healthy (no stale data)
+    /// @param escrow The escrow address
+    /// @return healthy True if all strategies have fresh values
+    function isValuationHealthy(address escrow) external view returns (bool healthy);
 }

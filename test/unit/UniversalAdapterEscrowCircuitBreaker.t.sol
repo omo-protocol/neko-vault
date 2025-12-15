@@ -317,10 +317,16 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
      * @dev Should handle edge case of zero balance gracefully - only withdrawals allowed from 0 balance
      */
     function testCircuitBreakerWithZeroBalance() public {
-        // Setup with funds already deposited to protocol (via allocate with executeNow)
+        // SECURITY FIX: Setup with funds via allocate, then execute strategy separately
+        // This prevents deposit failures when strategies are unresponsive
         asset.mint(address(adapter), 1000e18);
 
-        // Create deposit calls to execute during allocation
+        // Allocate without immediate execution
+        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
+
+        // Now execute deposit to protocol separately (under 10% threshold)
         IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
         depositCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(protocol),
@@ -328,10 +334,8 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
             value: 0
         });
 
-        // Allocate WITH executeNow=true - this deposits during allocation (under 10% threshold)
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, true, depositCalls);
-        vm.prank(address(vault));
-        adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
+        vm.prank(agent);
+        adapter.executeStrategy(strategyId, depositCalls);
 
         // Now adapter balance is 910, protocol has 90
 
@@ -466,10 +470,6 @@ contract MockValuer {
 
     function setReturnValue(uint256 _value) external {
         returnValue = _value;
-    }
-
-    function getTotalValue(address) external view returns (uint256) {
-        return returnValue;
     }
 
     function getValue(bytes32) external view returns (uint256) {

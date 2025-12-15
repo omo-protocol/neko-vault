@@ -19,11 +19,13 @@ import "../src/adapters/UniversalAdapterEscrow.sol";
  */
 contract ConfigureAdapter is Script {
     // Strategy IDs (must match deployment script)
-    bytes32 constant ALM_STRATEGY_ID = keccak256("alm-whype-sthype");
+    bytes32 constant STRATEGY_ID = keccak256("pt-khype-looper");
+    // bytes32 constant STRATEGY_ID = keccak256("0x40363E0640CaDbf88906BF98Dced342B29C978a6");
     uint256 constant DAILY_LIMIT = 10000e18; // 10,000 tokens daily limit - this param already ignored in adapter
 
     // Configuration parameters (must match deployment script)
-    address constant ADAPTER_ADDRESS = 0xE7537bB191a6FfcD73eED7b2e720F5918Ba7E7E8; // config to adapter address
+    address constant ADAPTER_ADDRESS = 0x7F73B9AA1f5a6cE9bBfc8F0c12889b3Cb75174e8; // config to adapter address
+    address constant ALLOCATOR_ADDRESS = 0x36f44c2Bfa368f83C7B2A49ffe0f0eeFD8b0a070;
 
     function run() public {
         // Load private key
@@ -48,13 +50,13 @@ contract ConfigureAdapter is Script {
         // Configure adapter strategy
         console.log("\n[Step 1/1] Configuring adapter strategy...");
         adapter.setStrategy(
-            ALM_STRATEGY_ID,
-            deployer, // strategyAgent
+            STRATEGY_ID,
+            ALLOCATOR_ADDRESS, // strategyAgent
             "", // No pre-configured data
             DAILY_LIMIT // Daily limit
         );
         console.log("  Strategy configured:");
-        console.log("    Strategy ID:", vm.toString(ALM_STRATEGY_ID));
+        console.log("    Strategy ID:", vm.toString(STRATEGY_ID));
         console.log("    Strategy Agent:", deployer);
         console.log("    Daily Limit:", DAILY_LIMIT / 1e18, "tokens");
 
@@ -64,7 +66,7 @@ contract ConfigureAdapter is Script {
         console.log("    STEP 2d COMPLETE!");
         console.log("=================================================");
         console.log("Configuration:");
-        console.log("  Strategy ID:", vm.toString(ALM_STRATEGY_ID));
+        console.log("  Strategy ID:", vm.toString(STRATEGY_ID));
         console.log("  Strategy Agent:", deployer);
 
         console.log("\n[SUCCESS] All vault configuration complete!");

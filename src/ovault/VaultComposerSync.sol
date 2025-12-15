@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import {VaultComposerSync as BaseVaultComposerSync} from "@layerzerolabs/ovault-evm/contracts/VaultComposerSync.sol";
+import {IOFT, SendParam, MessagingFee} from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
 
 /// @title VaultComposerSync
 /// @notice Orchestrates cross-chain ERC-4626 vault operations on the hub chain
@@ -55,4 +56,54 @@ contract VaultComposerSync is BaseVaultComposerSync {
         address _assetOFT,
         address _shareOFT
     ) BaseVaultComposerSync(_vault, _assetOFT, _shareOFT) {}
+
+    /// @notice Get quote for cross-chain vault operation
+    /// @dev SECURITY FIX: Overrides base implementation to remove max* checks
+    ///      VaultV2 returns 0 for maxDeposit/maxRedeem due to gate unpredictability
+    ///      (gates can arbitrarily revert, so conservative design returns 0)
+    ///      
+    ///      Quote is an ESTIMATE only. Actual execution may fail if:
+    ///      - Gates block the operation (validated at execution time in deposit/redeem)
+    ///      - Insufficient balance/allowance
+    ///      - Share price changes significantly (use slippage protection in composeMsg)
+    ///      - LayerZero message fails (out of gas, DVN unavailable, etc.)
+    ///      
+    ///      This is acceptable because cross-chain operations already have many
+    ///      potential failure points. Quote provides messaging fee estimate for UX.
+    ///      Actual validation happens atomically during send() execution.
+    ///
+    /// @param _targetOFT Target OFT to send (ASSET_OFT or SHARE_OFT)
+    /// @param _vaultInAmount Amount in vault terms (shares for redeem, assets for deposit)
+    /// @param _sendParam OFT send parameters (will be modified with correct amountLD)
+    /// @return MessagingFee Cross-chain messaging fee estimate
+    function quoteSend(
+        address /* _from */,
+        address _targetOFT,
+        uint256 _vaultInAmount,
+        SendParam memory _sendParam
+    ) external view override returns (MessagingFee memory) {
+        if (_targetOFT == ASSET_OFT) {
+            // Withdrawing: Convert shares to assets estimate
+            // VaultV2.previewRedeem calculates assets user would receive for given shares
+            _sendParam.amountLD = VAULT.previewRedeem(_vaultInAmount);
+        } else {
+            // Depositing: Convert assets to shares estimate  
+            // VaultV2.previewDeposit calculates shares user would receive for given assets
+            _sendParam.amountLD = VAULT.previewDeposit(_vaultInAmount);
+        }
+        
+        // Get LayerZero messaging fee for the cross-chain send
+        return IOFT(_targetOFT).quoteSend(_sendParam, false);
+    }
+
+    /// @dev Prevent ETH from being locked on local sends by rejecting non-zero msg.value.
+    function _sendLocal(
+        address _oft,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        uint256 _msgValue
+    ) internal override {
+        require(_msgValue == 0, "NonZeroMsgValueOnLocal");
+        super._sendLocal(_oft, _sendParam, _refundAddress, _msgValue);
+    }
 }

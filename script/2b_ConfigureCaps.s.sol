@@ -20,13 +20,12 @@ import {IVaultV2} from "../src/interfaces/IVaultV2.sol";
  * Transactions: 4 (submit + execute for absolute cap, submit + execute for relative cap)
  */
 contract ConfigureCaps is Script {
-    // Strategy IDs (must match deployment script)
-    bytes32 constant ALM_STRATEGY_ID = keccak256("alm-whype-sthype");
-    bytes idData = abi.encodePacked(ALM_STRATEGY_ID);
+     // Pass the STRING, let VaultV2 hash it
+    bytes idData = bytes("alm-whype-sthype");
     uint256 constant RELATIVE_CAP = 1e18; // 100%
 
     // Configuration parameters
-    address constant VAULT_ADDRESS = 0x52463983595Bec55bd3b50eA98e48F285d12Cca7;
+    address constant VAULT_ADDRESS = 0x9ad2E9a260365C1214Ab70C74f975A661AE5be61;
 
     function run() public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -37,11 +36,16 @@ contract ConfigureCaps is Script {
         VaultV2 vault = VaultV2(VAULT_ADDRESS);
 
         console.log("\n=================================================");
-        console.log("    CAPS CONFIGURATION (Step 2b)");
+        console.log("    CAPS CONFIGURATION (FIXED)");
         console.log("=================================================");
         console.log("Deployer:", deployer);
         console.log("VaultV2:", VAULT_ADDRESS);
-        console.log("Transactions: 4");
+        console.log("Strategy String: alm-whype-sthype");
+
+        // Calculate what the hash will be
+        bytes32 expectedHash = keccak256(bytes("alm-whype-sthype"));
+        console.log("Expected Hash:");
+        console.logBytes32(expectedHash);
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -60,12 +64,11 @@ contract ConfigureCaps is Script {
         vm.stopBroadcast();
 
         console.log("\n=================================================");
-        console.log("    STEP 2b COMPLETE!");
+        console.log("    CAPS SET SUCCESSFULLY!");
         console.log("=================================================");
-        console.log("Configuration:");
-        console.log("  Absolute Cap: MAX");
-        console.log("  Relative Cap:", RELATIVE_CAP / 1e16, "%");
+        console.log("Caps stored under:");
+        console.logBytes32(expectedHash);
         console.log("\nNext Step:");
-        console.log("  Run: forge script script/2c_ConfigureFees.s.sol --rpc-url $RPC_URL --broadcast -v");
+        console.log("  Verify with: cast call <vault> \"caps(bytes32)(uint256,uint256)\" <hash>");
     }
 }

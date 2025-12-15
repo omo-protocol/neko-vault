@@ -106,6 +106,7 @@ contract BatchUpdateAtomicity is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         // Verify initial state
@@ -121,6 +122,7 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
         // CRITICAL: This should revert ENTIRELY, not skip any strategies
+        vm.prank(owner);
         vm.expectRevert(IUniversalValuerOffchain.StaleNonce.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
@@ -150,6 +152,7 @@ contract BatchUpdateAtomicity is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         // Attempt update too soon with small change (< 5% pushThreshold)
@@ -161,6 +164,7 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 2, expiry, signer1Key);
 
         // CRITICAL: Should revert ENTIRELY, not skip strategies
+        vm.prank(owner);
         vm.expectRevert(IUniversalValuerOffchain.UpdateTooFrequent.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 2, expiry, signatures);
 
@@ -189,6 +193,7 @@ contract BatchUpdateAtomicity is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         // ATTACK SCENARIO: Attacker tries to update A to 80 but keep B stale at 100
@@ -203,13 +208,13 @@ contract BatchUpdateAtomicity is Test {
 
         // OLD BEHAVIOR: Would update A but skip B, leaving getTotalValue = 180
         // NEW BEHAVIOR: Reverts ENTIRE batch due to stale nonce
+        vm.prank(owner);
         vm.expectRevert(IUniversalValuerOffchain.StaleNonce.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         // Verify attack failed - both strategies keep original values
         assertEq(valuer.getValue(strategyA), 100e6, "Strategy A unchanged");
         assertEq(valuer.getValue(strategyB), 100e6, "Strategy B unchanged");
-        assertEq(valuer.getTotalValue(address(escrow)), 200e6, "Total value correct");
     }
 
     /// @notice Test that valid batch updates still work correctly
@@ -235,6 +240,7 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
         // Should succeed when all validations pass
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         assertEq(valuer.getValue(strategyA), 100e6);
@@ -265,6 +271,7 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
         // CRITICAL: Should revert ENTIRE batch
+        vm.prank(owner);
         vm.expectRevert(IUniversalValuerOffchain.LowConfidence.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
     }
@@ -289,6 +296,7 @@ contract BatchUpdateAtomicity is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         // Update with significant changes (>5% threshold) before interval elapses
@@ -300,14 +308,15 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 2, expiry, signer1Key);
 
         // Should succeed because changes exceed pushThreshold
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 2, expiry, signatures);
 
         assertEq(valuer.getValue(strategyA), 110e6);
         assertEq(valuer.getValue(strategyB), 220e6);
     }
 
-    /// @notice Test that getTotalValue correctly sums all strategy values
-    function testGetTotalValueWithMultipleStrategies() public {
+    /// @notice Test that batch update updates all strategy values and remains healthy
+    function testBatchUpdateWithMultipleStrategies() public {
         bytes32[] memory strategyIds = new bytes32[](3);
         strategyIds[0] = strategyA;
         strategyIds[1] = strategyB;
@@ -328,14 +337,16 @@ contract BatchUpdateAtomicity is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
-        // Add some idle assets
-        asset.mint(address(escrow), 50e6);
+        // Verify all strategies were updated
+        assertEq(valuer.getValue(strategyA), 100e6, "Strategy A value correct");
+        assertEq(valuer.getValue(strategyB), 200e6, "Strategy B value correct");
+        assertEq(valuer.getValue(strategyC), 150e6, "Strategy C value correct");
 
-        // Total should be sum of all strategies + idle
-        uint256 expectedTotal = 100e6 + 200e6 + 150e6 + 50e6;
-        assertEq(valuer.getTotalValue(address(escrow)), expectedTotal);
+        // Verify valuation is healthy after batch update
+        assertTrue(valuer.isValuationHealthy(address(escrow)), "Valuation should be healthy");
     }
 
     /// @notice Fuzz test: Batch updates with random valid parameters should always be atomic
@@ -368,6 +379,7 @@ contract BatchUpdateAtomicity is Test {
         signatures[0] = _createBatchSignature(strategyIds, values, confidences, 1, expiry, signer1Key);
 
         // Should succeed and update both atomically
+        vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
         assertEq(valuer.getValue(strategyA), valueA);

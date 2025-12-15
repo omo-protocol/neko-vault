@@ -18,7 +18,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     uint256 private constant SIGNER_TIMELOCK = 24 hours; // 24-hour timelock for signer changes
     uint256 private constant MAX_SIGNATURE_AGE = 1 hours; // 1-hour signature expiry
     uint256 private constant MAX_PRICE_CHANGE_BPS = 5000; // 50% max price change per update
-    uint256 private constant MAX_NONCE_GAP = 1000; // L-02 FIX: Maximum allowed nonce jump to prevent lockout
+    uint256 private constant MAX_NONCE_GAP = 1000;
 
     /* IMMUTABLES */
 
@@ -32,24 +32,18 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     mapping(bytes32 => UpdateConfig) public updateConfigs;
 
     uint256 public requiredWeight;
-    uint256 public defaultConfidenceThreshold = 90; // 90% confidence required
+    uint256 public defaultConfidenceThreshold = 90;
 
-    // Fallback values for emergency
     mapping(bytes32 => uint256) public fallbackValues;
     bool public emergencyMode;
 
-    // Signer rotation timelock
     mapping(address => uint256) public signerChangeTimestamp;
     mapping(address => bool) public pendingSignerRemoval;
+    mapping(bytes32 => uint256) public maxPriceChangeBps;
+    mapping(bytes32 => uint256) public maxInitialValue;
+    mapping(bytes32 => address) public registeredEscrowTotals;
 
-    // Price validation bounds
-    mapping(bytes32 => uint256) public maxPriceChangeBps; // Per-strategy max change
-
-    // Initial value bounds (prevents decimal mismatch on first report)
-    mapping(bytes32 => uint256) public maxInitialValue; // Per-strategy max for first report
-
-    // Absolute staleness limit (beyond this, don't use stale values to prevent double-counting)
-    uint256 public constant ABSOLUTE_MAX_STALENESS = 48 hours; // Hard limit on stale value usage
+    uint256 public emergencyMinConfidence = 50;
 
     /* MODIFIERS */
 
@@ -81,48 +75,38 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override notEmergency {
+    ) external override onlyOwner notEmergency {
+        if (registeredEscrowTotals[strategyId] != address(0)) {
+            revert CannotUpdateReservedEscrowTotal();
+        }
+
         ValueReport memory lastReport = latestReports[strategyId];
 
-        // Validate nonce to prevent replay
         if (nonce <= lastReport.nonce) revert StaleNonce();
-
-        // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
-        // This protects against setting nonce to max value which would brick emergencyUpdate
-        // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
         if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
-
-        // Validate signature expiry
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
-        // Check minimum update interval (unless significant change)
         UpdateConfig memory config = updateConfigs[strategyId];
         uint256 changePercent = _calculateChangePercent(lastReport.value, value);
 
         if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
-            // Only allow update if change exceeds threshold
             if (changePercent < config.pushThreshold) {
                 revert UpdateTooFrequent();
             }
         }
 
-        // Validate price bounds (L-01 FIX: pass pre-calculated changePercent to avoid double calculation)
         if (lastReport.value > 0) {
             _validatePriceBounds(strategyId, changePercent);
         } else {
-            // CRITICAL SECURITY FIX: Validate initial values to prevent decimal mismatch attacks
-            // First report must be bounded to prevent 1e18 vs 1e6 decimal errors
             uint256 maxInitial = maxInitialValue[strategyId];
             if (maxInitial > 0 && value > maxInitial) {
                 revert InitialValueExceedsMax(value, maxInitial);
             }
         }
 
-        // Validate confidence meets minimum requirement
         if (confidence < config.minConfidence) revert LowConfidence();
 
-        // Verify signatures with duplicate prevention
         uint256 totalWeight = _verifySignatures(
             strategyId,
             value,
@@ -134,7 +118,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
-        // Store the new report
         latestReports[strategyId] = ValueReport({
             value: value,
             timestamp: block.timestamp,
@@ -152,7 +135,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        // Check if update is needed
         bool isStale = block.timestamp > report.timestamp + config.maxStaleness;
         bool lowConfidence = report.confidence < config.minConfidence;
 
@@ -168,8 +150,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Support ESCROW_TOTAL fallback
-        // If no report exists (timestamp == 0), use fallback value immediately
         if (report.timestamp == 0) {
             if (fallbackValues[strategyId] > 0) {
                 return fallbackValues[strategyId];
@@ -177,22 +157,17 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             revert ValueTooStale();
         }
 
-        // L-18 FIX: If strategy is configured, use config values directly; otherwise use constants as fallback
         uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
 
-        // Check staleness
         if (block.timestamp > report.timestamp + maxStaleness) {
-            // Use fallback value if available
             if (fallbackValues[strategyId] > 0) {
                 return fallbackValues[strategyId];
             }
             revert ValueTooStale();
         }
 
-        // L-18 FIX: If strategy is configured, use config values directly; otherwise use defaults as fallback
         uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
 
-        // Check confidence threshold
         if (report.confidence < minConfidence) {
             revert LowConfidence();
         }
@@ -200,12 +175,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         return report.value;
     }
 
-    /// @inheritdoc IUniversalValuerOffchain
-    function getTotalValue(address escrow) external view override returns (uint256 totalValue) {
-        // This would aggregate all strategy values for the escrow
-        // In practice, would need strategy enumeration logic
-        // For now, simplified implementation
-
+    /// @dev Internal helper to compute total value for an escrow with staleness tracking
+    /// @dev Used by isValuationHealthy() to determine if any strategy has stale data
+    /// @param escrow The escrow address to compute total value for
+    /// @return result Struct containing value and staleness indicators
+    function _computeTotalValueWithStaleness(address escrow) internal view returns (IUniversalValuerOffchain.TotalValueResult memory result) {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -213,40 +187,29 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             ValueReport memory report = latestReports[strategyId];
             UpdateConfig memory config = updateConfigs[strategyId];
 
-            // L-18 FIX: If strategy is configured, use config values directly; otherwise use defaults as fallback
             uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
-            uint256 minConfidence = (config.minUpdateInterval > 0) ? config.minConfidence : defaultConfidenceThreshold;
-
-            // CRITICAL SECURITY FIX: Improved stale value handling to prevent double counting
-            // Priority: 1. Fresh value with sufficient confidence
-            //          2. Moderately stale value (within config staleness)
-            //          3. Fallback value (emergency backup)
-            //          4. Last known value (only if within ABSOLUTE_MAX_STALENESS)
-
+            uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
-                // Use fresh, high-confidence value
-                totalValue += report.value;
-            } else if (stalenessAge <= ABSOLUTE_MAX_STALENESS && report.confidence >= minConfidence) {
-                // Moderately stale but within absolute limit - use with caution
-                // This prevents using values that are so old they might double-count
-                totalValue += report.value;
-            } else if (fallbackValues[strategyId] > 0) {
-                // Use fallback value if main value is too stale or low confidence
-                totalValue += fallbackValues[strategyId];
-            } else if (report.value > 0 && stalenessAge <= ABSOLUTE_MAX_STALENESS) {
-                // DEFENSE IN DEPTH: Only use last known value if within absolute staleness limit
-                // Beyond 48h, value is too risky (might double-count deallocated assets)
-                totalValue += report.value;
+                result.value += report.value;
+                result.freshCount++;
             }
-            // If none of the above, strategy contributes 0 (prevents double-counting)
+            else if (fallbackValues[strategyId] > 0) {
+                result.value += fallbackValues[strategyId];
+                result.hasStaleData = true;
+                result.fallbackCount++;
+            }
+            else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence) {
+                result.value += report.value;
+                result.hasStaleData = true;
+                result.staleCount++;
+            }
+            else {
+                result.hasStaleData = true;
+                result.staleCount++;
+            }
         }
-
-        // Add idle assets
-        totalValue += IERC20(asset).balanceOf(escrow);
-
-        return totalValue;
     }
 
     /// @inheritdoc IUniversalValuerOffchain
@@ -257,18 +220,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override notEmergency {
+    ) external override onlyOwner notEmergency {
         if (strategyIds.length != values.length ||
             strategyIds.length != confidences.length) {
             revert ArrayLengthMismatch();
         }
-
-        // Validate signature expiry
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
-        // CRITICAL SECURITY FIX: Add domain separation to prevent cross-chain/cross-instance replay attacks
-        // Include block.chainid and address(this) to match single update path
         bytes32 batchHash = keccak256(abi.encode(
             strategyIds,
             values,
@@ -282,43 +241,27 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
-        // CRITICAL FIX: Make batch updates ATOMIC - validate ALL strategies first, then update
-        // This prevents partial updates that could be exploited for value manipulation attacks
-
-        // Phase 1: Validate ALL updates (reverts if ANY fails)
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
             ValueReport memory lastReport = latestReports[strategyId];
 
-            // Validate nonce to prevent replay - must be strictly increasing
             if (nonce <= lastReport.nonce) revert StaleNonce();
-
-            // L-02 SECURITY FIX: Prevent nonce from jumping too far ahead
-            // This protects against setting nonce to max value which would brick emergencyUpdate
-            // emergencyUpdate increments nonce by 1, so if nonce is at type(uint256).max, it would overflow
             if (nonce > lastReport.nonce + MAX_NONCE_GAP) revert NonceGapTooLarge();
 
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
 
-            // Check minimum update interval (unless significant change)
             if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
-                // Only allow update if change exceeds threshold
                 if (changePercent < config.pushThreshold) {
                     revert UpdateTooFrequent();
                 }
             }
-
-            // Validate price bounds
             if (lastReport.value > 0) {
                 _validatePriceBounds(strategyId, changePercent);
             }
-
-            // Validate confidence meets minimum requirement for this strategy
             if (confidences[i] < config.minConfidence) revert LowConfidence();
         }
 
-        // Phase 2: All validations passed - now update ALL strategies atomically
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
 
@@ -335,6 +278,31 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
     }
 
+    /* ESCROW TOTAL REGISTRATION */
+
+    /// @notice Register an ESCROW_TOTAL ID to prevent collision with strategy IDs
+    /// @dev Called by escrow contracts during deployment. Only the escrow matching the totalId can register.
+    /// @param totalId The ESCROW_TOTAL ID (must match keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender)))
+    function registerEscrowTotal(bytes32 totalId) external {
+        bytes32 expectedId = keccak256(abi.encodePacked("ESCROW_TOTAL", msg.sender));
+        if (totalId != expectedId) {
+            revert InvalidEscrowTotalRegistration();
+        }
+        if (registeredEscrowTotals[totalId] != address(0) && registeredEscrowTotals[totalId] != msg.sender) {
+            revert InvalidEscrowTotalRegistration();
+        }
+
+        registeredEscrowTotals[totalId] = msg.sender;
+        emit EscrowTotalRegistered(totalId, msg.sender);
+    }
+
+    /// @notice Check if an ID is a registered ESCROW_TOTAL
+    /// @param id The ID to check
+    /// @return escrow The escrow address that registered this ID (address(0) if not registered)
+    function getRegisteredEscrow(bytes32 id) external view returns (address escrow) {
+        return registeredEscrowTotals[id];
+    }
+
     /* ADMIN FUNCTIONS */
 
     /// @notice Initiate signer configuration change (step 1 of 2-step process)
@@ -344,12 +312,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 weight
     ) external onlyOwner {
         if (!authorized && signers[signer].authorized) {
-            // Removing an authorized signer requires timelock
             signerChangeTimestamp[signer] = block.timestamp + SIGNER_TIMELOCK;
             pendingSignerRemoval[signer] = true;
             emit SignerRemovalInitiated(signer, signerChangeTimestamp[signer]);
         } else {
-            // Adding or modifying signer can be immediate
             signers[signer] = SignerConfig({
                 authorized: authorized,
                 weight: weight
@@ -363,13 +329,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (!pendingSignerRemoval[signer]) revert NoSignerRemovalPending();
         if (block.timestamp < signerChangeTimestamp[signer]) revert SignerRemovalTimelockNotExpired();
 
-        // Remove signer
         signers[signer] = SignerConfig({
             authorized: false,
             weight: 0
         });
 
-        // Clear timelock state
         pendingSignerRemoval[signer] = false;
         signerChangeTimestamp[signer] = 0;
 
@@ -398,13 +362,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (maxStaleness > MAX_STALENESS) revert ValueTooStale();
         if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (minConfidence < defaultConfidenceThreshold || minConfidence > 100) revert LowConfidence();
-
-        // L-03 SECURITY FIX: Ensure minUpdateInterval < maxStaleness to prevent configuration conflicts
-        // If minUpdateInterval >= maxStaleness, the value becomes stale before it can be updated,
-        // creating a window where the strategy is unusable (stale but can't update yet)
         if (minUpdateInterval >= maxStaleness) revert UpdateIntervalExceedsStaleness();
 
-        // M-08 FIX: Ensure pushThreshold doesn't exceed maxPriceChangeBps to prevent stuck strategies
         uint256 maxChange = maxPriceChangeBps[strategyId];
         if (maxChange == 0) {
             maxChange = MAX_PRICE_CHANGE_BPS; // Use default if not set
@@ -438,16 +397,23 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         emit DefaultConfidenceThresholdUpdated(threshold);
     }
 
+    /// @notice Set emergency minimum confidence threshold for Path 4 fallback
+    /// @dev This threshold is used when normal confidence requirements fail but
+    ///      the value is still within ABSOLUTE_MAX_STALENESS
+    /// @param threshold New emergency confidence threshold (0-100)
+    function setEmergencyMinConfidence(uint256 threshold) external onlyOwner {
+        if (threshold > 100) revert InvalidEmergencyConfidence();
+        // Emergency threshold should be lower than normal threshold
+        if (threshold > defaultConfidenceThreshold) revert InvalidEmergencyConfidence();
+        emergencyMinConfidence = threshold;
+        emit EmergencyMinConfidenceUpdated(threshold);
+    }
+
     /// @notice Set price change bounds for a strategy
-    /// @dev L-01 FIX: Enforce MAX_PRICE_CHANGE_BPS as absolute upper limit for consistent bounds
     function setPriceChangeBounds(bytes32 strategyId, uint256 maxChangeBps) external onlyOwner {
-        // L-01 SECURITY FIX: Enforce that maxChangeBps cannot exceed MAX_PRICE_CHANGE_BPS (50%)
-        // This maintains semantic consistency - MAX_PRICE_CHANGE_BPS is truly the maximum allowed
-        // Without this check, the "MAX" designation would be misleading
         if (maxChangeBps > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
         if (maxChangeBps > BASIS_POINTS) revert InvalidPriceChangeBounds();
 
-        // M-08 FIX: Ensure new price bounds don't conflict with existing pushThreshold
         UpdateConfig memory config = updateConfigs[strategyId];
         if (config.pushThreshold > 0 && config.pushThreshold > maxChangeBps) {
             revert PushThresholdExceedsMaxChange(config.pushThreshold, maxChangeBps);
@@ -457,11 +423,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         emit PriceChangeBoundsSet(strategyId, maxChangeBps);
     }
 
-    /// @notice Set maximum initial value for a strategy (prevents decimal mismatch on first report)
+    /// @notice Set maximum initial value for a strategy
     /// @param strategyId The strategy identifier
     /// @param maxValue Maximum allowed value for first report (0 = no limit)
-    /// @dev CRITICAL: Set this to reasonable bounds based on expected strategy size in asset decimals
-    ///      Example: For USDC (6 decimals) strategy managing $1M, set to 1_000_000e6
     function setMaxInitialValue(bytes32 strategyId, uint256 maxValue) external onlyOwner {
         maxInitialValue[strategyId] = maxValue;
         emit MaxInitialValueSet(strategyId, maxValue);
@@ -502,12 +466,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        // Check staleness
         if (block.timestamp > report.timestamp + config.maxStaleness) {
             return true;
         }
-
-        // Check confidence
+        
         if (report.confidence < config.minConfidence) {
             return true;
         }
@@ -523,6 +485,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Check if signer is authorized
     function isAuthorizedSigner(address signer) external view returns (bool) {
         return signers[signer].authorized;
+    }
+
+    /// @inheritdoc IUniversalValuerOffchain
+    function isValuationHealthy(address escrow) external view override returns (bool healthy) {
+        IUniversalValuerOffchain.TotalValueResult memory result = _computeTotalValueWithStaleness(escrow);
+        return !result.hasStaleData;
     }
 
     /* INTERNAL FUNCTIONS */
@@ -551,14 +519,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             messageHash
         ));
 
-        // Track used signers to prevent duplicates
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
 
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = _recoverSigner(ethSignedHash, signatures[i]);
 
-            // Skip if signer already counted
             bool alreadyUsed = false;
             for (uint256 j = 0; j < usedCount; j++) {
                 if (usedSigners[j] == signer) {
@@ -569,8 +535,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            // Check if signer is authorized and not pending deactivation
-            // If pendingSignerRemoval[signer] is true, signer should be excluded after his removal delay passes
             if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
@@ -591,14 +555,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             batchHash
         ));
 
-        // Track used signers to prevent duplicates
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
 
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = _recoverSigner(ethSignedHash, signatures[i]);
 
-            // Skip if signer already counted
             bool alreadyUsed = false;
             for (uint256 j = 0; j < usedCount; j++) {
                 if (usedSigners[j] == signer) {
@@ -609,8 +571,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            // Check if signer is authorized and not pending deactivation
-            // If pendingSignerRemoval[signer] is true, signer should be excluded immediately
             if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
@@ -626,14 +586,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @param signature The signature bytes
     /// @return The recovered signer address
     function _recoverSigner(bytes32 hash, bytes memory signature) internal pure returns (address) {
-        // L-11 FIX: Use OpenZeppelin's ECDSA.recover for safer signature validation
-        // This handles malleability and edge cases better than custom ecrecover implementation
-
-        // Basic signature length validation to maintain existing behavior
         if (signature.length != 65) revert InvalidSignature();
 
-        // OpenZeppelin's ECDSA.recover handles most edge cases internally
-        // and returns address(0) for invalid signatures instead of reverting
         address signer = ECDSA.recover(hash, signature);
 
         if (signer == address(0)) revert InvalidSignature();
@@ -665,14 +619,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @dev Get active strategies for escrow
     function _getActiveStrategies(address escrow) internal view returns (bytes32[] memory) {
-        // Query UniversalAdapterEscrow for active strategies
         try IUniversalAdapterEscrow(escrow).getActiveStrategies() returns (bytes32[] memory ids) {
             return ids;
         } catch {
-            // SECURITY FIX Issue #1 (FIXING_ISSUES.md): Do not return idle-only on enumeration failure
-            // Returning empty array allows attackers to manipulate share price via low-gas transactions
-            // that cause getActiveStrategies() to fail, making realAssets() ignore external deposits
-            // Better to fail-closed (revert) than fail-open (return empty and allow manipulation)
             revert("StrategyEnumerationFailed");
         }
     }

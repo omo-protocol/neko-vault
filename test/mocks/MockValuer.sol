@@ -38,20 +38,4 @@ contract MockValuer {
         return strategyValue;
     }
 
-    // SECURITY FIX (security_issues_5nov2025_3.md Issue #1): Support ESCROW_TOTAL pattern
-    // OLD: getTotalValue(address) returned values[address]
-    // NEW: getTotalValue delegates to the ESCROW_TOTAL strategy ID for that address
-    // This allows tests to work with both old setValue(address) and new ESCROW_TOTAL approach
-    function getTotalValue(address target) external view returns (uint256) {
-        // Try ESCROW_TOTAL strategy ID first (new pattern)
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", target));
-        uint256 strategyValue = strategyValues[totalId];
-
-        // Fallback to address mapping if ESCROW_TOTAL not set (backward compatibility)
-        if (strategyValue == 0) {
-            return values[target];
-        }
-
-        return strategyValue;
-    }
 }

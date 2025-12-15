@@ -32,7 +32,7 @@ User deposits USDT on Arbitrum (spoke) and receives vault shares on Arbitrum.
 │       │       amountLD: 1000e6,                // 1000 USDT                 │
 │       │       composeMsg: encode(              // Compose instructions      │
 │       │         receiver: Alice,               // Final share recipient     │
-│       │         dstEid: ARBITRUM_EID,          // Return shares here        │
+│       │         dstEid: HYPEREVM_EID,          // Return shares here        │
 │       │         minShares: 950e18              // Slippage protection        │
 │       │       )                                                              │
 │       │     }, { value: 0.01 ETH })            // LayerZero gas fee         │

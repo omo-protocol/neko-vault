@@ -72,14 +72,15 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         vm.prank(attacker);
         // Donation is now in adapter balance
 
-        // Update valuer to include donation in getTotalValue (simulating malicious/buggy valuer)
-        valuer.setReturnValue(existingAllocation + donationAmount);
+        // NEW SECURITY MODEL: Off-chain valuer is responsible for excluding donations
+        // A properly functioning off-chain valuer will NOT include donations in its report
+        valuer.setReturnValue(existingAllocation); // Valuer correctly excludes the donation
 
         // SECURITY FIX VERIFICATION: Donated tokens should NOT inflate realAssets
         uint256 realAssetsAfterDonation = adapter.realAssets();
 
-        // With OLD logic: realAssets would be 1100e18 (inflated by donation)
-        // With NEW logic: realAssets should still be 1000e18 (donation excluded)
+        // With NEW trust model: realAssets trusts valuer completely
+        // Since valuer correctly reports 1000e18 (excluding donation), realAssets returns 1000e18
         assertEq(realAssetsAfterDonation, existingAllocation, "Donation should NOT inflate realAssets");
         assertEq(realAssetsAfterDonation, realAssetsBeforeDonation, "realAssets unchanged by donation");
 
@@ -128,22 +129,17 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         // Verify allocation was reduced
         assertEq(adapter.getAllocation(STRATEGY_1), initialAllocation - donationAmount, "Allocation reduced by donation amount");
 
-        // SECURITY FIX VERIFICATION: realAssets should NOT include the donation
-        // After deallocate (MockVault doesn't actually pull tokens via transferFrom):
+        // NEW SECURITY MODEL: Off-chain valuer excludes donations from its report
+        // After deallocate:
         // - Balance in adapter: 1000e18 (900 initial + 100 donation, not pulled by vault)
         // - totalAllocations: 800e18 (900 - 100 deallocated)
-        // - allocatedInAdapter: 800e18
-        // - excessIdle: 1000e18 - 800e18 = 200e18 (includes both donation + deallocated amount)
-        //
-        // Valuer should report total value INCLUDING all idle: 1000e18
-        // realAssets() will then subtract excessIdle (200e18) to get 800e18
-        uint256 totalValueIncludingIdle = initialAllocation + donationAmount; // 1000e18
-        valuer.setReturnValue(totalValueIncludingIdle);
+        // - Off-chain valuer correctly reports only the legitimate 800e18 (excluding donation)
+        valuer.setReturnValue(initialAllocation - donationAmount); // 800e18
 
         uint256 realAssetsAfter = adapter.realAssets();
         uint256 expectedRealAssets = initialAllocation - donationAmount; // 800e18
 
-        // Donation protection: realAssets excludes the 100e18 donation
+        // Donation protection: Off-chain valuer excludes the 100e18 donation
         assertEq(realAssetsAfter, expectedRealAssets, "realAssets should exclude donation even after deallocate");
 
         // The cap bypass attack fails because:
@@ -173,8 +169,8 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         // Donate arbitrary amount
         asset.mint(address(adapter), donation);
 
-        // Update valuer to include donation (simulating attack)
-        valuer.setReturnValue(allocation + donation);
+        // NEW SECURITY MODEL: Off-chain valuer correctly excludes donation
+        valuer.setReturnValue(allocation); // Valuer does NOT include donation
 
         // Verify realAssets unchanged
         uint256 realAssetsAfter = adapter.realAssets();
@@ -249,30 +245,24 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 profit = 50e18;
         asset.mint(address(adapter), profit);
 
-        // Valuer should report allocation + profit
+        // NEW SECURITY MODEL: Off-chain valuer includes legitimate profits
+        // Valuer tracks external deposits and knows when real yield is earned
+        // It reports allocation + profit because this is legitimate value increase
         uint256 expectedValue = allocation + profit;
         valuer.setReturnValue(expectedValue);
 
         // Verify profit IS counted in realAssets (not excluded as donation)
         uint256 realAssets = adapter.realAssets();
 
-        // Calculate expected:
-        // balance = 800 (original) + 50 (profit) = 850
-        // allocatedInAdapter = totalAllocations - totalExternalDeposits = 1000 - 200 = 800
-        // excessIdle = 850 - 800 = 50 (the profit)
-        // valuerValueAdj = 1050 - 50 = 1000
-        // Since valuerValueAdj (1000) >= 90% of minKnown (1000), return valuerValueAdj
-
         uint256 balance = asset.balanceOf(address(adapter));
         assertEq(balance, 800e18 + profit, "Balance includes profit");
 
-        // With the new logic, the 50e18 profit shows up as excessIdle
-        // and gets subtracted from valuer's report, so realAssets = 1000e18 (original allocation)
-        // This is actually CORRECT because the profit hasn't been "allocated" yet
-        assertEq(realAssets, allocation, "realAssets equals original allocation");
-
-        // The profit is visible through the valuer, but adapter's realAssets
-        // correctly reports only allocated amount until profit is explicitly allocated
+        // NEW TRUST MODEL: realAssets trusts the off-chain valuer completely
+        // The off-chain valuer distinguishes between:
+        // - Donations (excluded from valuation)
+        // - Legitimate profits (included in valuation)
+        // Since the valuer reports 1050e18, realAssets returns 1050e18
+        assertEq(realAssets, expectedValue, "realAssets includes strategy profits as reported by valuer");
     }
 }
 
@@ -284,10 +274,6 @@ contract MockValuer {
 
     function setReturnValue(uint256 _value) external {
         returnValue = _value;
-    }
-
-    function getTotalValue(address) external view returns (uint256) {
-        return returnValue;
     }
 
     function getValue(bytes32) external view returns (uint256) {

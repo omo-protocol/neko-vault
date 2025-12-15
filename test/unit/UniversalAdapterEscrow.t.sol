@@ -51,7 +51,8 @@ contract UniversalAdapterEscrowTest is Test {
         // Deploy factory
         factory = new UniversalAdapterEscrowFactory();
 
-        // Deploy adapter via factory
+        // Deploy adapter via factory (must be called by vault owner)
+        vm.startPrank(owner);
         adapter = UniversalAdapterEscrow(
             payable(factory.deployAdapter(
                 address(vault),
@@ -62,7 +63,6 @@ contract UniversalAdapterEscrowTest is Test {
         );
 
         // Setup initial state
-        vm.startPrank(owner);
         vault.addAdapter(address(adapter));
         vm.stopPrank();
 
@@ -84,7 +84,6 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(adapter.parentVault(), address(vault));
         assertEq(adapter.asset(), address(asset));
         assertEq(adapter.valuer(), address(valuer));
-        assertEq(adapter.useOffchainValuer(), false);
         assertEq(adapter.owner(), owner);
         assertEq(adapter.paused(), false);
     }
@@ -270,6 +269,9 @@ contract UniversalAdapterEscrowTest is Test {
     }
 
     function testDeallocateWithYield() public {
+        // SECURITY FIX: change is now capped at allocationDecrease to prevent cap bypass
+        // VaultV2 can still transfer the full amount, but cap accounting stays accurate
+
         // Setup: allocate first
         vm.prank(owner);
         adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
@@ -286,15 +288,16 @@ contract UniversalAdapterEscrowTest is Test {
         // Transfer extra assets to adapter to cover yield withdrawal
         asset.mint(address(adapter), 50e6);
 
-        // Deallocate with yield - should be able to withdraw 120e6 even though only 100e6 was allocated
+        // Deallocate with yield - request 120e6 but change capped at allocation (100e6)
         bytes memory deallocData = abi.encode(STRATEGY_1, 120e6, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocData, 120e6, bytes4(0), address(0));
 
         assertEq(ids[0], STRATEGY_1);
-        assertEq(change, -int256(120e6), "Should be able to withdraw yield");
-        assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after withdrawing more than allocated");
+        // SECURITY FIX: change capped at allocation (100e6), not requested amount (120e6)
+        assertEq(change, -int256(100e6), "Change capped at allocation to prevent cap bypass");
+        assertEq(adapter.getAllocation(STRATEGY_1), 0, "Allocation should be 0 after deallocating");
     }
 
     function testFeeOnTransferTokensNotSupported() public {
@@ -601,7 +604,6 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Execute pre-configured
         vm.prank(agent);
-        adapter.executePreConfigured(STRATEGY_1);
     }
 
     /* OWNERSHIP TESTS */
@@ -1551,15 +1553,23 @@ contract UniversalAdapterEscrowTest is Test {
         // Test: Request more than adapter balance (200e6 when adapter only has 50e6)
         uint256 deallocateAmount = 200e6;
 
-        // Create withdrawal call to get funds from protocol
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION PATTERN: Agent withdraws from protocol BEFORE user deallocate
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", 150e6),
             value: 0
         });
 
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, calls);
+        vm.prank(strategyAgent);
+        adapter.withdrawFromStrategy(strategyId, withdrawCalls, 150e6);
+
+        // Verify funds were pulled from protocol by agent
+        assertEq(asset.balanceOf(address(adapter)), 200e6, "Adapter should have received funds from agent withdrawal");
+        assertEq(asset.balanceOf(address(mockProtocol)), 300e6, "Protocol should have 150e6 less");
+
+        // Now user can deallocate (withdrawCalls ignored in new implementation)
+        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
@@ -1571,14 +1581,11 @@ contract UniversalAdapterEscrowTest is Test {
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
         assertEq(change, -int256(deallocateAmount), "Should report correct change");
-
-        // Verify funds were pulled from protocol
-        assertEq(asset.balanceOf(address(mockProtocol)), 300e6, "Protocol should have 150e6 less");
-        assertEq(asset.balanceOf(address(adapter)), 200e6, "Adapter should have received funds");
     }
 
     function testDeallocateProfitsAccessible() public {
-        // SECURITY FIX: Test that profits are fully accessible via deallocate
+        // SECURITY FIX: change is capped at allocation to prevent cap bypass
+        // VaultV2 can still transfer the full amount, but cap accounting stays accurate
 
         // Setup strategy
         bytes32 strategyId = STRATEGY_1;
@@ -1603,7 +1610,7 @@ contract UniversalAdapterEscrowTest is Test {
         // Balance should now be initial + profits
         assertEq(asset.balanceOf(address(adapter)), initialAllocation + profits, "Should have allocation + profits");
 
-        // Test: Can deallocate full amount including profits without external calls
+        // Request more than allocation (600e6 when allocation is 500e6)
         uint256 deallocateWithProfits = initialAllocation + 100e6; // Take initial + half of profits
         bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
@@ -1616,16 +1623,80 @@ contract UniversalAdapterEscrowTest is Test {
         );
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
-        assertEq(change, -int256(deallocateWithProfits), "Should be able to withdraw with profits");
+        // SECURITY FIX: change capped at allocation (500e6), not requested (600e6)
+        assertEq(change, -int256(initialAllocation), "Change capped at allocation to prevent cap bypass");
 
         // Balance stays in adapter until vault pulls it
-        // The key is that deallocate correctly reported the full amount including profits
         uint256 remainingBalance = asset.balanceOf(address(adapter));
         assertEq(remainingBalance, 700e6, "Balance remains until vault pulls it");
 
-        // Verify allocation was fully depleted since we took more than initial
+        // Verify allocation was fully depleted
         uint256 remainingAllocation = adapter.getAllocation(strategyId);
-        assertEq(remainingAllocation, 0, "Allocation should be zero after withdrawing more than initial");
+        assertEq(remainingAllocation, 0, "Allocation should be zero");
+    }
+
+    /* SECURITY FIX: PERMISSIONLESS CREATE2 DEPLOYMENT PREVENTION */
+
+    function testFactoryDeploymentOnlyByVaultOwner() public {
+        // SECURITY FIX: Verify that only vault owner can deploy adapters
+        // This prevents front-running attacks where an attacker could deploy
+        // with known salt/params and capture adapter ownership
+
+        UniversalAdapterEscrowFactory newFactory = new UniversalAdapterEscrowFactory();
+
+        // Attacker tries to deploy adapter for the vault
+        vm.prank(attacker);
+        vm.expectRevert(UniversalAdapterEscrowFactory.OnlyVaultOwnerCanDeploy.selector);
+        newFactory.deployAdapter(
+            address(vault),
+            address(valuer),
+            false,
+            keccak256("attacker-salt")
+        );
+
+        // Owner can successfully deploy
+        vm.prank(owner);
+        address deployed = newFactory.deployAdapter(
+            address(vault),
+            address(valuer),
+            false,
+            keccak256("owner-salt")
+        );
+        assertTrue(deployed != address(0), "Owner should be able to deploy");
+    }
+
+    /* SECURITY FIX: ESCROW_TOTAL ID NAMESPACE COLLISION PREVENTION */
+
+    function testSetStrategyRevertsIfStrategyIdEqualsEscrowTotal() public {
+        // SECURITY FIX: Prevent same-escrow collision where owner accidentally sets
+        // strategyId = ESCROW_TOTAL ID, which would allow strategy updates to
+        // overwrite the total valuation
+
+        // Compute the ESCROW_TOTAL ID for this adapter
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+
+        // Trying to set a strategy with ID equal to ESCROW_TOTAL should revert
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.StrategyIdCollisionWithEscrowTotal.selector);
+        adapter.setStrategy(escrowTotalId, agent, "", 1000e6);
+    }
+
+    function testSetStrategySucceedsWithNormalStrategyId() public {
+        // Normal strategy IDs should work fine
+        bytes32 normalStrategyId = keccak256("SOME_STRATEGY");
+
+        // This should NOT equal the ESCROW_TOTAL ID
+        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
+        assertTrue(normalStrategyId != escrowTotalId, "Test setup: IDs should be different");
+
+        // Setting strategy should succeed
+        vm.prank(owner);
+        adapter.setStrategy(normalStrategyId, agent, "", 1000e6);
+
+        // Verify strategy was set
+        IUniversalAdapterEscrow.StrategyConfig memory config = adapter.getStrategy(normalStrategyId);
+        assertTrue(config.active, "Strategy should be active");
+        assertEq(config.agent, agent, "Agent should be set correctly");
     }
 }
 

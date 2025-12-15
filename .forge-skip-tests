@@ -1,0 +1,7 @@
+# Deprecated test files - tests for old architecture
+# These tests are kept for reference but should not be run in CI
+# Files have been renamed with .deprecated extension to prevent compilation
+test/integration/UniversalEscrowSimpleE2E.t.sol.deprecated
+test/unit/StrategyEscrowComprehensiveFinal.t.sol.deprecated
+test/unit/UniversalEscrowAdapterFixedAuth.t.sol.deprecated
+test/unit/UniversalValuerOffchainFixed.t.sol.deprecated

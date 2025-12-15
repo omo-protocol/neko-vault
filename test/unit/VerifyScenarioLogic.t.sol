@@ -54,7 +54,7 @@ contract VerifyScenarioLogic is Test {
     }
 
     function testScenario2OnlyWithdrawsMissingAmount() public {
-        console2.log("=== SCENARIO 2: Should only withdraw (assets - adapterBalance) ==");
+        console2.log("=== SCENARIO 2: Agent withdraws only missing amount (LAZY DEALLOCATION) ==");
 
         // Setup: Allocate 800e6, then move 500e6 to protocol, leaving 300e6 in adapter
         asset.mint(address(adapter), 800e6);
@@ -78,39 +78,40 @@ contract VerifyScenarioLogic is Test {
         console2.log("Request amount:", requestAmount); // 600e6
         console2.log("Expected withdrawal from protocol:", expectedWithdrawal); // 300e6
 
-        // Create withdrawal call for exactly the missing amount
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws exactly the missing amount
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", expectedWithdrawal),
             value: 0
         });
 
-        // Execute deallocate
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls, expectedWithdrawal);
+
+        // Verify agent withdrawal
+        assertEq(mockProtocol.lastWithdrawalAmount(), expectedWithdrawal, "Should have withdrawn only missing amount");
+        assertEq(asset.balanceOf(address(adapter)), requestAmount, "Adapter should have exactly the requested amount after agent withdrawal");
+
+        // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
         );
 
         // Verify Scenario 2 logic:
-        // - Used existing 300e6 balance
-        // - Withdrew exactly 300e6 more from protocol
-        // - Total provided: 600e6
+        // - Agent withdrew exactly 300e6 (missing amount)
+        // - User deallocated full 600e6
         assertEq(change, -int256(requestAmount), "Should provide full requested amount");
-        assertEq(mockProtocol.lastWithdrawalAmount(), expectedWithdrawal, "Should have withdrawn only missing amount");
 
-        // The key verification: actualAmount = adapterBalance + actualWithdrawn
-        uint256 finalAdapterBalance = asset.balanceOf(address(adapter));
-        assertEq(finalAdapterBalance, requestAmount, "Adapter should have exactly the requested amount");
-
-        console2.log("[VERIFIED] Scenario 2 uses: existing balance + (assets - balance) from protocol");
+        console2.log("[VERIFIED] Scenario 2: Agent withdraws only missing amount (assets - balance) from protocol");
     }
 
     function testScenario3WithdrawsFullAmount() public {
-        console2.log("=== SCENARIO 3: Should withdraw full assets amount ==");
+        console2.log("=== SCENARIO 3: Agent withdraws full amount (LAZY DEALLOCATION) ==");
 
         // Setup: Allocate 800e6, then move ALL to protocol, leaving 0 in adapter
         asset.mint(address(adapter), 800e6);
@@ -135,34 +136,40 @@ contract VerifyScenarioLogic is Test {
 
         assertEq(adapterBalance, 0, "Adapter should have 0 balance for Scenario 3");
 
-        // Create withdrawal call for the FULL requested amount
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws the FULL requested amount
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", requestAmount),
             value: 0
         });
 
-        // Execute deallocate
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls, requestAmount);
+
+        // Verify agent withdrawal
+        assertEq(mockProtocol.lastWithdrawalAmount(), requestAmount, "Should have withdrawn full amount");
+        assertEq(asset.balanceOf(address(adapter)), requestAmount, "Adapter should have the requested amount after agent withdrawal");
+
+        // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
         );
 
         // Verify Scenario 3 logic:
-        // - Started with 0 balance
-        // - Withdrew full 600e6 from protocol
+        // - Agent withdrew full 600e6 from protocol
+        // - User deallocated full 600e6
         assertEq(change, -int256(requestAmount), "Should provide full requested amount");
-        assertEq(mockProtocol.lastWithdrawalAmount(), requestAmount, "Should have withdrawn full amount");
 
-        console2.log("[VERIFIED] Scenario 3 withdraws: full assets amount from protocol");
+        console2.log("[VERIFIED] Scenario 3: Agent withdraws full assets amount from protocol");
     }
 
     function testScenarioDifference() public {
-        console2.log("=== VERIFYING THE KEY DIFFERENCE BETWEEN SCENARIOS ==");
+        console2.log("=== VERIFYING THE KEY DIFFERENCE BETWEEN SCENARIOS (LAZY DEALLOCATION) ==");
 
         // Test both scenarios with same request but different starting balances
         uint256 requestAmount = 500e6;
@@ -186,23 +193,27 @@ contract VerifyScenarioLogic is Test {
         console2.log("  Adapter balance: %d", scenario2Balance);
         console2.log("  Should withdraw from protocol: %d", scenario2ExpectedWithdrawal);
 
-        // Execute Scenario 2
-        IUniversalAdapterEscrow.Call[] memory calls2 = new IUniversalAdapterEscrow.Call[](1);
-        calls2[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws for Scenario 2
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls2 = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls2[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", scenario2ExpectedWithdrawal),
             value: 0
         });
 
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls2, scenario2ExpectedWithdrawal);
+
+        uint256 scenario2Withdrawal = mockProtocol.lastWithdrawalAmount();
+
+        // User deallocates
         vm.prank(address(vault));
         adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls2),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
         );
-
-        uint256 scenario2Withdrawal = mockProtocol.lastWithdrawalAmount();
 
         // Reset for Scenario 3
         setUp();
@@ -223,36 +234,40 @@ contract VerifyScenarioLogic is Test {
         console2.log("  Adapter balance: %d", scenario3Balance);
         console2.log("  Should withdraw from protocol: %d", requestAmount);
 
-        // Execute Scenario 3
-        IUniversalAdapterEscrow.Call[] memory calls3 = new IUniversalAdapterEscrow.Call[](1);
-        calls3[0] = IUniversalAdapterEscrow.Call({
+        // LAZY DEALLOCATION: Agent withdraws for Scenario 3
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls3 = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls3[0] = IUniversalAdapterEscrow.Call({
             target: address(mockProtocol),
             data: abi.encodeWithSignature("withdraw(uint256)", requestAmount),
             value: 0
         });
 
+        vm.prank(agent);
+        adapter.withdrawFromStrategy(STRATEGY_1, withdrawCalls3, requestAmount);
+
+        uint256 scenario3Withdrawal = mockProtocol.lastWithdrawalAmount();
+
+        // User deallocates
         vm.prank(address(vault));
         adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls3),
+            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
             requestAmount,
             bytes4(0),
             address(0)
         );
 
-        uint256 scenario3Withdrawal = mockProtocol.lastWithdrawalAmount();
-
         // Verify the key difference
         console2.log("\n=== KEY DIFFERENCE VERIFIED ===");
-        console2.log("Scenario 2 withdrew from protocol: %d", scenario2Withdrawal);
-        console2.log("Scenario 3 withdrew from protocol: %d", scenario3Withdrawal);
+        console2.log("Scenario 2 agent withdrew from protocol: %d", scenario2Withdrawal);
+        console2.log("Scenario 3 agent withdrew from protocol: %d", scenario3Withdrawal);
 
-        assertEq(scenario2Withdrawal, 300e6, "Scenario 2 should withdraw only missing amount");
-        assertEq(scenario3Withdrawal, 500e6, "Scenario 3 should withdraw full amount");
+        assertEq(scenario2Withdrawal, 300e6, "Scenario 2 agent should withdraw only missing amount");
+        assertEq(scenario3Withdrawal, 500e6, "Scenario 3 agent should withdraw full amount");
         assertTrue(scenario2Withdrawal < scenario3Withdrawal, "Scenario 2 withdraws less than Scenario 3");
 
-        console2.log("\n[SUCCESS] Confirmed different withdrawal logic:");
-        console2.log("- Scenario 2: Withdraws (assets - balance) = uses existing balance efficiently");
-        console2.log("- Scenario 3: Withdraws full assets = no existing balance to use");
+        console2.log("\n[SUCCESS] Confirmed different agent withdrawal logic:");
+        console2.log("- Scenario 2: Agent withdraws (assets - balance) = uses existing balance efficiently");
+        console2.log("- Scenario 3: Agent withdraws full assets = no existing balance to use");
     }
 }
 
