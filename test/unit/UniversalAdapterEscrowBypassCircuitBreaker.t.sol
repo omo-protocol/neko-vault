@@ -395,10 +395,6 @@ contract MockValuer {
         returnValue = _value;
     }
 
-    function getTotalValue(address) external view returns (uint256) {
-        return returnValue;
-    }
-
     function getValue(bytes32) external view returns (uint256) {
         return returnValue;
     }

@@ -41,6 +41,9 @@ contract UniversalAdapterEscrowSlippageTest is Test {
             true // useOffchainValuer
         );
 
+        // Set adapter address in valuer for getValue(ESCROW_TOTAL_ID) pattern
+        valuer.setAdapter(address(adapter));
+
         // Setup strategy
         vm.prank(owner);
         adapter.setStrategy(strategyId, owner, "", 0);
@@ -352,20 +355,25 @@ contract UniversalAdapterEscrowSlippageTest is Test {
 }
 
 /**
- * @notice Mock valuer that returns balance + external deposits
+ * @notice Mock valuer that returns balance for getValue calls
  */
 contract MockValuer {
     address public asset;
+    address public adapter;
 
     function setAsset(address _asset) external {
         asset = _asset;
     }
 
-    function getTotalValue(address adapter) external view returns (uint256) {
-        return MockERC20(asset).balanceOf(adapter);
+    function setAdapter(address _adapter) external {
+        adapter = _adapter;
     }
 
     function getValue(bytes32) external view returns (uint256) {
+        // Return adapter balance for any getValue call (used for ESCROW_TOTAL_ID pattern)
+        if (adapter != address(0)) {
+            return MockERC20(asset).balanceOf(adapter);
+        }
         return 0;
     }
 }

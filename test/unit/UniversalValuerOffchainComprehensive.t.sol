@@ -639,9 +639,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
-    /* GET TOTAL VALUE TESTS */
+    /* VALUATION HEALTH TESTS */
 
-    function testGetTotalValue() public {
+    function testValuationHealthyWithFreshValue() public {
         // Create a simple mock adapter that returns STRATEGY_A as active
         SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
 
@@ -651,15 +651,12 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.prank(owner);
         valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
 
-        // Give mock adapter some idle assets
-        asset.mint(address(mockAdapter), 500e18);
-
-        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // Should be strategy value only (idle balance NOT included due to line 235 being commented)
-        assertEq(totalValue, 1000e18);
+        // Should be healthy with fresh value
+        bool isHealthy = valuer.isValuationHealthy(address(mockAdapter));
+        assertTrue(isHealthy, "Fresh value should be healthy");
     }
 
-    function testGetTotalValueStaleReports() public {
+    function testValuationUnhealthyWithStaleReports() public {
         // Create a simple mock adapter that returns STRATEGY_A as active
         SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
 
@@ -672,14 +669,12 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Fast forward to make stale
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
-        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // SECURITY FIX: Stale values WITHOUT fallback should contribute 0 to prevent stale-price exploitation
-        // This fixes the vulnerability where extended 24h-48h staleness window enabled mispricing attacks
-        // Strategies should have fallback values configured to be included when stale
-        assertEq(totalValue, 0); // Only idle balance (0 in mock adapter)
+        // Should be unhealthy with stale value
+        bool isHealthy = valuer.isValuationHealthy(address(mockAdapter));
+        assertFalse(isHealthy, "Stale value should be unhealthy");
     }
 
-    function testGetTotalValueStaleReportsWithFallback() public {
+    function testValuationUnhealthyWithStaleReportsAndFallback() public {
         // Create a simple mock adapter that returns STRATEGY_A as active
         SimpleMockAdapter mockAdapter = new SimpleMockAdapter();
 
@@ -696,12 +691,12 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Fast forward to make stale
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
-        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // When stale with fallback configured, should use fallback value
-        assertEq(totalValue, 800e18);
+        // Should still be unhealthy (fallback usage marks as stale data)
+        bool isHealthy = valuer.isValuationHealthy(address(mockAdapter));
+        assertFalse(isHealthy, "Fallback usage should mark as unhealthy");
     }
 
-    function testGetTotalValueLowConfidence() public {
+    function testValuationHealthyWithLowConfidence() public {
         // L-05 FIX: Lower default confidence threshold to allow strategy configuration
         vm.startPrank(owner);
         valuer.setDefaultConfidenceThreshold(40);
@@ -725,10 +720,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.prank(owner);
         valuer.updateValue(STRATEGY_A, 1000e18, 50, 1, block.timestamp + 1 hours, signatures);
 
-        uint256 totalValue = valuer.getTotalValue(address(mockAdapter));
-        // SECURITY FIX: Should still return value even with low confidence to prevent manipulation
-        // This prevents malicious users from exploiting price drops when confidence is low
-        assertEq(totalValue, 1000e18);
+        // Should be healthy - low confidence but still meets configured minConfidence
+        bool isHealthy = valuer.isValuationHealthy(address(mockAdapter));
+        assertTrue(isHealthy, "Value meeting minConfidence should be healthy");
     }
 
     /* VIEW FUNCTION TESTS */

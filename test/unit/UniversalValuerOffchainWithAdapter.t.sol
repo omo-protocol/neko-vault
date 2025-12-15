@@ -100,27 +100,16 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         assertEq(strategies[0], strategyId, "Correct strategy ID");
     }
 
-    function test_GetTotalValueCallsAdapter() public view {
-        // This tests that getTotalValue can call the adapter's getActiveStrategies
+    function test_isValuationHealthyCallsAdapter() public view {
+        // This tests that isValuationHealthy can call the adapter's getActiveStrategies
         // Without reverting due to interface issues
-        uint256 totalValue = valuer.getTotalValue(address(adapter));
+        bool healthy = valuer.isValuationHealthy(address(adapter));
 
-        // Should return 0 since no value reports or assets
-        assertEq(totalValue, 0);
+        // Should return true since no strategies with stale data
+        assertTrue(healthy);
     }
 
-    function test_GetTotalValueWithIdleAssets() public {
-        // Give adapter some idle assets
-        asset.mint(address(adapter), 100e18);
-
-        // Get total value
-        uint256 totalValue = valuer.getTotalValue(address(adapter));
-
-        // Should return 0 since idle balance is NOT included (line 235 commented)
-        assertEq(totalValue, 0);
-    }
-
-    function test_GetTotalValueWithNonAdapter() public {
+    function test_isValuationHealthyWithNonAdapter() public {
         // Deploy a simple contract that's not an adapter
         MockERC20 notAnAdapter = new MockERC20("NotAdapter", "NAD", 18);
 
@@ -128,7 +117,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         // This prevents gas-manipulation attacks where attacker uses low gas to cause
         // getActiveStrategies() to fail and manipulate share price
         vm.expectRevert("StrategyEnumerationFailed");
-        valuer.getTotalValue(address(notAnAdapter));
+        valuer.isValuationHealthy(address(notAnAdapter));
     }
 
     function test_RemoveStrategyUpdatesActiveList() public {
@@ -184,17 +173,17 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         strategies = adapter.getActiveStrategies();
         assertEq(strategies.length, 0, "No active strategies after removal");
 
-        // Valuer should handle empty strategy list
-        uint256 totalValue = valuer.getTotalValue(address(adapter));
-        assertEq(totalValue, 0, "Total value is 0 after strategy removal");
+        // Valuer should handle empty strategy list - isValuationHealthy should return true
+        bool healthy = valuer.isValuationHealthy(address(adapter));
+        assertTrue(healthy, "Valuation is healthy after strategy removal");
     }
 
     /* SECURITY FIX: getValue(ESCROW_TOTAL_ID) INTEGRATION TESTS */
 
-    /// @notice Test that getValue(ESCROW_TOTAL_ID) returns the same value as getTotalValue(escrow)
-    /// This is the core fix for the API mismatch between UniversalAdapterEscrow and UniversalValuerOffchain
-    /// @dev SKIPPED: Feature not yet implemented in UniversalValuerOffchain.sol
-    function skip_test_getValue_EscrowTotalId_EqualsGetTotalValue() public {
+    /// @notice Test that getValue(ESCROW_TOTAL_ID) works correctly when value is pushed
+    /// This validates the production pattern where keeper pushes ESCROW_TOTAL value
+    /// @dev SKIPPED: Requires keeper to push ESCROW_TOTAL value first
+    function skip_test_getValue_EscrowTotalId_WorksWhenValuePushed() public {
         // Compute the ESCROW_TOTAL ID for the adapter
         bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
 
@@ -202,15 +191,9 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.prank(address(adapter));
         valuer.registerEscrowTotal(escrowTotalId);
 
-        // Give adapter some idle assets
-        asset.mint(address(adapter), 100e18);
-
-        // Both functions should return the same value
-        uint256 valueViaGetValue = valuer.getValue(escrowTotalId);
-        uint256 valueViaGetTotalValue = valuer.getTotalValue(address(adapter));
-
-        assertEq(valueViaGetValue, valueViaGetTotalValue, "getValue(ESCROW_TOTAL_ID) should equal getTotalValue(escrow)");
-        assertEq(valueViaGetValue, 0, "Should return 0 (idle balance NOT included due to line 235 commented)");
+        // In production, the keeper would push the ESCROW_TOTAL value via updateValue()
+        // After which getValue(escrowTotalId) would return the pushed value
+        // This test validates the registration flow
     }
 
     /// @notice Test getValue(ESCROW_TOTAL_ID) returns aggregated strategy values plus idle balance

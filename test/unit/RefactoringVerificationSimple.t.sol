@@ -12,7 +12,7 @@ import {MockValuer} from "../mocks/MockValuer.sol";
  * @title RefactoringVerificationSimple
  * @notice Verifies the three refactoring improvements from REFACTOR_TODOs.md:
  * 1. EnumerableSet for activeStrategies (O(1) operations, no duplicates)
- * 2. realAssets uses getTotalValue instead of getValue
+ * 2. realAssets uses getValue(ESCROW_TOTAL_ID) to get pre-computed total
  * 3. _isTokenTransfer uses pre-computed constants instead of runtime keccak256
  */
 contract RefactoringVerificationSimple is Test {
@@ -91,13 +91,13 @@ contract RefactoringVerificationSimple is Test {
     }
 
     /**
-     * @notice Verification 2: realAssets uses getTotalValue
+     * @notice Verification 2: realAssets uses getValue(ESCROW_TOTAL_ID)
      * Proves:
-     * - getTotalValue is called instead of getValue
+     * - getValue(ESCROW_TOTAL_ID) is called to get pre-computed total value
      * - Value is correctly retrieved from valuer
      * SECURITY FIX: Updated to account for donation-resistant valuation
      */
-    function test_Verification_2_GetTotalValue() public {
+    function test_Verification_2_GetValueEscrowTotalId() public {
         // Allocate some amount first to have a baseline
         asset.mint(address(adapter), 100e6);
         vm.prank(address(vault));
@@ -111,7 +111,7 @@ contract RefactoringVerificationSimple is Test {
         uint256 testValue = 110e6; // Above threshold
         valuer.setValue(address(adapter), testValue);
 
-        // realAssets should call getTotalValue and return the adjusted value
+        // realAssets should call getValue(ESCROW_TOTAL_ID) and return the adjusted value
         uint256 reportedAssets = adapter.realAssets();
 
         // With new logic:
@@ -122,10 +122,10 @@ contract RefactoringVerificationSimple is Test {
         // valuerValueAdj = 110e6 - 0 = 110e6
         // threshold = 100e6 * 0.9 = 90e6
         // Since 110e6 >= 90e6, return 110e6
-        assertEq(reportedAssets, testValue, "getTotalValue correctly returns valuer value");
+        assertEq(reportedAssets, testValue, "getValue(ESCROW_TOTAL_ID) correctly returns valuer value");
 
-        // The fact that this works proves getTotalValue is being called
-        // (MockValuer has both getValue and getTotalValue returning the same value)
+        // MockValuer.setValue(address) sets both values[address] and strategyValues[ESCROW_TOTAL_ID]
+        // so the test works with the adapter's getValue(ESCROW_TOTAL_ID) pattern
     }
 
     /**
@@ -170,7 +170,7 @@ contract RefactoringVerificationSimple is Test {
 
         assertEq(adapter.getActiveStrategies().length, 1, "EnumerableSet prevents duplicates");
 
-        // 2. Test getTotalValue
+        // 2. Test getValue(ESCROW_TOTAL_ID) pattern
         // SECURITY FIX: With donation-resistant valuation, realAssets returns the higher of:
         // - Valuer's adjusted value (if >= 90% of minKnown)
         // - minKnownValue = totalAllocations (if valuer < 90%)
@@ -184,7 +184,7 @@ contract RefactoringVerificationSimple is Test {
         // valuerValueAdj = valuerValue - excessIdle = 160e6 - 0 = 160e6
         // threshold = 150e6 * 0.9 = 135e6
         // Since 160e6 >= 135e6, return valuerValueAdj = 160e6
-        assertEq(adapter.realAssets(), valuerValue, "realAssets uses getTotalValue");
+        assertEq(adapter.realAssets(), valuerValue, "realAssets uses getValue(ESCROW_TOTAL_ID)");
 
         // 3. Pre-computed selectors are verified at compile time
         assertTrue(true, "All refactorings verified");

@@ -215,7 +215,6 @@ contract BatchUpdateAtomicity is Test {
         // Verify attack failed - both strategies keep original values
         assertEq(valuer.getValue(strategyA), 100e6, "Strategy A unchanged");
         assertEq(valuer.getValue(strategyB), 100e6, "Strategy B unchanged");
-        assertEq(valuer.getTotalValue(address(escrow)), 200e6, "Total value correct");
     }
 
     /// @notice Test that valid batch updates still work correctly
@@ -316,8 +315,8 @@ contract BatchUpdateAtomicity is Test {
         assertEq(valuer.getValue(strategyB), 220e6);
     }
 
-    /// @notice Test that getTotalValue correctly sums all strategy values
-    function testGetTotalValueWithMultipleStrategies() public {
+    /// @notice Test that batch update updates all strategy values and remains healthy
+    function testBatchUpdateWithMultipleStrategies() public {
         bytes32[] memory strategyIds = new bytes32[](3);
         strategyIds[0] = strategyA;
         strategyIds[1] = strategyB;
@@ -341,12 +340,13 @@ contract BatchUpdateAtomicity is Test {
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, expiry, signatures);
 
-        // Add some idle assets
-        asset.mint(address(escrow), 50e6);
+        // Verify all strategies were updated
+        assertEq(valuer.getValue(strategyA), 100e6, "Strategy A value correct");
+        assertEq(valuer.getValue(strategyB), 200e6, "Strategy B value correct");
+        assertEq(valuer.getValue(strategyC), 150e6, "Strategy C value correct");
 
-        // Total should be sum of all strategies only (idle balance NOT included due to line 235 being commented)
-        uint256 expectedTotal = 100e6 + 200e6 + 150e6;
-        assertEq(valuer.getTotalValue(address(escrow)), expectedTotal);
+        // Verify valuation is healthy after batch update
+        assertTrue(valuer.isValuationHealthy(address(escrow)), "Valuation should be healthy");
     }
 
     /// @notice Fuzz test: Batch updates with random valid parameters should always be atomic

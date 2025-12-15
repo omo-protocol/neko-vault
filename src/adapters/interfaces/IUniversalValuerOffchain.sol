@@ -139,10 +139,6 @@ interface IUniversalValuerOffchain {
     /// @return The latest value
     function getValue(bytes32 strategyId) external view returns (uint256);
 
-    /// @notice Get total value across all strategies for an escrow
-    /// @param escrow The escrow address
-    /// @return totalValue The sum of all strategy values
-    function getTotalValue(address escrow) external view returns (uint256 totalValue);
 
     /// @notice Batch update multiple strategy values
     /// @param strategyIds Array of strategy identifiers
@@ -180,10 +176,6 @@ interface IUniversalValuerOffchain {
     /// @return escrow The escrow address that registered this ID (address(0) if not registered)
     function getRegisteredEscrow(bytes32 id) external view returns (address escrow);
 
-    /// @notice Get total value with staleness metadata for health-aware callers
-    /// @param escrow The escrow address
-    /// @return result Struct containing value and staleness indicators
-    function getTotalValueWithHealth(address escrow) external view returns (TotalValueResult memory result);
 
     /// @notice Check if escrow valuation is healthy (no stale data)
     /// @param escrow The escrow address

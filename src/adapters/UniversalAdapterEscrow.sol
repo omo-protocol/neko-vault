@@ -172,9 +172,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
-        // SECURITY FIX: Check valuation health to detect stale data
-        // Only apply haircut if health check explicitly returns false (unhealthy)
-        // If health check fails (e.g., valuer doesn't implement it), don't auto-haircut
         bool hasStaleData = false;
         (bool healthSuccess, bytes memory healthData) = valuer.staticcall(
             abi.encodeWithSignature("isValuationHealthy(address)", address(this))
@@ -192,8 +189,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             uint256 totalValue = abi.decode(data, (uint256));
 
             if (totalValue > 0) {
-                // SECURITY FIX: Apply haircut if valuation explicitly has stale data OR in emergency mode
-                // This prevents exploitation through stale valuations
                 if (hasStaleData || emergencyMode) {
                     return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
                 }
@@ -204,8 +199,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             return 0; // Legitimate 0 value when nothing allocated
         }
         if (emergencyMode && cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
-            // NOTE: Valuer unhealthy -> using cached fallback. This value is for internal accounting only.
-            // Integrators SHOULD gate user deposits/withdrawals when this branch is used (via a valuation health gate).
             uint256 haircuttedBaseline = ((allocatedInAdapterBounded +
                 totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
             return cachedValuation < haircuttedBaseline ? cachedValuation : haircuttedBaseline;
@@ -300,9 +293,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
             if (balanceAfter > balanceBefore) {
                 uint256 withdrawnAmount = balanceAfter - balanceBefore;
-                // Use full withdrawnAmount for accounting - slippage check above already validated minimum
-                // This prevents ghost deposits when actual withdrawal exceeds minBalanceIncrease
-
                 uint256 oldExtDeposits = externalDeposits[strategyId];
                 uint256 reduction = withdrawnAmount;
 

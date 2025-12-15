@@ -41,9 +41,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     mapping(address => bool) public pendingSignerRemoval;
     mapping(bytes32 => uint256) public maxPriceChangeBps;
     mapping(bytes32 => uint256) public maxInitialValue;
-    uint256 public constant ABSOLUTE_MAX_STALENESS = 48 hours;
-    uint256 public emergencyMinConfidence = 50; // SECURITY FIX: Minimum confidence for Path 4 emergency fallback
     mapping(bytes32 => address) public registeredEscrowTotals;
+
+    uint256 public emergencyMinConfidence = 50;
 
     /* MODIFIERS */
 
@@ -175,13 +175,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         return report.value;
     }
 
-    /// @inheritdoc IUniversalValuerOffchain
-    function getTotalValue(address escrow) external view override returns (uint256 totalValue) {
-        return _computeTotalValue(escrow);
-    }
-
     /// @dev Internal helper to compute total value for an escrow with staleness tracking
-    /// @dev SECURITY FIX: Removed Path 2 (24h-48h extended acceptance) to prevent stale-price exploitation
+    /// @dev Used by isValuationHealthy() to determine if any strategy has stale data
     /// @param escrow The escrow address to compute total value for
     /// @return result Struct containing value and staleness indicators
     function _computeTotalValueWithStaleness(address escrow) internal view returns (IUniversalValuerOffchain.TotalValueResult memory result) {
@@ -196,42 +191,25 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
-            // PATH 1: Fresh value with high confidence (HEALTHY)
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
                 result.value += report.value;
                 result.freshCount++;
             }
-            // PATH 2: REMOVED - No longer accept values between maxStaleness and ABSOLUTE_MAX_STALENESS
-            // This was the vulnerability enabling stale-price exploitation (24h-48h window)
-
-            // PATH 3: Fallback value if configured
             else if (fallbackValues[strategyId] > 0) {
                 result.value += fallbackValues[strategyId];
                 result.hasStaleData = true;
                 result.fallbackCount++;
             }
-            // PATH 4: Emergency fallback - FIXED to require maxStaleness (not ABSOLUTE_MAX_STALENESS)
             else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence) {
                 result.value += report.value;
                 result.hasStaleData = true;
                 result.staleCount++;
             }
-            // PATH 5: Stale with no fallback - strategy contributes 0, emit event for monitoring
             else {
                 result.hasStaleData = true;
                 result.staleCount++;
-                // Note: Event emission in view function is not possible, handled by getTotalValueWithHealth()
             }
         }
-    }
-
-    /// @dev Internal helper to compute total value for an escrow
-    /// @dev Used by both getValue(ESCROW_TOTAL_ID) and getTotalValue(escrow)
-    /// @param escrow The escrow address to compute total value for
-    /// @return totalValue The sum of all strategy values plus idle balance
-    function _computeTotalValue(address escrow) internal view returns (uint256 totalValue) {
-        IUniversalValuerOffchain.TotalValueResult memory result = _computeTotalValueWithStaleness(escrow);
-        return result.value;
     }
 
     /// @inheritdoc IUniversalValuerOffchain
@@ -488,12 +466,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        // Check staleness
         if (block.timestamp > report.timestamp + config.maxStaleness) {
             return true;
         }
-
-        // Check confidence
+        
         if (report.confidence < config.minConfidence) {
             return true;
         }
@@ -509,11 +485,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Check if signer is authorized
     function isAuthorizedSigner(address signer) external view returns (bool) {
         return signers[signer].authorized;
-    }
-
-    /// @inheritdoc IUniversalValuerOffchain
-    function getTotalValueWithHealth(address escrow) external view override returns (IUniversalValuerOffchain.TotalValueResult memory result) {
-        return _computeTotalValueWithStaleness(escrow);
     }
 
     /// @inheritdoc IUniversalValuerOffchain

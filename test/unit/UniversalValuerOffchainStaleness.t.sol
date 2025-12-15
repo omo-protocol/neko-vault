@@ -125,39 +125,33 @@ contract UniversalValuerOffchainStaleness is Test {
         assertEq(value, 500e18, "Fallback value should be used when stale");
     }
 
-    /* TOTAL VALUE COMPUTATION TESTS */
+    /* VALUATION HEALTH TESTS */
 
-    /// @notice Test _computeTotalValue with fresh values
-    function testComputeTotalValueWithFreshValues() public {
+    /// @notice Test valuation health with fresh values
+    function testValuationHealthWithFreshValues() public {
         // Submit values for strategies
         _submitValue(STRATEGY_A, 1000e18, 95, 1);
 
-        // Get total value - should include fresh value
-        IUniversalValuerOffchain.TotalValueResult memory result = valuer.getTotalValueWithHealth(address(adapter));
-
         // Should be healthy with fresh values
-        assertFalse(result.hasStaleData, "Fresh values should not have stale data flag");
-        assertTrue(result.freshCount > 0 || result.value > 0, "Should have fresh values or positive balance");
+        bool isHealthy = valuer.isValuationHealthy(address(adapter));
+        assertTrue(isHealthy, "Fresh values should be healthy");
     }
 
-    /// @notice Test _computeTotalValue with stale values (no fallback) - strategy contributes 0
-    function testComputeTotalValueWithStaleNoFallback() public {
+    /// @notice Test valuation health with stale values (no fallback) - should be unhealthy
+    function testValuationHealthWithStaleNoFallback() public {
         // Submit value
         _submitValue(STRATEGY_A, 1000e18, 95, 1);
 
         // Warp past maxStaleness (but not past ABSOLUTE_MAX_STALENESS)
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
-        // Get total value with health
-        IUniversalValuerOffchain.TotalValueResult memory result = valuer.getTotalValueWithHealth(address(adapter));
-
-        // Should have stale data flag
-        assertTrue(result.hasStaleData, "Should have stale data flag");
-        assertTrue(result.staleCount > 0 || result.fallbackCount > 0, "Should have stale or fallback count");
+        // Should be unhealthy
+        bool isHealthy = valuer.isValuationHealthy(address(adapter));
+        assertFalse(isHealthy, "Stale values should be unhealthy");
     }
 
-    /// @notice Test _computeTotalValue uses fallback when stale
-    function testComputeTotalValueUsesFallbackWhenStale() public {
+    /// @notice Test valuation health uses fallback when stale (still unhealthy due to fallback usage)
+    function testValuationHealthWithFallbackWhenStale() public {
         // Submit value
         _submitValue(STRATEGY_A, 1000e18, 95, 1);
 
@@ -168,12 +162,9 @@ contract UniversalValuerOffchainStaleness is Test {
         // Warp past maxStaleness
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
-        // Get total value with health
-        IUniversalValuerOffchain.TotalValueResult memory result = valuer.getTotalValueWithHealth(address(adapter));
-
-        // Should have stale data flag and use fallback
-        assertTrue(result.hasStaleData, "Should have stale data flag");
-        assertTrue(result.fallbackCount > 0, "Should have fallback count");
+        // Should be unhealthy (fallback usage marks as stale data)
+        bool isHealthy = valuer.isValuationHealthy(address(adapter));
+        assertFalse(isHealthy, "Fallback usage should be marked as unhealthy");
     }
 
     /* HEALTH CHECK TESTS */
@@ -216,16 +207,15 @@ contract UniversalValuerOffchainStaleness is Test {
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
         // The value should not be included in total (no fallback set)
-        IUniversalValuerOffchain.TotalValueResult memory result = valuer.getTotalValueWithHealth(address(adapter));
-
-        // Should have stale data
-        assertTrue(result.hasStaleData, "Should mark as stale data");
+        // Should be marked as unhealthy
+        bool isHealthy = valuer.isValuationHealthy(address(adapter));
+        assertFalse(isHealthy, "Should be unhealthy after maxStaleness");
     }
 
     /* CONSISTENCY TESTS */
 
-    /// @notice Test consistency between getValue() and _computeTotalValue()
-    function testConsistencyBetweenGetValueAndComputeTotalValue() public {
+    /// @notice Test consistency between getValue() and isValuationHealthy()
+    function testConsistencyBetweenGetValueAndIsValuationHealthy() public {
         // Submit value
         _submitValue(STRATEGY_A, 1000e18, 95, 1);
 
@@ -236,10 +226,9 @@ contract UniversalValuerOffchainStaleness is Test {
         vm.expectRevert(IUniversalValuerOffchain.ValueTooStale.selector);
         valuer.getValue(STRATEGY_A);
 
-        // _computeTotalValue should NOT include this stale value (unless fallback)
-        IUniversalValuerOffchain.TotalValueResult memory result = valuer.getTotalValueWithHealth(address(adapter));
-        assertTrue(result.hasStaleData, "Should recognize stale data");
-        // Strategy contributes 0, so only idle balance should be included
+        // isValuationHealthy should also recognize stale data
+        bool isHealthy = valuer.isValuationHealthy(address(adapter));
+        assertFalse(isHealthy, "Should recognize stale data");
     }
 
     /* ADAPTER INTEGRATION TESTS */
