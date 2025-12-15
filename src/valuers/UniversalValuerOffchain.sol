@@ -231,8 +231,6 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
                 // Note: Event emission in view function is not possible, handled by getTotalValueWithHealth()
             }
         }
-
-        result.value += IERC20(asset).balanceOf(escrow);
     }
 
     /// @dev Internal helper to compute total value for an escrow
