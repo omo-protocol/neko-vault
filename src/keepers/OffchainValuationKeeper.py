@@ -29,7 +29,8 @@ from utils.contract_utils import (
     ERC20_ABI, PT_TOKEN_ABI, WRAPPER_ABI, VALUER_ABI, ADAPTER_ABI,
     PENDLE_ORACLE_ABI, PENDLE_MARKET_ABI, FELIX_ABI, CHAINLINK_FEED_ABI,
     UNISWAP_V3_POSITION_MANAGER_ABI, UNISWAP_V3_POOL_ABI,
-    UNISWAP_V2_PAIR_ABI, OTOKEN_ABI, MORPHO_CHAINLINK_ORACLE_ABI
+    UNISWAP_V2_PAIR_ABI, OTOKEN_ABI, MORPHO_CHAINLINK_ORACLE_ABI,
+    AAVE_V3_POOL_ABI
 )
 
 from utils.math_utils import (
@@ -302,11 +303,32 @@ class OffchainValuationKeeper:
     def value_pt_khype_loop_mode(self, s: StrategyConfig) -> int:
         """
         Mode: 'pt_khype_loop'
+        PT-kHYPE looping strategy using Felix lending.
+
+        Valuation Logic:
+        1. Read idle kHYPE from escrow (deposited but not yet looped, or unwound)
+        2. Read PT-kHYPE balance from escrow
+        3. Get PT price
+        4. Calculate PT value in underlying
+        5. Read debt from Felix
+        6. Total value = idle kHYPE + PT value - debt
+
         REFACTORED: Uses utils.pricing_utils and utils.lending_utils ✅
         """
         extras = s.extras or {}
 
-        # 1. Get PT balance
+        # 1. Get idle kHYPE from escrow (deposited but not yet converted to PT, or unwound)
+        escrow_khype_balance = 0
+        if s.escrow and s.underlying:
+            escrow_khype_balance = conversion_utils.read_underlying_balance(
+                w3=self.w3,
+                erc20_abi=ERC20_ABI,
+                token=s.underlying,  # kHYPE (underlying asset)
+                holder=s.escrow
+            )
+            logger.debug(f"[{s.id_text}] Escrow idle kHYPE: {escrow_khype_balance/1e18:.6f}")
+
+        # 2. Get PT balance from escrow
         pt_address = extras.get('pt_khype_address')
         if not pt_address:
             logger.error(f"[{s.id_text}] Missing pt_khype_address")
@@ -319,7 +341,7 @@ class OffchainValuationKeeper:
             holder=s.escrow
         )
 
-        # 2. Get PT price (choose pricing method based on config)
+        # 3. Get PT price (choose pricing method based on config)
         pricing_method = extras.get('pricing_method', 'oracle')
 
         if pricing_method == 'linear_discount':
@@ -344,10 +366,10 @@ class OffchainValuationKeeper:
                 oracle=extras.get('pt_oracle')
             )
 
-        # 3. Calculate PT value in underlying
+        # 4. Calculate PT value in underlying
         pt_value_in_underlying = (pt_balance * pt_price) // 10**18
 
-        # 4. Get lending debt
+        # 5. Get lending debt
         lending_config = extras.get('lending', {})
         debt = lending_utils.get_lending_debt(
             w3=self.w3,
@@ -359,23 +381,187 @@ class OffchainValuationKeeper:
             user=s.escrow
         )
 
-        # 5. Calculate net value
-        net_value_underlying = max(0, pt_value_in_underlying - debt)
+        # 6. Calculate total value = idle kHYPE + PT value - debt
+        total_value_underlying = max(0, escrow_khype_balance + pt_value_in_underlying - debt)
 
-        # 6. Convert to wrapper shares
+        # 7. Convert to wrapper shares
         wrapper_shares = conversion_utils.convert_underlying_to_wrapper_shares(
             w3=self.w3,
             wrapper_abi=WRAPPER_ABI,
             wrapper_address=self.wrapper_address,
-            underlying_amount=net_value_underlying
+            underlying_amount=total_value_underlying
         )
 
         logger.info(
             f"[{s.id_text}] pt_khype_loop: "
+            f"escrow_khype={escrow_khype_balance/1e18:.6f}, "
             f"pt_balance={pt_balance/1e18:.6f}, "
             f"pt_price={pt_price/1e18:.6f}, "
+            f"pt_value={pt_value_in_underlying/1e18:.6f}, "
             f"debt={debt/1e18:.6f}, "
-            f"net_value={net_value_underlying/1e18:.6f}, "
+            f"total_value={total_value_underlying/1e18:.6f}, "
+            f"wrapper_shares={wrapper_shares/1e18:.6f}"
+        )
+
+        return int(wrapper_shares)
+
+    def value_pt_khype_looper_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'pt_khype_looper'
+        PT-kHYPE looping strategy using HyperLend (AAVE V3 fork).
+
+        Architecture:
+        - Vault deposits kHYPE to Escrow
+        - Keeper transfers kHYPE to Looper
+        - Looper converts kHYPE → PT-kHYPE → supplies to HyperLend → borrows wHYPE → loops
+        - When unwinding, only kHYPE returns to Escrow
+
+        Valuation Logic:
+        1. Read kHYPE balance from escrow (idle/unwound funds)
+        2. Read kHYPE balance from looper (idle, waiting to loop)
+        3. Read PT-kHYPE collateral from looper (aToken in HyperLend)
+        4. Get PT-kHYPE price
+        5. Calculate looper PT value in underlying (kHYPE)
+        6. Read wHYPE debt from looper
+        7. Looper net value = looper kHYPE + PT value - debt
+        8. Total value = escrow kHYPE + looper net value
+        9. Monitor health factor
+
+        REFACTORED: Uses utils.pricing_utils and utils.lending_utils
+        """
+        extras = s.extras or {}
+
+        # Required addresses
+        pt_address = extras.get('pt_khype_address')
+        hyperlend_pool = extras.get('hyperlend_pool', '0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b')
+        looper_address = extras.get('looper_address')
+
+        if not pt_address:
+            logger.error(f"[{s.id_text}] Missing pt_khype_address")
+            return 0
+
+        if not looper_address:
+            logger.error(f"[{s.id_text}] Missing looper_address")
+            return 0
+
+        # 1. Get kHYPE balance from escrow (idle/unwound funds)
+        escrow_khype_balance = 0
+        if s.escrow:
+            escrow_khype_balance = conversion_utils.read_underlying_balance(
+                w3=self.w3,
+                erc20_abi=ERC20_ABI,
+                token=s.underlying,  # kHYPE
+                holder=s.escrow
+            )
+            logger.debug(f"[{s.id_text}] Escrow kHYPE balance: {escrow_khype_balance/1e18:.6f}")
+
+        # 2. Get idle kHYPE from looper (waiting to be looped)
+        looper_khype_balance = conversion_utils.read_underlying_balance(
+            w3=self.w3,
+            erc20_abi=ERC20_ABI,
+            token=s.underlying,  # kHYPE
+            holder=looper_address
+        )
+        logger.debug(f"[{s.id_text}] Looper idle kHYPE: {looper_khype_balance/1e18:.6f}")
+
+        # 3. Get PT-kHYPE collateral from looper (aToken in HyperLend)
+        atoken_address = extras.get('pt_atoken_address')
+
+        looper_pt_balance = 0
+        try:
+            looper_pt_balance = lending_utils.get_hyperlend_collateral_balance(
+                w3=self.w3,
+                erc20_abi=ERC20_ABI,
+                aave_pool_abi=AAVE_V3_POOL_ABI,
+                pool_address=hyperlend_pool,
+                collateral_asset=pt_address,
+                user=looper_address,
+                atoken_address=atoken_address
+            )
+            logger.debug(f"[{s.id_text}] Looper aPT-kHYPE balance: {looper_pt_balance/1e18:.6f}")
+        except Exception as e:
+            logger.warning(f"[{s.id_text}] Failed to get looper aToken balance: {e}")
+
+        # 3. Get PT price (choose pricing method based on config)
+        pricing_method = extras.get('pricing_method', 'oracle')
+
+        if pricing_method == 'linear_discount':
+            pt_price = pricing_utils.get_pt_price_linear_discount(
+                w3=self.w3,
+                pt_abi=PT_TOKEN_ABI,
+                pendle_market_abi=PENDLE_MARKET_ABI,
+                pendle_oracle_abi=PENDLE_ORACLE_ABI,
+                morpho_oracle_abi=MORPHO_CHAINLINK_ORACLE_ABI,
+                pendle_linear_oracle_abi=None,
+                extras=extras,
+                fetch_rate_from_felix_oracle_func=lending_utils.fetch_rate_from_felix_oracle,
+                get_felix_oracle_price_func=lending_utils.get_felix_oracle_price,
+                get_pt_price_func=lambda m, o: pricing_utils.get_pt_price(self.w3, PENDLE_ORACLE_ABI, m, o)
+            )
+        else:
+            # Default: Use Pendle oracle
+            pt_price = pricing_utils.get_pt_price(
+                w3=self.w3,
+                pendle_oracle_abi=PENDLE_ORACLE_ABI,
+                market=extras.get('pendle_market'),
+                oracle=extras.get('pt_oracle')
+            )
+
+        # 4. Calculate looper PT value in underlying (kHYPE)
+        looper_pt_value = (looper_pt_balance * pt_price) // 10**18
+
+        # 5. Get wHYPE debt from looper (auto-discovers debt token via getReserveData)
+        borrow_asset = extras.get('borrow_asset')
+        debt_token = extras.get('debt_token')  # Optional override
+
+        looper_debt = lending_utils.get_hyperlend_debt(
+            w3=self.w3,
+            erc20_abi=ERC20_ABI,
+            aave_pool_abi=AAVE_V3_POOL_ABI,
+            pool_address=hyperlend_pool,
+            borrow_asset=borrow_asset,
+            user=looper_address,
+            debt_token=debt_token
+        )
+
+        # 6. Calculate looper net value (idle kHYPE + PT value - debt)
+        looper_net_value = max(0, looper_khype_balance + looper_pt_value - looper_debt)
+
+        # 7. Total value = escrow kHYPE + looper net value
+        total_value_underlying = escrow_khype_balance + looper_net_value
+
+        # 8. Health factor monitoring (for looper position)
+        health_threshold_warning = extras.get('health_factor_warning', 1.5)
+        health_threshold_critical = extras.get('health_factor_critical', 1.2)
+
+        health_factor, health_status = lending_utils.check_hyperlend_health_factor(
+            w3=self.w3,
+            aave_pool_abi=AAVE_V3_POOL_ABI,
+            pool_address=hyperlend_pool,
+            user=looper_address,
+            warning_threshold=health_threshold_warning,
+            critical_threshold=health_threshold_critical
+        )
+
+        # 9. Convert to wrapper shares
+        wrapper_shares = conversion_utils.convert_underlying_to_wrapper_shares(
+            w3=self.w3,
+            wrapper_abi=WRAPPER_ABI,
+            wrapper_address=self.wrapper_address,
+            underlying_amount=total_value_underlying
+        )
+
+        logger.info(
+            f"[{s.id_text}] pt_khype_looper: "
+            f"escrow_khype={escrow_khype_balance/1e18:.6f}, "
+            f"looper_khype={looper_khype_balance/1e18:.6f}, "
+            f"looper_pt={looper_pt_balance/1e18:.6f}, "
+            f"pt_price={pt_price/1e18:.6f}, "
+            f"looper_pt_value={looper_pt_value/1e18:.6f}, "
+            f"looper_debt={looper_debt/1e18:.6f}, "
+            f"looper_net={looper_net_value/1e18:.6f}, "
+            f"total_value={total_value_underlying/1e18:.6f}, "
+            f"health_factor={health_factor/1e18:.4f} ({health_status}), "
             f"wrapper_shares={wrapper_shares/1e18:.6f}"
         )
 
@@ -469,6 +655,8 @@ class OffchainValuationKeeper:
             return self.value_underlying_balance_mode(s)
         elif mode == 'pt_khype_loop':
             return self.value_pt_khype_loop_mode(s)
+        elif mode == 'pt_khype_looper':
+            return self.value_pt_khype_looper_mode(s)
         elif mode == 'holdings':
             return self.value_holdings_mode(s)
         elif mode == 'uniswap_v3':

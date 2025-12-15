@@ -1,8 +1,8 @@
 """
-Lending protocol utility functions (Felix, Morpho, Aave, Compound)
+Lending protocol utility functions (Felix, Morpho, Aave, Compound, HyperLend)
 """
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 from web3 import Web3
 from eth_abi import encode as abi_encode
 
@@ -297,6 +297,318 @@ def get_compound_v3_debt(w3: Web3, comet_address: str, user: str) -> int:
         raise RuntimeError(f"Compound V3 debt query failed - cannot value strategy safely: {e}") from e
 
 
+# =============================================================================
+# HyperLend (AAVE V3 Fork) Functions
+# =============================================================================
+
+def get_hyperlend_reserve_tokens(
+    w3: Web3,
+    aave_pool_abi: list,
+    pool_address: str,
+    asset_address: str
+) -> Tuple[str, str]:
+    """
+    Auto-discover aToken and variableDebtToken addresses for an asset.
+
+    Calls getReserveData(asset) on the HyperLend Pool to get token addresses.
+
+    Args:
+        w3: Web3 instance
+        aave_pool_abi: AAVE V3 Pool ABI with getReserveData
+        pool_address: HyperLend Pool contract address
+        asset_address: The underlying asset address to query
+
+    Returns:
+        Tuple of (aTokenAddress, variableDebtTokenAddress)
+    """
+    if not pool_address or pool_address == "0x0000000000000000000000000000000000000000":
+        logger.warning("No HyperLend pool address configured")
+        return ("", "")
+
+    if not asset_address or asset_address == "0x0000000000000000000000000000000000000000":
+        logger.warning("No asset address provided for reserve token discovery")
+        return ("", "")
+
+    try:
+        pool_cs = Web3.to_checksum_address(pool_address)
+        asset_cs = Web3.to_checksum_address(asset_address)
+
+        pool = w3.eth.contract(address=pool_cs, abi=aave_pool_abi)
+
+        # getReserveData returns a tuple with token addresses at indices 8, 9, 10
+        reserve_data = pool.functions.getReserveData(asset_cs).call()
+
+        # Index 8: aTokenAddress
+        # Index 9: stableDebtTokenAddress
+        # Index 10: variableDebtTokenAddress
+        atoken_address = reserve_data[8]
+        variable_debt_token = reserve_data[10]
+
+        logger.debug(
+            f"HyperLend reserve tokens for {asset_address}: "
+            f"aToken={atoken_address}, variableDebtToken={variable_debt_token}"
+        )
+
+        return (atoken_address, variable_debt_token)
+
+    except Exception as e:
+        logger.error(f"Failed to get HyperLend reserve tokens for {asset_address}: {e}")
+        return ("", "")
+
+
+def get_hyperlend_account_data(
+    w3: Web3,
+    aave_pool_abi: list,
+    pool_address: str,
+    user: str
+) -> Dict[str, Any]:
+    """
+    Get user account data from HyperLend (AAVE V3 fork) including health factor.
+
+    Args:
+        w3: Web3 instance
+        aave_pool_abi: AAVE V3 Pool ABI with getUserAccountData
+        pool_address: HyperLend Pool contract address
+        user: User/escrow address
+
+    Returns:
+        Dict with keys:
+            - total_collateral_base: Total collateral in base currency (USD, 8 decimals)
+            - total_debt_base: Total debt in base currency (USD, 8 decimals)
+            - available_borrows_base: Available to borrow in base currency
+            - liquidation_threshold: Current liquidation threshold (basis points)
+            - ltv: Loan-to-value (basis points)
+            - health_factor: Health factor scaled by 1e18 (1.0 = 1e18)
+    """
+    if not pool_address or pool_address == "0x0000000000000000000000000000000000000000":
+        logger.warning("No HyperLend pool address configured")
+        return {
+            'total_collateral_base': 0,
+            'total_debt_base': 0,
+            'available_borrows_base': 0,
+            'liquidation_threshold': 0,
+            'ltv': 0,
+            'health_factor': 0
+        }
+
+    try:
+        pool_cs = Web3.to_checksum_address(pool_address)
+        user_cs = Web3.to_checksum_address(user)
+
+        pool = w3.eth.contract(address=pool_cs, abi=aave_pool_abi)
+
+        # getUserAccountData returns:
+        # (totalCollateralBase, totalDebtBase, availableBorrowsBase,
+        #  currentLiquidationThreshold, ltv, healthFactor)
+        account_data = pool.functions.getUserAccountData(user_cs).call()
+
+        result = {
+            'total_collateral_base': int(account_data[0]),
+            'total_debt_base': int(account_data[1]),
+            'available_borrows_base': int(account_data[2]),
+            'liquidation_threshold': int(account_data[3]),
+            'ltv': int(account_data[4]),
+            'health_factor': int(account_data[5])
+        }
+
+        logger.debug(
+            f"HyperLend account data: "
+            f"collateral={result['total_collateral_base']/1e8:.2f} USD, "
+            f"debt={result['total_debt_base']/1e8:.2f} USD, "
+            f"health_factor={result['health_factor']/1e18:.4f}"
+        )
+
+        return result
+
+    except Exception as e:
+        logger.critical(
+            f"CRITICAL: HyperLend getUserAccountData FAILED for {user}! "
+            f"Cannot safely monitor position health. Error: {e}"
+        )
+        raise RuntimeError(f"HyperLend account data query failed: {e}") from e
+
+
+def get_hyperlend_debt(
+    w3: Web3,
+    erc20_abi: list,
+    aave_pool_abi: list,
+    pool_address: str,
+    borrow_asset: str,
+    user: str,
+    debt_token: str = None
+) -> int:
+    """
+    Get user's debt from HyperLend (AAVE V3 fork).
+
+    Can either:
+    1. Use provided debt_token address directly
+    2. Auto-discover debt token via getReserveData(borrow_asset)
+
+    Args:
+        w3: Web3 instance
+        erc20_abi: ERC20 ABI for debt token balance
+        aave_pool_abi: AAVE V3 Pool ABI
+        pool_address: HyperLend Pool contract address
+        borrow_asset: The borrowed asset address (e.g., wHYPE)
+        user: Borrower address
+        debt_token: Optional - variable debt token address (auto-discovered if None)
+
+    Returns:
+        Debt amount in underlying token units
+    """
+    if not pool_address or pool_address == "0x0000000000000000000000000000000000000000":
+        logger.debug("No HyperLend pool address configured, assuming 0 debt")
+        return 0
+
+    try:
+        user_cs = Web3.to_checksum_address(user)
+
+        # Auto-discover debt token if not provided
+        if not debt_token or debt_token == "0x0000000000000000000000000000000000000000":
+            if not borrow_asset:
+                logger.warning("No borrow_asset or debt_token configured, assuming 0 debt")
+                return 0
+
+            _, debt_token = get_hyperlend_reserve_tokens(
+                w3, aave_pool_abi, pool_address, borrow_asset
+            )
+
+            if not debt_token:
+                logger.warning(f"Could not auto-discover debt token for {borrow_asset}")
+                return 0
+
+        debt_token_cs = Web3.to_checksum_address(debt_token)
+
+        # Read debt token balance
+        debt_contract = w3.eth.contract(address=debt_token_cs, abi=erc20_abi)
+        debt_balance = int(debt_contract.functions.balanceOf(user_cs).call())
+
+        logger.debug(f"HyperLend debt: {debt_balance / 1e18:.6f}")
+        return debt_balance
+
+    except Exception as e:
+        logger.critical(
+            f"CRITICAL: HyperLend debt query FAILED for {user}! "
+            f"Cannot safely value strategy without debt data. Error: {e}"
+        )
+        raise RuntimeError(f"HyperLend debt query failed - cannot value strategy safely: {e}") from e
+
+
+def get_hyperlend_collateral_balance(
+    w3: Web3,
+    erc20_abi: list,
+    aave_pool_abi: list,
+    pool_address: str,
+    collateral_asset: str,
+    user: str,
+    atoken_address: str = None
+) -> int:
+    """
+    Get user's aToken (collateral) balance from HyperLend.
+
+    Can either:
+    1. Use provided atoken_address directly
+    2. Auto-discover aToken via getReserveData(collateral_asset)
+
+    Args:
+        w3: Web3 instance
+        erc20_abi: ERC20 ABI (aTokens are ERC20 compatible)
+        aave_pool_abi: AAVE V3 Pool ABI
+        pool_address: HyperLend Pool address
+        collateral_asset: The collateral asset address (e.g., PT-kHYPE)
+        user: User/escrow address
+        atoken_address: Optional - aToken address (auto-discovered if None)
+
+    Returns:
+        aToken balance (represents collateral including accrued interest)
+    """
+    if not pool_address or pool_address == "0x0000000000000000000000000000000000000000":
+        logger.warning("No HyperLend pool address configured")
+        return 0
+
+    try:
+        user_cs = Web3.to_checksum_address(user)
+
+        # Auto-discover aToken if not provided
+        if not atoken_address or atoken_address == "0x0000000000000000000000000000000000000000":
+            if not collateral_asset:
+                logger.warning("No collateral_asset or atoken_address configured")
+                return 0
+
+            atoken_address, _ = get_hyperlend_reserve_tokens(
+                w3, aave_pool_abi, pool_address, collateral_asset
+            )
+
+            if not atoken_address:
+                logger.warning(f"Could not auto-discover aToken for {collateral_asset}")
+                return 0
+
+        atoken_cs = Web3.to_checksum_address(atoken_address)
+
+        atoken = w3.eth.contract(address=atoken_cs, abi=erc20_abi)
+        balance = int(atoken.functions.balanceOf(user_cs).call())
+
+        logger.debug(f"HyperLend aToken balance: {balance / 1e18:.6f}")
+        return balance
+
+    except Exception as e:
+        logger.error(f"Failed to get HyperLend aToken balance: {e}")
+        raise RuntimeError(f"HyperLend aToken balance query failed: {e}") from e
+
+
+def check_hyperlend_health_factor(
+    w3: Web3,
+    aave_pool_abi: list,
+    pool_address: str,
+    user: str,
+    warning_threshold: float = 1.5,
+    critical_threshold: float = 1.2
+) -> Tuple[int, str]:
+    """
+    Check health factor and return warning level.
+
+    Args:
+        w3: Web3 instance
+        aave_pool_abi: AAVE V3 Pool ABI
+        pool_address: HyperLend Pool address
+        user: User address
+        warning_threshold: Health factor below which to warn (default 1.5)
+        critical_threshold: Health factor below which is critical (default 1.2)
+
+    Returns:
+        Tuple of (health_factor, status) where status is 'healthy', 'warning', or 'critical'
+    """
+    account_data = get_hyperlend_account_data(w3, aave_pool_abi, pool_address, user)
+    health_factor = account_data['health_factor']
+
+    # No debt = essentially infinite health factor
+    if account_data['total_debt_base'] == 0:
+        return (0, 'healthy')
+
+    # Convert thresholds to 1e18 scale
+    warning_scaled = int(warning_threshold * 1e18)
+    critical_scaled = int(critical_threshold * 1e18)
+
+    if health_factor < critical_scaled:
+        status = 'critical'
+        logger.critical(
+            f"CRITICAL: HyperLend health factor {health_factor/1e18:.4f} "
+            f"below critical threshold {critical_threshold}! "
+            f"Position at risk of liquidation."
+        )
+    elif health_factor < warning_scaled:
+        status = 'warning'
+        logger.warning(
+            f"WARNING: HyperLend health factor {health_factor/1e18:.4f} "
+            f"below warning threshold {warning_threshold}."
+        )
+    else:
+        status = 'healthy'
+        logger.debug(f"HyperLend health factor healthy: {health_factor/1e18:.4f}")
+
+    return (health_factor, status)
+
+
 def get_lending_debt(
     w3: Web3,
     erc20_abi: list,
@@ -342,6 +654,14 @@ def get_lending_debt(
         comet_address = lending_config.get('comet_address')
         return get_compound_v3_debt(w3, comet_address, user)
 
+    elif protocol == 'hyperlend':
+        # Import AAVE_V3_POOL_ABI from contract_utils
+        from utils.contract_utils import AAVE_V3_POOL_ABI
+        pool_address = lending_config.get('pool_address', '0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b')
+        borrow_asset = lending_config.get('borrow_asset')
+        debt_token = lending_config.get('debt_token')
+        return get_hyperlend_debt(w3, erc20_abi, AAVE_V3_POOL_ABI, pool_address, borrow_asset, user, debt_token)
+
     elif protocol == 'none' or not protocol:
         logger.debug(f"No lending protocol configured, returning 0 debt")
         return 0
@@ -350,5 +670,5 @@ def get_lending_debt(
         raise ValueError(
             f"CRITICAL: Unsupported lending protocol '{protocol}'. "
             f"Cannot safely calculate debt - strategy may be overvalued if we continue. "
-            f"Supported protocols: felix, morpho, aave_v3, compound_v3, none"
+            f"Supported protocols: felix, morpho, aave_v3, compound_v3, hyperlend, none"
         )

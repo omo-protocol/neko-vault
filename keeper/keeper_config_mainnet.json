@@ -20,6 +20,24 @@
         "pt_oracle": "0x9a9Fa8338dd5E5B2188006f1Cd2Ef26d921650C2",
         "pendle_router": "0x888888888889758F76e7103c6CbF23ABbF58F946"
       }
+    },
+    {
+      "id": "PT_KHYPE_LOOPER",
+      "mode": "pt_khype_looper",
+      "escrow": "0x7F73B9AA1f5a6cE9bBfc8F0c12889b3Cb75174e8",
+      "underlying": "0xfD739d4e423301CE9385c1fb8850539D657C296D",
+      "confidence": 95,
+      "extras": {
+        "pt_khype_address": "0xea84ca9849D9e76a78B91F221F84e9Ca065FC9f5",
+        "looper_address": "0xb9f7605e96f8d2f56b32b2ef28763c32bc1600c6",
+        "hyperlend_pool": "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b",
+        "borrow_asset": "0x5555555555555555555555555555555555555555",
+        "pendle_market": "0x31104779b2a07a273d6c662419377773083d0b2e",
+        "pt_oracle": "0x9a9Fa8338dd5E5B2188006f1Cd2Ef26d921650C2",
+        "pricing_method": "oracle",
+        "health_factor_warning": 1.5,
+        "health_factor_critical": 1.2
+      }
     }
   ],
 
