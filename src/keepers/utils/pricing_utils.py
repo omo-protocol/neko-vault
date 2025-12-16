@@ -363,3 +363,115 @@ def fetch_rysk_market_data() -> Dict[str, Any]:
             'volatility': 0.80,
             'risk_free_rate': 0.03
         }
+
+
+def get_chainlink_price_usd(
+    w3: Web3,
+    chainlink_abi: list,
+    feed_address: str,
+    max_staleness_seconds: int = 3600
+) -> float:
+    """
+    Get USD price from Chainlink feed with staleness check.
+
+    This is specifically for options vault valuation where we need
+    spot prices in USD for Black-Scholes pricing.
+
+    Args:
+        w3: Web3 instance
+        chainlink_abi: Chainlink price feed ABI
+        feed_address: Chainlink feed address
+        max_staleness_seconds: Maximum acceptable staleness (default 1 hour)
+
+    Returns:
+        Price as float (e.g., 28.50 for $28.50)
+
+    Raises:
+        RuntimeError: If feed is stale, invalid, or unavailable
+    """
+    if not feed_address or feed_address == "0x0000000000000000000000000000000000000000":
+        raise ValueError("Invalid Chainlink feed address")
+
+    try:
+        feed_cs = Web3.to_checksum_address(feed_address)
+        feed = w3.eth.contract(address=feed_cs, abi=chainlink_abi)
+
+        # Get decimals
+        decimals = feed.functions.decimals().call()
+
+        # Get latest round data
+        round_data = feed.functions.latestRoundData().call()
+        # (roundId, answer, startedAt, updatedAt, answeredInRound)
+        price_raw = int(round_data[1])
+        updated_at = int(round_data[3])
+
+        # Validate price
+        if price_raw <= 0:
+            raise RuntimeError(f"Invalid Chainlink price: {price_raw}")
+
+        # Check staleness
+        current_time = int(time.time())
+        age = current_time - updated_at
+
+        if age > max_staleness_seconds:
+            raise RuntimeError(
+                f"Chainlink feed stale: {age}s old, max allowed {max_staleness_seconds}s. "
+                f"Feed: {feed_address[:10]}..."
+            )
+
+        # Convert to float with proper decimal handling
+        price = float(price_raw) / (10 ** decimals)
+
+        logger.debug(
+            f"Chainlink price: ${price:.4f} (decimals={decimals}, age={age}s)"
+        )
+
+        return price
+
+    except ValueError:
+        raise
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.critical(
+            f"CRITICAL: Chainlink feed query FAILED! "
+            f"Cannot safely price options without spot price. "
+            f"Feed: {feed_address}, Error: {e}"
+        )
+        raise RuntimeError(f"Chainlink feed query failed: {e}") from e
+
+
+def get_spot_price_for_symbol(
+    w3: Web3,
+    chainlink_abi: list,
+    symbol: str,
+    oracles: Dict[str, str],
+    max_staleness_seconds: int = 3600
+) -> float:
+    """
+    Get spot price in USD for a given symbol using configured oracles.
+
+    Args:
+        w3: Web3 instance
+        chainlink_abi: Chainlink feed ABI
+        symbol: Asset symbol (e.g., "HYPE", "kHYPE")
+        oracles: Dict mapping symbol -> Chainlink feed address
+        max_staleness_seconds: Maximum staleness
+
+    Returns:
+        Price in USD as float
+
+    Raises:
+        ValueError: If no oracle configured for symbol
+        RuntimeError: If oracle query fails
+    """
+    symbol_upper = symbol.upper()
+
+    if symbol_upper not in oracles:
+        raise ValueError(
+            f"No Chainlink oracle configured for {symbol_upper}. "
+            f"Available oracles: {list(oracles.keys())}"
+        )
+
+    feed_address = oracles[symbol_upper]
+    return get_chainlink_price_usd(w3, chainlink_abi, feed_address, max_staleness_seconds)

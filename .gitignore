@@ -27,3 +27,4 @@ out/
 keeper/keeper_config_looper_test.json
 
 !/docs/*.md
+keeper/keeper_config_options_vault.json

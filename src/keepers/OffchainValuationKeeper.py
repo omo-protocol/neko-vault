@@ -734,6 +734,77 @@ class OffchainValuationKeeper:
 
         return int(total_value_in_wrapper)
 
+    def value_options_vault_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'options_vault'
+        Values Rysk oToken positions using Black-Scholes pricing.
+
+        Architecture:
+        - Fetches positions from Rysk V12 API (maker wallet)
+        - Gets IV from Rysk inventory API
+        - Gets spot prices from Chainlink oracles
+        - Calculates option values using Black-Scholes
+        - SHORT positions are treated as liabilities (subtracted)
+
+        Configuration (extras):
+            maker_wallet: Address holding oToken positions (required)
+            oracles: Dict mapping symbol to Chainlink feed address (required)
+                e.g., {"HYPE": "0xa5a72...", "kHYPE": "0xC66B2..."}
+            wrapper_oracle: Chainlink feed for underlying→USD conversion (required)
+            risk_free_bps: Risk-free rate in basis points (default 0)
+            default_iv_bps: Default IV in basis points (default 8000 = 80%)
+            short_as_liability: Treat SHORT as liability (default true)
+            api_timeout: API timeout in seconds (default 10)
+
+        REFACTORED: Uses utils.options_utils ✅
+        """
+        extras = s.extras or {}
+
+        # Required configuration
+        maker_wallet = extras.get('maker_wallet')
+        if not maker_wallet:
+            logger.error(f"[{s.id_text}] Missing 'maker_wallet' in extras")
+            return 0
+
+        oracles = extras.get('oracles', {})
+        if not oracles:
+            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (symbol → Chainlink feed mapping)")
+            return 0
+
+        wrapper_oracle = extras.get('wrapper_oracle')
+        if not wrapper_oracle:
+            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (Chainlink feed for underlying)")
+            return 0
+
+        # Optional configuration with defaults
+        risk_free_rate = int(extras.get('risk_free_bps', 0)) / 10_000.0
+        default_iv = int(extras.get('default_iv_bps', 8000)) / 10_000.0
+        short_as_liability = extras.get('short_as_liability', True)
+        api_timeout = int(extras.get('api_timeout', 10))
+
+        # Value options positions using utils
+        wrapper_shares = options_utils.value_options_vault_positions(
+            w3=self.w3,
+            chainlink_abi=CHAINLINK_FEED_ABI,
+            wrapper_abi=WRAPPER_ABI,
+            maker_wallet=maker_wallet,
+            oracles=oracles,
+            wrapper_address=self.wrapper_address,
+            wrapper_underlying_oracle=wrapper_oracle,
+            risk_free_rate=risk_free_rate,
+            default_iv=default_iv,
+            short_as_liability=short_as_liability,
+            api_timeout=api_timeout
+        )
+
+        logger.info(
+            f"[{s.id_text}] options_vault mode: "
+            f"maker_wallet={maker_wallet[:10]}..., "
+            f"wrapper_shares={wrapper_shares/1e18:.6f}"
+        )
+
+        return int(wrapper_shares)
+
     def value_strategy_in_shares(self, s: StrategyConfig) -> int:
         """
         Main dispatcher for strategy valuation.
@@ -751,6 +822,8 @@ class OffchainValuationKeeper:
             return self.value_holdings_mode(s)
         elif mode == 'uniswap_v3':
             return self.value_uniswap_v3_mode(s)
+        elif mode == 'options_vault':
+            return self.value_options_vault_mode(s)
         else:
             raise ValueError(f"Unknown valuation mode: {mode}")
 
