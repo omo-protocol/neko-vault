@@ -609,6 +609,107 @@ def check_hyperlend_health_factor(
     return (health_factor, status)
 
 
+def convert_debt_via_chainlink(
+    w3: Web3,
+    chainlink_abi: list,
+    debt_amount: int,
+    debt_feed: str,
+    target_feed: str,
+    sanity_min_ratio: float = 0.5,
+    sanity_max_ratio: float = 1.5
+) -> int:
+    """
+    Convert debt from one asset to another using Chainlink price feeds.
+
+    This is used to convert wHYPE debt to kHYPE for accurate net position calculation.
+    Uses two Chainlink feeds (e.g., HYPE/USD and kHYPE/USD) to compute the conversion.
+
+    Formula: debt_target = debt_source * source_price / target_price
+
+    Args:
+        w3: Web3 instance
+        chainlink_abi: Chainlink Price Feed ABI (with latestRoundData and decimals)
+        debt_amount: Debt amount in source asset (18 decimals)
+        debt_feed: Chainlink feed for debt asset (e.g., HYPE/USD)
+        target_feed: Chainlink feed for target asset (e.g., kHYPE/USD)
+        sanity_min_ratio: Minimum price ratio (default 0.5 = 50%)
+        sanity_max_ratio: Maximum price ratio (default 1.5 = 150%)
+
+    Returns:
+        Debt amount converted to target asset (18 decimals)
+
+    Raises:
+        RuntimeError: If price ratio is outside sanity bounds (possible oracle manipulation)
+    """
+    if debt_amount == 0:
+        return 0
+
+    if not debt_feed or not target_feed:
+        logger.warning("Missing Chainlink feed addresses, returning debt unconverted")
+        return debt_amount
+
+    try:
+        debt_feed_cs = Web3.to_checksum_address(debt_feed)
+        target_feed_cs = Web3.to_checksum_address(target_feed)
+
+        # Get debt asset price
+        debt_oracle = w3.eth.contract(address=debt_feed_cs, abi=chainlink_abi)
+        debt_decimals = debt_oracle.functions.decimals().call()
+        debt_round = debt_oracle.functions.latestRoundData().call()
+        debt_price = int(debt_round[1])  # answer field
+
+        if debt_price <= 0:
+            raise RuntimeError(f"Invalid debt feed price: {debt_price}")
+
+        # Get target asset price
+        target_oracle = w3.eth.contract(address=target_feed_cs, abi=chainlink_abi)
+        target_decimals = target_oracle.functions.decimals().call()
+        target_round = target_oracle.functions.latestRoundData().call()
+        target_price = int(target_round[1])  # answer field
+
+        if target_price <= 0:
+            raise RuntimeError(f"Invalid target feed price: {target_price}")
+
+        # Normalize prices to same decimal base (18 decimals)
+        # debt_price has debt_decimals, target_price has target_decimals
+        debt_price_normalized = debt_price * (10 ** (18 - debt_decimals))
+        target_price_normalized = target_price * (10 ** (18 - target_decimals))
+
+        # Sanity check: price ratio should be within bounds
+        # For HYPE/kHYPE, ratio should be close to 1.0 (kHYPE is wrapped HYPE)
+        price_ratio = debt_price_normalized / target_price_normalized
+        if price_ratio < sanity_min_ratio or price_ratio > sanity_max_ratio:
+            raise RuntimeError(
+                f"CRITICAL: Price ratio {price_ratio:.4f} outside sanity bounds "
+                f"[{sanity_min_ratio}, {sanity_max_ratio}]. "
+                f"Possible oracle manipulation or feed misconfiguration. "
+                f"debt_price={debt_price_normalized/1e18:.4f}, target_price={target_price_normalized/1e18:.4f}"
+            )
+
+        # Convert: debt_target = debt_source * source_price / target_price
+        # Both prices are now in 18 decimals
+        converted_debt = (debt_amount * debt_price_normalized) // target_price_normalized
+
+        logger.debug(
+            f"Chainlink debt conversion: "
+            f"debt_amount={debt_amount/1e18:.6f}, "
+            f"debt_price=${debt_price_normalized/1e18:.4f}, "
+            f"target_price=${target_price_normalized/1e18:.4f}, "
+            f"ratio={price_ratio:.6f}, "
+            f"converted={converted_debt/1e18:.6f}"
+        )
+
+        return converted_debt
+
+    except Exception as e:
+        logger.critical(
+            f"CRITICAL: Chainlink debt conversion FAILED! "
+            f"Cannot safely value strategy without accurate debt conversion. "
+            f"Error: {e}"
+        )
+        raise RuntimeError(f"Chainlink debt conversion failed: {e}") from e
+
+
 def get_lending_debt(
     w3: Web3,
     erc20_abi: list,
