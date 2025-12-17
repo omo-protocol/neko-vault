@@ -30,7 +30,7 @@ contract ConfigureFlashLoanWhitelist is Script {
     address constant ADAPTER_ADDRESS = 0x7F73B9AA1f5a6cE9bBfc8F0c12889b3Cb75174e8;
 
     // HyperLendFlashLoanExecutor (Looper) Contract
-    address constant LOOPER = 0xDA4541b388981f08b0f11E5A2Cf92Aa83532789f;
+    address constant LOOPER = 0xB9f7605E96f8D2F56B32b2ef28763c32bC1600c6;
 
     // Token addresses
     address constant KHYPE = 0xfD739d4e423301CE9385c1fb8850539D657C296D;
@@ -40,15 +40,18 @@ contract ConfigureFlashLoanWhitelist is Script {
     // HyperLend Pool (for view functions)
     address constant HYPERLEND_POOL = 0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b;
 
-    // Function selectors (from VAULT_WHITELIST.md)
-    bytes4 constant SET_EMODE = 0xb94e11c6;           // setEMode(uint8)
-    bytes4 constant LOOP_PT_KHYPE = 0x0f5c75a3;       // loopPtKhype(uint256,uint256,uint256)
-    bytes4 constant SWAP = 0xb69cbf9f;                // swap(address,address,uint256,uint256,address,bytes)
-    bytes4 constant UNWIND_POSITION = 0x27815217;    // unwindPosition(address,uint256,address,uint256)
-    bytes4 constant REPAY = 0x22867d78;              // repay(address,uint256)
-    bytes4 constant WITHDRAW = 0xf3fef3a3;           // withdraw(address,uint256)
-    bytes4 constant RESCUE_ERC20 = 0x8cd4426d;       // rescueERC20(address,uint256)
-    bytes4 constant ERC20_TRANSFER = 0xa9059cbb;     // transfer(address,uint256)
+    // Function selectors
+    bytes4 constant SET_EMODE = 0xb94e11c6;                 // setEMode(uint8)
+    bytes4 constant LOOP_PT_KHYPE = 0xed055722;             // loopPtKhype(uint256,uint256,uint256,bool)
+    bytes4 constant SWAP = 0xb69cbf9f;                      // swap(address,address,uint256,uint256,address,bytes)
+    bytes4 constant UNWIND_POSITION = 0x27815217;           // unwindPosition(address,uint256,address,uint256)
+    bytes4 constant FLASH_LOAN_DELEVERAGE = 0x16a9d1f4;     // flashLoanDeleverage(uint256,uint256,uint256,uint256,address,bytes)
+    bytes4 constant REPAY = 0x22867d78;                     // repay(address,uint256)
+    bytes4 constant WITHDRAW = 0xf3fef3a3;                  // withdraw(address,uint256)
+    bytes4 constant RESCUE_ERC20 = 0x8cd4426d;              // rescueERC20(address,uint256)
+    bytes4 constant WITHDRAW_ERC20 = 0xa1db9782;            // withdrawERC20(address,uint256)
+    bytes4 constant ERC20_TRANSFER = 0xa9059cbb;            // transfer(address,uint256)
+    bytes4 constant BORROW = 0x4b8a3529;                    // borrow(address,uint256)
 
     function run() public {
         // Load private key
@@ -97,7 +100,7 @@ contract ConfigureFlashLoanWhitelist is Script {
             true,
             10_000e18 // 10k token limit per operation
         );
-        console.log("  [OK] looper.loopPtKhype(uint256,uint256,uint256)");
+        console.log("  [OK] looper.loopPtKhype(uint256,uint256,uint256,bool)");
 
         // swap - Swap tokens via LiquidSwap
         adapter.updateWhitelist(
@@ -122,6 +125,15 @@ contract ConfigureFlashLoanWhitelist is Script {
         );
         console.log("  [OK] looper.unwindPosition(address,uint256,address,uint256)");
 
+        // flashLoanDeleverage - Deleverage position using flashloan
+        adapter.updateWhitelist(
+            LOOPER,
+            FLASH_LOAN_DELEVERAGE,
+            true,
+            10_000e18 // 10k token limit per operation
+        );
+        console.log("  [OK] looper.flashLoanDeleverage(uint256,uint256,uint256,uint256,address,bytes)");
+
         // repay - Repay borrowed wHYPE
         adapter.updateWhitelist(
             LOOPER,
@@ -130,6 +142,15 @@ contract ConfigureFlashLoanWhitelist is Script {
             10_000e18 // 10k token limit per operation
         );
         console.log("  [OK] looper.repay(address,uint256)");
+
+        // borrow - Borrow wHYPE
+        adapter.updateWhitelist(
+            LOOPER,
+            BORROW,
+            true,
+            10_000e18 // 10k token limit per operation
+        );
+        console.log("  [OK] looper.borrow(address,uint256)");
 
         // withdraw - Withdraw PT-kHYPE collateral
         adapter.updateWhitelist(
@@ -148,6 +169,15 @@ contract ConfigureFlashLoanWhitelist is Script {
             10_000e18 // 10k token limit per operation
         );
         console.log("  [OK] looper.rescueERC20(address,uint256)");
+
+        // withdrawERC20 - Withdraw ERC20 tokens
+        adapter.updateWhitelist(
+            LOOPER,
+            WITHDRAW_ERC20,
+            true,
+            10_000e18 // 10k token limit per operation
+        );
+        console.log("  [OK] looper.withdrawERC20(address,uint256)");
 
         // ============================================================
         // STEP 3: Whitelist Token Transfer Functions
@@ -182,9 +212,9 @@ contract ConfigureFlashLoanWhitelist is Script {
         console.log("================================================================");
         console.log("\nWhitelisted Functions Summary:");
         console.log("  Looper Core Functions: 3 (setEMode, loopPtKhype, swap)");
-        console.log("  Looper Unwind Functions: 4 (unwindPosition, repay, withdraw, rescueERC20)");
+        console.log("  Looper Unwind Functions: 6 (unwindPosition, flashLoanDeleverage, repay, borrow, withdraw, rescueERC20, withdrawERC20)");
         console.log("  Token Functions: 2 (kHYPE.transfer, wHYPE.transfer)");
-        console.log("  Total: 9 function whitelists configured");
+        console.log("  Total: 11 function whitelists configured");
 
         console.log("\n[SUCCESS] Adapter is now ready for HyperLend flashloan loop strategy!");
 
