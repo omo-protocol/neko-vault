@@ -4,17 +4,159 @@ Rysk V12 API integration for options vault valuation.
 API Endpoints:
 - Maker Positions: https://v12.rysk.finance/api/maker/positions?address=0x...
 - Inventory (IV data): https://v12.rysk.finance/api/inventory
+
+Features:
+- Position caching with configurable TTL to reduce API calls
+- Inventory caching for IV data
 """
 import logging
 import requests
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger("OffchainValuationKeeper.rysk")
 
 # Default Rysk API base URL (mainnet)
 DEFAULT_RYSK_API_BASE = "https://v12.rysk.finance"
+
+# Default cache TTL in seconds
+DEFAULT_POSITION_CACHE_TTL = 30  # 30 seconds
+DEFAULT_INVENTORY_CACHE_TTL = 60  # 60 seconds
+
+
+@dataclass
+class CacheEntry:
+    """Cache entry with timestamp and data."""
+    data: Any
+    timestamp: float
+    ttl: float
+
+    def is_valid(self) -> bool:
+        """Check if cache entry is still valid."""
+        return (time.time() - self.timestamp) < self.ttl
+
+
+class RyskAPICache:
+    """
+    In-memory cache for Rysk API responses.
+
+    Reduces API calls by caching:
+    - Positions per wallet address
+    - Inventory IV data
+    """
+
+    def __init__(
+        self,
+        position_ttl: float = DEFAULT_POSITION_CACHE_TTL,
+        inventory_ttl: float = DEFAULT_INVENTORY_CACHE_TTL
+    ):
+        self.position_ttl = position_ttl
+        self.inventory_ttl = inventory_ttl
+        self._positions_cache: Dict[str, CacheEntry] = {}
+        self._inventory_cache: Dict[str, CacheEntry] = {}
+        self._stats = {
+            'position_hits': 0,
+            'position_misses': 0,
+            'inventory_hits': 0,
+            'inventory_misses': 0
+        }
+
+    def get_positions(self, cache_key: str) -> Optional[List]:
+        """Get cached positions if valid."""
+        if cache_key in self._positions_cache:
+            entry = self._positions_cache[cache_key]
+            if entry.is_valid():
+                self._stats['position_hits'] += 1
+                logger.debug(f"Cache HIT for positions: {cache_key[:20]}...")
+                return entry.data
+        self._stats['position_misses'] += 1
+        return None
+
+    def set_positions(self, cache_key: str, positions: List) -> None:
+        """Cache positions."""
+        self._positions_cache[cache_key] = CacheEntry(
+            data=positions,
+            timestamp=time.time(),
+            ttl=self.position_ttl
+        )
+        logger.debug(f"Cached {len(positions)} positions for {cache_key[:20]}... (TTL: {self.position_ttl}s)")
+
+    def get_inventory(self, cache_key: str) -> Optional[Dict]:
+        """Get cached inventory if valid."""
+        if cache_key in self._inventory_cache:
+            entry = self._inventory_cache[cache_key]
+            if entry.is_valid():
+                self._stats['inventory_hits'] += 1
+                logger.debug(f"Cache HIT for inventory: {cache_key[:30]}...")
+                return entry.data
+        self._stats['inventory_misses'] += 1
+        return None
+
+    def set_inventory(self, cache_key: str, inventory: Dict) -> None:
+        """Cache inventory."""
+        self._inventory_cache[cache_key] = CacheEntry(
+            data=inventory,
+            timestamp=time.time(),
+            ttl=self.inventory_ttl
+        )
+        logger.debug(f"Cached {len(inventory)} inventory items (TTL: {self.inventory_ttl}s)")
+
+    def clear(self) -> None:
+        """Clear all caches."""
+        self._positions_cache.clear()
+        self._inventory_cache.clear()
+        logger.info("Cleared all Rysk API caches")
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get cache statistics."""
+        return self._stats.copy()
+
+    def log_stats(self) -> None:
+        """Log cache statistics."""
+        stats = self._stats
+        pos_total = stats['position_hits'] + stats['position_misses']
+        inv_total = stats['inventory_hits'] + stats['inventory_misses']
+
+        pos_hit_rate = (stats['position_hits'] / pos_total * 100) if pos_total > 0 else 0
+        inv_hit_rate = (stats['inventory_hits'] / inv_total * 100) if inv_total > 0 else 0
+
+        logger.info(
+            f"Rysk API Cache Stats - "
+            f"Positions: {stats['position_hits']}/{pos_total} hits ({pos_hit_rate:.1f}%), "
+            f"Inventory: {stats['inventory_hits']}/{inv_total} hits ({inv_hit_rate:.1f}%)"
+        )
+
+
+# Global cache instance (can be replaced per-keeper if needed)
+_global_cache: Optional[RyskAPICache] = None
+
+
+def get_cache(
+    position_ttl: float = DEFAULT_POSITION_CACHE_TTL,
+    inventory_ttl: float = DEFAULT_INVENTORY_CACHE_TTL
+) -> RyskAPICache:
+    """Get or create the global cache instance."""
+    global _global_cache
+    if _global_cache is None:
+        _global_cache = RyskAPICache(position_ttl, inventory_ttl)
+    return _global_cache
+
+
+def set_cache_ttl(position_ttl: float = None, inventory_ttl: float = None) -> None:
+    """Update cache TTL settings."""
+    global _global_cache
+    if _global_cache is None:
+        _global_cache = RyskAPICache(
+            position_ttl or DEFAULT_POSITION_CACHE_TTL,
+            inventory_ttl or DEFAULT_INVENTORY_CACHE_TTL
+        )
+    else:
+        if position_ttl is not None:
+            _global_cache.position_ttl = position_ttl
+        if inventory_ttl is not None:
+            _global_cache.inventory_ttl = inventory_ttl
+    logger.info(f"Cache TTL updated - positions: {_global_cache.position_ttl}s, inventory: {_global_cache.inventory_ttl}s")
 
 
 @dataclass
@@ -60,10 +202,11 @@ class RyskPosition:
 def fetch_maker_positions(
     wallet_address: str,
     timeout: int = 10,
-    api_base_url: str = DEFAULT_RYSK_API_BASE
+    api_base_url: str = DEFAULT_RYSK_API_BASE,
+    use_cache: bool = True
 ) -> List[RyskPosition]:
     """
-    Fetch maker positions from Rysk API.
+    Fetch maker positions from Rysk API with optional caching.
 
     API: {api_base_url}/api/maker/positions?address=0x...
 
@@ -71,10 +214,19 @@ def fetch_maker_positions(
         wallet_address: Address holding oToken positions
         timeout: Request timeout in seconds
         api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
+        use_cache: Whether to use caching (default True)
 
     Returns:
         List of RyskPosition dataclasses
     """
+    # Check cache first
+    cache_key = f"{api_base_url}:{wallet_address.lower()}"
+    if use_cache:
+        cache = get_cache()
+        cached = cache.get_positions(cache_key)
+        if cached is not None:
+            return cached
+
     try:
         url = f"{api_base_url}/api/maker/positions?address={wallet_address}"
         logger.debug(f"Fetching Rysk positions: {url}")
@@ -115,6 +267,12 @@ def fetch_maker_positions(
                 continue
 
         logger.info(f"Fetched {len(positions)} oToken positions for {wallet_address[:10]}...")
+
+        # Cache the result
+        if use_cache:
+            cache = get_cache()
+            cache.set_positions(cache_key, positions)
+
         return positions
 
     except requests.exceptions.Timeout:
@@ -130,16 +288,18 @@ def fetch_maker_positions(
 
 def fetch_inventory_iv(
     timeout: int = 10,
-    api_base_url: str = DEFAULT_RYSK_API_BASE
+    api_base_url: str = DEFAULT_RYSK_API_BASE,
+    use_cache: bool = True
 ) -> Dict[str, Dict]:
     """
-    Fetch IV data from Rysk inventory API.
+    Fetch IV data from Rysk inventory API with optional caching.
 
     API: {api_base_url}/api/inventory
 
     Args:
         timeout: Request timeout in seconds
         api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
+        use_cache: Whether to use caching (default True)
 
     Returns:
         Dict mapping option keys to IV data:
@@ -153,6 +313,14 @@ def fetch_inventory_iv(
         }
         Key format: "{SYMBOL}-{STRIKE}-{EXPIRY}-{IS_PUT}"
     """
+    # Check cache first
+    cache_key = f"{api_base_url}:inventory"
+    if use_cache:
+        cache = get_cache()
+        cached = cache.get_inventory(cache_key)
+        if cached is not None:
+            return cached
+
     try:
         inventory_url = f"{api_base_url}/api/inventory"
         logger.debug(f"Fetching Rysk inventory: {inventory_url}")
