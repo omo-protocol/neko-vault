@@ -31,10 +31,10 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     /* TYPES */
 
     enum Mode {
-        NORMAL,           // All operations allowed
-        DEPOSIT_ONLY,     // Block new deposits, allow withdrawals
-        WITHDRAWAL_ONLY,  // Allow deposits, block withdrawals
-        EMERGENCY         // Block all operations
+        NORMAL,             // All operations allowed
+        DEPOSITS_PAUSED,    // Deposits blocked, withdrawals allowed
+        WITHDRAWALS_PAUSED, // Withdrawals blocked, deposits allowed
+        EMERGENCY           // All operations blocked
     }
 
     /* IMMUTABLES */
@@ -294,8 +294,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canReceiveShares(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;
+        if (mode == Mode.DEPOSITS_PAUSED) return false;
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }
@@ -303,8 +303,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canSendShares(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;
+        if (mode == Mode.DEPOSITS_PAUSED) return true;
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }
@@ -312,8 +312,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canReceiveAssets(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;
-        if (mode == Mode.WITHDRAWAL_ONLY) return false;
+        if (mode == Mode.DEPOSITS_PAUSED) return true;
+        if (mode == Mode.WITHDRAWALS_PAUSED) return false;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }
@@ -321,8 +321,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
     function canSendAssets(address account) external view override returns (bool) {
         if (isException[account]) return true;
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;
+        if (mode == Mode.DEPOSITS_PAUSED) return false;
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;
         if (mode == Mode.EMERGENCY) return false;
         return false;
     }
@@ -331,8 +331,8 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
 
     function getModeString() external view returns (string memory) {
         if (mode == Mode.NORMAL) return "NORMAL";
-        if (mode == Mode.DEPOSIT_ONLY) return "DEPOSIT_ONLY";
-        if (mode == Mode.WITHDRAWAL_ONLY) return "WITHDRAWAL_ONLY";
+        if (mode == Mode.DEPOSITS_PAUSED) return "DEPOSITS_PAUSED";
+        if (mode == Mode.WITHDRAWALS_PAUSED) return "WITHDRAWALS_PAUSED";
         if (mode == Mode.EMERGENCY) return "EMERGENCY";
         return "UNKNOWN";
     }
@@ -347,10 +347,10 @@ contract EmergencyGateWithRoles is IReceiveSharesGate, ISendSharesGate, IReceive
 
         if (mode == Mode.NORMAL) {
             return (true, true, true);
-        } else if (mode == Mode.DEPOSIT_ONLY) {
-            return (false, true, false);
-        } else if (mode == Mode.WITHDRAWAL_ONLY) {
-            return (true, false, true);
+        } else if (mode == Mode.DEPOSITS_PAUSED) {
+            return (false, true, true);  // Deposits blocked, withdrawals & transfers allowed
+        } else if (mode == Mode.WITHDRAWALS_PAUSED) {
+            return (true, false, true);  // Withdrawals blocked, deposits & transfers allowed
         } else if (mode == Mode.EMERGENCY) {
             return (false, false, false);
         }
