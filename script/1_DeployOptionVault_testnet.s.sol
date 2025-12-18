@@ -34,10 +34,10 @@ contract DeployPTLoopVault is Script {
     // Strategy IDs
     bytes32 constant STRATEGY_ID = keccak256("hype-stack-vault");
     // Asset configuration
-    address asset = 0xfD739d4e423301CE9385c1fb8850539D657C296D; // KHYPE
+    address asset = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14; // WETH
     address vaultFactoryAddress = 0x8B9683393356EF81c4f1B639EB218EB649Ae0B38; // config to vault factory address
     address adapterFactoryAddress = 0x448853b8FDA515464aE5CD512C1759581e3c1062; // config to adapter factory address
-    address valuerAddress = 0x0B94EB87a201B659Def509B54239D19A8A5f595A; // config to valuer address
+    address valuerAddress = 0x393eC44e9C1E6783c860ae43678FE0319886268B; // config to valuer address
 
     function run() public {
         // Load private key

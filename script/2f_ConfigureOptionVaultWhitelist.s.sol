@@ -30,10 +30,10 @@ contract ConfigureOptionVaultWhitelist is Script {
     // ============================================================
 
     // Adapter address for the Option Vault
-    address constant ADAPTER_ADDRESS = address(0); // TODO: Set after deployment
+    address constant ADAPTER_ADDRESS = 0x44cB58F10df181F3f10a94b2cb1Eac400C983EeB;
 
     // Underlying asset token address (e.g., USDC, kHYPE, etc.)
-    address constant UNDERLYING_ASSET = address(0); // TODO: Set to vault's underlying asset
+    address constant UNDERLYING_ASSET = 0xfD739d4e423301CE9385c1fb8850539D657C296D;
 
     // ============================================================
     // FUNCTION SELECTORS

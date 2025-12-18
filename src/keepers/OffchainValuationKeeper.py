@@ -571,7 +571,7 @@ class OffchainValuationKeeper:
         borrow_asset = extras.get('borrow_asset')
         debt_token = extras.get('debt_token')  # Optional override
 
-        looper_debt = lending_utils.get_hyperlend_debt(
+        looper_debt_raw = lending_utils.get_hyperlend_debt(
             w3=self.w3,
             erc20_abi=ERC20_ABI,
             aave_pool_abi=AAVE_V3_POOL_ABI,
@@ -580,6 +580,33 @@ class OffchainValuationKeeper:
             user=looper_address,
             debt_token=debt_token
         )
+
+        # 5b. Convert debt from wHYPE (HYPE) to kHYPE using Chainlink oracles
+        # This is necessary because debt is in wHYPE but valuation is in kHYPE
+        debt_feed = extras.get('chainlink_debt_feed')  # HYPE/USD feed
+        target_feed = extras.get('chainlink_target_feed')  # kHYPE/USD feed
+
+        if debt_feed and target_feed and looper_debt_raw > 0:
+            looper_debt = lending_utils.convert_debt_via_chainlink(
+                w3=self.w3,
+                chainlink_abi=CHAINLINK_FEED_ABI,
+                debt_amount=looper_debt_raw,
+                debt_feed=debt_feed,
+                target_feed=target_feed,
+                sanity_min_ratio=extras.get('debt_ratio_min', 0.8),
+                sanity_max_ratio=extras.get('debt_ratio_max', 1.2)
+            )
+            logger.debug(
+                f"[{s.id_text}] Debt converted: {looper_debt_raw/1e18:.6f} wHYPE -> {looper_debt/1e18:.6f} kHYPE"
+            )
+        else:
+            # No conversion configured - use raw debt (assumes same unit)
+            looper_debt = looper_debt_raw
+            if looper_debt_raw > 0:
+                logger.warning(
+                    f"[{s.id_text}] No Chainlink feeds configured - debt not converted. "
+                    f"Set chainlink_debt_feed and chainlink_target_feed in extras for accurate valuation."
+                )
 
         # 6. Calculate looper net value (idle kHYPE + PT value - debt)
         looper_net_value = max(0, looper_khype_balance + looper_pt_value - looper_debt)
@@ -608,6 +635,12 @@ class OffchainValuationKeeper:
             underlying_amount=total_value_underlying
         )
 
+        # Build debt info string showing conversion if applicable
+        if debt_feed and target_feed and looper_debt_raw > 0:
+            debt_info = f"looper_debt={looper_debt_raw/1e18:.6f} wHYPE -> {looper_debt/1e18:.6f} kHYPE"
+        else:
+            debt_info = f"looper_debt={looper_debt/1e18:.6f}"
+
         logger.info(
             f"[{s.id_text}] pt_khype_looper: "
             f"escrow_khype={escrow_khype_balance/1e18:.6f}, "
@@ -615,7 +648,7 @@ class OffchainValuationKeeper:
             f"looper_pt={looper_pt_balance/1e18:.6f}, "
             f"pt_price={pt_price/1e18:.6f}, "
             f"looper_pt_value={looper_pt_value/1e18:.6f}, "
-            f"looper_debt={looper_debt/1e18:.6f}, "
+            f"{debt_info}, "
             f"looper_net={looper_net_value/1e18:.6f}, "
             f"total_value={total_value_underlying/1e18:.6f}, "
             f"health_factor={health_factor/1e18:.4f} ({health_status}), "
@@ -701,6 +734,77 @@ class OffchainValuationKeeper:
 
         return int(total_value_in_wrapper)
 
+    def value_options_vault_mode(self, s: StrategyConfig) -> int:
+        """
+        Mode: 'options_vault'
+        Values Rysk oToken positions using Black-Scholes pricing.
+
+        Architecture:
+        - Fetches positions from Rysk V12 API (maker wallet)
+        - Gets IV from Rysk inventory API
+        - Gets spot prices from Chainlink oracles
+        - Calculates option values using Black-Scholes
+        - SHORT positions are treated as liabilities (subtracted)
+
+        Configuration (extras):
+            maker_wallet: Address holding oToken positions (required)
+            oracles: Dict mapping symbol to Chainlink feed address (required)
+                e.g., {"HYPE": "0xa5a72...", "kHYPE": "0xC66B2..."}
+            wrapper_oracle: Chainlink feed for underlying→USD conversion (required)
+            risk_free_bps: Risk-free rate in basis points (default 0)
+            default_iv_bps: Default IV in basis points (default 8000 = 80%)
+            short_as_liability: Treat SHORT as liability (default true)
+            api_timeout: API timeout in seconds (default 10)
+
+        REFACTORED: Uses utils.options_utils ✅
+        """
+        extras = s.extras or {}
+
+        # Required configuration
+        maker_wallet = extras.get('maker_wallet')
+        if not maker_wallet:
+            logger.error(f"[{s.id_text}] Missing 'maker_wallet' in extras")
+            return 0
+
+        oracles = extras.get('oracles', {})
+        if not oracles:
+            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (symbol → Chainlink feed mapping)")
+            return 0
+
+        wrapper_oracle = extras.get('wrapper_oracle')
+        if not wrapper_oracle:
+            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (Chainlink feed for underlying)")
+            return 0
+
+        # Optional configuration with defaults
+        risk_free_rate = int(extras.get('risk_free_bps', 0)) / 10_000.0
+        default_iv = int(extras.get('default_iv_bps', 8000)) / 10_000.0
+        short_as_liability = extras.get('short_as_liability', True)
+        api_timeout = int(extras.get('api_timeout', 10))
+
+        # Value options positions using utils
+        wrapper_shares = options_utils.value_options_vault_positions(
+            w3=self.w3,
+            chainlink_abi=CHAINLINK_FEED_ABI,
+            wrapper_abi=WRAPPER_ABI,
+            maker_wallet=maker_wallet,
+            oracles=oracles,
+            wrapper_address=self.wrapper_address,
+            wrapper_underlying_oracle=wrapper_oracle,
+            risk_free_rate=risk_free_rate,
+            default_iv=default_iv,
+            short_as_liability=short_as_liability,
+            api_timeout=api_timeout
+        )
+
+        logger.info(
+            f"[{s.id_text}] options_vault mode: "
+            f"maker_wallet={maker_wallet[:10]}..., "
+            f"wrapper_shares={wrapper_shares/1e18:.6f}"
+        )
+
+        return int(wrapper_shares)
+
     def value_strategy_in_shares(self, s: StrategyConfig) -> int:
         """
         Main dispatcher for strategy valuation.
@@ -718,6 +822,8 @@ class OffchainValuationKeeper:
             return self.value_holdings_mode(s)
         elif mode == 'uniswap_v3':
             return self.value_uniswap_v3_mode(s)
+        elif mode == 'options_vault':
+            return self.value_options_vault_mode(s)
         else:
             raise ValueError(f"Unknown valuation mode: {mode}")
 

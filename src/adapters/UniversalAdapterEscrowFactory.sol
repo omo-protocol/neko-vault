@@ -23,7 +23,7 @@ contract UniversalAdapterEscrowFactory {
     error DeploymentFailed();
     error InvalidVault();
     error InvalidValuer();
-    error OnlyVaultOwnerCanDeploy(); // SECURITY FIX: Prevents front-running attacks
+    error OnlyVaultOwnerCanDeploy();
 
     /* STATE */
 
@@ -44,20 +44,12 @@ contract UniversalAdapterEscrowFactory {
         bool useOffchainValuer,
         bytes32 salt
     ) external returns (address adapter) {
-        // Validate inputs
         if (parentVault == address(0)) revert InvalidVault();
         if (valuer == address(0)) revert InvalidValuer();
-
-        // SECURITY FIX: Only vault owner can deploy adapters for their vault
-        // This prevents front-running attacks where an attacker deploys first
-        // with known salt/params to capture adapter ownership based on
-        // the then-current vault owner, potentially enabling fund theft/freeze
         if (IVaultV2(parentVault).owner() != msg.sender) revert OnlyVaultOwnerCanDeploy();
 
-        // Deploy using CREATE2
         adapter = _deploy(parentVault, valuer, useOffchainValuer, salt);
 
-        // Track deployment
         vaultAdapters[parentVault].push(adapter);
         isAdapter[adapter] = true;
 
