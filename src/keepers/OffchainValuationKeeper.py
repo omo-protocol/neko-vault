@@ -762,6 +762,9 @@ class OffchainValuationKeeper:
             underlying_symbol: Symbol for underlying in Rysk API (default "WETH", used when use_rysk_index_price=true)
             position_cache_ttl: Cache TTL for positions in seconds (default 30)
             inventory_cache_ttl: Cache TTL for inventory IV data in seconds (default 60)
+            api_max_retries: Max retry attempts for API calls (default 3)
+            api_retry_delay: Initial delay between retries in seconds (default 1.0)
+            api_retry_backoff: Exponential backoff multiplier (default 2.0)
 
         REFACTORED: Uses utils.options_utils ✅
         """
@@ -803,10 +806,23 @@ class OffchainValuationKeeper:
         # Configure Rysk API cache
         rysk_api.set_cache_ttl(position_cache_ttl, inventory_cache_ttl)
 
+        # Retry configuration (improves resilience)
+        api_max_retries = int(extras.get('api_max_retries', 3))
+        api_retry_delay = float(extras.get('api_retry_delay', 1.0))
+        api_retry_backoff = float(extras.get('api_retry_backoff', 2.0))
+
+        # Configure Rysk API retry
+        rysk_api.set_retry_config(
+            max_retries=api_max_retries,
+            initial_delay=api_retry_delay,
+            backoff_multiplier=api_retry_backoff
+        )
+
         logger.info(
             f"[{s.id_text}] options_vault config: "
             f"rysk_api={rysk_api_base}, use_rysk_index_price={use_rysk_index_price}, "
             f"cache_ttl=pos:{position_cache_ttl}s/inv:{inventory_cache_ttl}s, "
+            f"retry={api_max_retries}x/{api_retry_delay}s/{api_retry_backoff}x, "
             f"escrow={s.escrow[:10]}..., underlying={s.underlying[:10]}..."
         )
 

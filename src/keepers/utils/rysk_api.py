@@ -24,6 +24,114 @@ DEFAULT_RYSK_API_BASE = "https://v12.rysk.finance"
 DEFAULT_POSITION_CACHE_TTL = 30  # 30 seconds
 DEFAULT_INVENTORY_CACHE_TTL = 60  # 60 seconds
 
+# Default retry configuration
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_DELAY = 1.0  # Initial delay in seconds
+DEFAULT_RETRY_BACKOFF = 2.0  # Exponential backoff multiplier
+DEFAULT_RETRY_MAX_DELAY = 30.0  # Maximum delay between retries
+
+# Global retry settings (can be configured via set_retry_config)
+_retry_config = {
+    'max_retries': DEFAULT_MAX_RETRIES,
+    'initial_delay': DEFAULT_RETRY_DELAY,
+    'backoff_multiplier': DEFAULT_RETRY_BACKOFF,
+    'max_delay': DEFAULT_RETRY_MAX_DELAY
+}
+
+
+def set_retry_config(
+    max_retries: int = None,
+    initial_delay: float = None,
+    backoff_multiplier: float = None,
+    max_delay: float = None
+) -> None:
+    """
+    Configure retry settings for API calls.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default 3)
+        initial_delay: Initial delay between retries in seconds (default 1.0)
+        backoff_multiplier: Exponential backoff multiplier (default 2.0)
+        max_delay: Maximum delay between retries in seconds (default 30.0)
+    """
+    global _retry_config
+    if max_retries is not None:
+        _retry_config['max_retries'] = max_retries
+    if initial_delay is not None:
+        _retry_config['initial_delay'] = initial_delay
+    if backoff_multiplier is not None:
+        _retry_config['backoff_multiplier'] = backoff_multiplier
+    if max_delay is not None:
+        _retry_config['max_delay'] = max_delay
+
+    logger.info(
+        f"Retry config updated - max_retries: {_retry_config['max_retries']}, "
+        f"initial_delay: {_retry_config['initial_delay']}s, "
+        f"backoff: {_retry_config['backoff_multiplier']}x, "
+        f"max_delay: {_retry_config['max_delay']}s"
+    )
+
+
+def get_retry_config() -> Dict[str, Any]:
+    """Get current retry configuration."""
+    return _retry_config.copy()
+
+
+def _retry_with_backoff(
+    func,
+    *args,
+    max_retries: int = None,
+    initial_delay: float = None,
+    backoff_multiplier: float = None,
+    max_delay: float = None,
+    **kwargs
+):
+    """
+    Execute a function with retry logic and exponential backoff.
+
+    Args:
+        func: Function to execute
+        *args: Positional arguments for func
+        max_retries: Override max retries (uses global config if None)
+        initial_delay: Override initial delay (uses global config if None)
+        backoff_multiplier: Override backoff multiplier (uses global config if None)
+        max_delay: Override max delay (uses global config if None)
+        **kwargs: Keyword arguments for func
+
+    Returns:
+        Result of func(*args, **kwargs)
+
+    Raises:
+        Last exception if all retries fail
+    """
+    retries = max_retries if max_retries is not None else _retry_config['max_retries']
+    delay = initial_delay if initial_delay is not None else _retry_config['initial_delay']
+    backoff = backoff_multiplier if backoff_multiplier is not None else _retry_config['backoff_multiplier']
+    max_d = max_delay if max_delay is not None else _retry_config['max_delay']
+
+    last_exception = None
+
+    for attempt in range(retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+
+            if attempt < retries:
+                # Calculate delay with exponential backoff
+                current_delay = min(delay * (backoff ** attempt), max_d)
+                logger.warning(
+                    f"API request failed (attempt {attempt + 1}/{retries + 1}): {e}. "
+                    f"Retrying in {current_delay:.1f}s..."
+                )
+                time.sleep(current_delay)
+            else:
+                logger.error(
+                    f"API request failed after {retries + 1} attempts: {e}"
+                )
+
+    raise last_exception
+
 
 @dataclass
 class CacheEntry:
@@ -199,14 +307,22 @@ class RyskPosition:
         return float(self.balance) / 1e18
 
 
+def _fetch_positions_request(url: str, timeout: int) -> requests.Response:
+    """Internal function to make the HTTP request (used for retry logic)."""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+
 def fetch_maker_positions(
     wallet_address: str,
     timeout: int = 10,
     api_base_url: str = DEFAULT_RYSK_API_BASE,
-    use_cache: bool = True
+    use_cache: bool = True,
+    use_retry: bool = True
 ) -> List[RyskPosition]:
     """
-    Fetch maker positions from Rysk API with optional caching.
+    Fetch maker positions from Rysk API with optional caching and retry.
 
     API: {api_base_url}/api/maker/positions?address=0x...
 
@@ -215,6 +331,7 @@ def fetch_maker_positions(
         timeout: Request timeout in seconds
         api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
         use_cache: Whether to use caching (default True)
+        use_retry: Whether to use retry with backoff (default True)
 
     Returns:
         List of RyskPosition dataclasses
@@ -231,8 +348,11 @@ def fetch_maker_positions(
         url = f"{api_base_url}/api/maker/positions?address={wallet_address}"
         logger.debug(f"Fetching Rysk positions: {url}")
 
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
+        # Make request with or without retry
+        if use_retry:
+            response = _retry_with_backoff(_fetch_positions_request, url, timeout)
+        else:
+            response = _fetch_positions_request(url, timeout)
 
         data = response.json()
         positions = []
@@ -286,13 +406,21 @@ def fetch_maker_positions(
         return []
 
 
+def _fetch_inventory_request(url: str, timeout: int) -> requests.Response:
+    """Internal function to make the HTTP request (used for retry logic)."""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+
 def fetch_inventory_iv(
     timeout: int = 10,
     api_base_url: str = DEFAULT_RYSK_API_BASE,
-    use_cache: bool = True
+    use_cache: bool = True,
+    use_retry: bool = True
 ) -> Dict[str, Dict]:
     """
-    Fetch IV data from Rysk inventory API with optional caching.
+    Fetch IV data from Rysk inventory API with optional caching and retry.
 
     API: {api_base_url}/api/inventory
 
@@ -300,6 +428,7 @@ def fetch_inventory_iv(
         timeout: Request timeout in seconds
         api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
         use_cache: Whether to use caching (default True)
+        use_retry: Whether to use retry with backoff (default True)
 
     Returns:
         Dict mapping option keys to IV data:
@@ -325,8 +454,11 @@ def fetch_inventory_iv(
         inventory_url = f"{api_base_url}/api/inventory"
         logger.debug(f"Fetching Rysk inventory: {inventory_url}")
 
-        response = requests.get(inventory_url, timeout=timeout)
-        response.raise_for_status()
+        # Make request with or without retry
+        if use_retry:
+            response = _retry_with_backoff(_fetch_inventory_request, inventory_url, timeout)
+        else:
+            response = _fetch_inventory_request(inventory_url, timeout)
 
         data = response.json()
         result = {}
@@ -362,6 +494,12 @@ def fetch_inventory_iv(
                     continue
 
         logger.info(f"Fetched IV data for {len(result)} option combinations")
+
+        # Cache the result
+        if use_cache:
+            cache = get_cache()
+            cache.set_inventory(cache_key, result)
+
         return result
 
     except requests.exceptions.Timeout:
