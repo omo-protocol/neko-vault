@@ -13,9 +13,8 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger("OffchainValuationKeeper.rysk")
 
-# Rysk V12 API endpoints
-RYSK_MAKER_API = "https://v12.rysk.finance/api/maker/positions"
-RYSK_INVENTORY_API = "https://v12.rysk.finance/api/inventory"
+# Default Rysk API base URL (mainnet)
+DEFAULT_RYSK_API_BASE = "https://v12.rysk.finance"
 
 
 @dataclass
@@ -58,21 +57,26 @@ class RyskPosition:
         return float(self.balance) / 1e18
 
 
-def fetch_maker_positions(wallet_address: str, timeout: int = 10) -> List[RyskPosition]:
+def fetch_maker_positions(
+    wallet_address: str,
+    timeout: int = 10,
+    api_base_url: str = DEFAULT_RYSK_API_BASE
+) -> List[RyskPosition]:
     """
     Fetch maker positions from Rysk API.
 
-    API: https://v12.rysk.finance/api/maker/positions?address=0x...
+    API: {api_base_url}/api/maker/positions?address=0x...
 
     Args:
         wallet_address: Address holding oToken positions
         timeout: Request timeout in seconds
+        api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
 
     Returns:
         List of RyskPosition dataclasses
     """
     try:
-        url = f"{RYSK_MAKER_API}?address={wallet_address}"
+        url = f"{api_base_url}/api/maker/positions?address={wallet_address}"
         logger.debug(f"Fetching Rysk positions: {url}")
 
         response = requests.get(url, timeout=timeout)
@@ -124,11 +128,18 @@ def fetch_maker_positions(wallet_address: str, timeout: int = 10) -> List[RyskPo
         return []
 
 
-def fetch_inventory_iv(timeout: int = 10) -> Dict[str, Dict]:
+def fetch_inventory_iv(
+    timeout: int = 10,
+    api_base_url: str = DEFAULT_RYSK_API_BASE
+) -> Dict[str, Dict]:
     """
     Fetch IV data from Rysk inventory API.
 
-    API: https://v12.rysk.finance/api/inventory
+    API: {api_base_url}/api/inventory
+
+    Args:
+        timeout: Request timeout in seconds
+        api_base_url: Base URL for Rysk API (default: mainnet v12.rysk.finance)
 
     Returns:
         Dict mapping option keys to IV data:
@@ -143,9 +154,10 @@ def fetch_inventory_iv(timeout: int = 10) -> Dict[str, Dict]:
         Key format: "{SYMBOL}-{STRIKE}-{EXPIRY}-{IS_PUT}"
     """
     try:
-        logger.debug(f"Fetching Rysk inventory: {RYSK_INVENTORY_API}")
+        inventory_url = f"{api_base_url}/api/inventory"
+        logger.debug(f"Fetching Rysk inventory: {inventory_url}")
 
-        response = requests.get(RYSK_INVENTORY_API, timeout=timeout)
+        response = requests.get(inventory_url, timeout=timeout)
         response.raise_for_status()
 
         data = response.json()

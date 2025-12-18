@@ -740,21 +740,24 @@ class OffchainValuationKeeper:
         Values Rysk oToken positions using Black-Scholes pricing.
 
         Architecture:
-        - Fetches positions from Rysk V12 API (maker wallet)
+        - Fetches positions from Rysk API (configurable: mainnet or testnet)
         - Gets IV from Rysk inventory API
-        - Gets spot prices from Chainlink oracles
+        - Gets spot prices from Chainlink oracles OR Rysk index price (testnet)
         - Calculates option values using Black-Scholes
         - SHORT positions are treated as liabilities (subtracted)
 
         Configuration (extras):
             maker_wallet: Address holding oToken positions (required)
-            oracles: Dict mapping symbol to Chainlink feed address (required)
+            oracles: Dict mapping symbol to Chainlink feed address (required for mainnet, optional for testnet)
                 e.g., {"HYPE": "0xa5a72...", "kHYPE": "0xC66B2..."}
-            wrapper_oracle: Chainlink feed for underlying→USD conversion (required)
+            wrapper_oracle: Chainlink feed for underlying→USD conversion (required unless use_rysk_index_price=true)
             risk_free_bps: Risk-free rate in basis points (default 0)
             default_iv_bps: Default IV in basis points (default 8000 = 80%)
             short_as_liability: Treat SHORT as liability (default true)
             api_timeout: API timeout in seconds (default 10)
+            rysk_api_base: Base URL for Rysk API (default: https://v12.rysk.finance, for testnet use https://rip-testnet.rysk.finance)
+            use_rysk_index_price: Use Rysk index price instead of Chainlink (default false, for testnet use true)
+            underlying_symbol: Symbol for underlying in Rysk API (default "WETH", used when use_rysk_index_price=true)
 
         REFACTORED: Uses utils.options_utils ✅
         """
@@ -766,14 +769,21 @@ class OffchainValuationKeeper:
             logger.error(f"[{s.id_text}] Missing 'maker_wallet' in extras")
             return 0
 
+        # Testnet configuration
+        rysk_api_base = extras.get('rysk_api_base', 'https://v12.rysk.finance')
+        use_rysk_index_price = extras.get('use_rysk_index_price', False)
+        underlying_symbol = extras.get('underlying_symbol', 'WETH')
+
+        # Oracles configuration (can be empty for testnet with use_rysk_index_price=true)
         oracles = extras.get('oracles', {})
-        if not oracles:
-            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (symbol → Chainlink feed mapping)")
+        if not oracles and not use_rysk_index_price:
+            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (required unless use_rysk_index_price=true)")
             return 0
 
+        # Wrapper oracle (required for mainnet, optional for testnet)
         wrapper_oracle = extras.get('wrapper_oracle')
-        if not wrapper_oracle:
-            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (Chainlink feed for underlying)")
+        if not wrapper_oracle and not use_rysk_index_price:
+            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (required unless use_rysk_index_price=true)")
             return 0
 
         # Optional configuration with defaults
@@ -782,19 +792,31 @@ class OffchainValuationKeeper:
         short_as_liability = extras.get('short_as_liability', True)
         api_timeout = int(extras.get('api_timeout', 10))
 
-        # Value options positions using utils
+        logger.info(
+            f"[{s.id_text}] options_vault config: "
+            f"rysk_api={rysk_api_base}, use_rysk_index_price={use_rysk_index_price}, "
+            f"escrow={s.escrow[:10]}..., underlying={s.underlying[:10]}..."
+        )
+
+        # Value options positions + underlying balance using utils
         wrapper_shares = options_utils.value_options_vault_positions(
             w3=self.w3,
             chainlink_abi=CHAINLINK_FEED_ABI,
             wrapper_abi=WRAPPER_ABI,
+            erc20_abi=ERC20_ABI,
             maker_wallet=maker_wallet,
+            escrow_address=s.escrow,
+            underlying_address=s.underlying,
             oracles=oracles,
             wrapper_address=self.wrapper_address,
             wrapper_underlying_oracle=wrapper_oracle,
             risk_free_rate=risk_free_rate,
             default_iv=default_iv,
             short_as_liability=short_as_liability,
-            api_timeout=api_timeout
+            api_timeout=api_timeout,
+            rysk_api_base=rysk_api_base,
+            use_rysk_index_price=use_rysk_index_price,
+            underlying_symbol=underlying_symbol
         )
 
         logger.info(
