@@ -140,11 +140,11 @@ contract EmergencyGateTest is Test {
         assertTrue(gate.canSendAssets(user1), "Should allow sending assets");
     }
 
-    /* GATE INTERFACE TESTS - DEPOSIT_ONLY MODE */
+    /* GATE INTERFACE TESTS - DEPOSITS_PAUSED MODE */
 
-    function test_DepositOnlyMode_BlocksDeposits_AllowsWithdrawals() public {
+    function test_DepositsPausedMode_BlocksDeposits_AllowsWithdrawals() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.DEPOSIT_ONLY);
+        gate.setMode(EmergencyGate.Mode.DEPOSITS_PAUSED);
 
         // Deposits blocked (users can't send assets to deposit, can't receive shares from deposits)
         assertFalse(gate.canSendAssets(user1), "Should block sending assets (deposit)");
@@ -155,11 +155,11 @@ contract EmergencyGateTest is Test {
         assertTrue(gate.canReceiveAssets(user1), "Should allow receiving assets (from withdrawals)");
     }
 
-    /* GATE INTERFACE TESTS - WITHDRAWAL_ONLY MODE */
+    /* GATE INTERFACE TESTS - WITHDRAWALS_PAUSED MODE */
 
-    function test_WithdrawalOnlyMode_AllowsDeposits_BlocksWithdrawals() public {
+    function test_WithdrawalsPausedMode_AllowsDeposits_BlocksWithdrawals() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.WITHDRAWAL_ONLY);
+        gate.setMode(EmergencyGate.Mode.WITHDRAWALS_PAUSED);
 
         // Deposits allowed (users can send assets to deposit, can receive shares from deposits)
         assertTrue(gate.canSendAssets(user1), "Should allow sending assets (deposit)");
@@ -223,19 +223,19 @@ contract EmergencyGateTest is Test {
         assertTrue(canTransfer, "Should allow transfers");
     }
 
-    function test_CheckPermissions_DepositOnlyMode() public {
+    function test_CheckPermissions_DepositsPausedMode() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.DEPOSIT_ONLY);
+        gate.setMode(EmergencyGate.Mode.DEPOSITS_PAUSED);
 
         (bool canDeposit, bool canWithdraw, bool canTransfer) = gate.checkPermissions(user1);
         assertFalse(canDeposit, "Should block deposits");
         assertTrue(canWithdraw, "Should allow withdrawals");
-        assertFalse(canTransfer, "Should block transfers");
+        assertTrue(canTransfer, "Should allow transfers");
     }
 
-    function test_CheckPermissions_WithdrawalOnlyMode() public {
+    function test_CheckPermissions_WithdrawalsPausedMode() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.WITHDRAWAL_ONLY);
+        gate.setMode(EmergencyGate.Mode.WITHDRAWALS_PAUSED);
 
         (bool canDeposit, bool canWithdraw, bool canTransfer) = gate.checkPermissions(user1);
         assertTrue(canDeposit, "Should allow deposits");
@@ -272,12 +272,12 @@ contract EmergencyGateTest is Test {
         assertEq(gate.getModeString(), "NORMAL");
 
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.DEPOSIT_ONLY);
-        assertEq(gate.getModeString(), "DEPOSIT_ONLY");
+        gate.setMode(EmergencyGate.Mode.DEPOSITS_PAUSED);
+        assertEq(gate.getModeString(), "DEPOSITS_PAUSED");
 
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.WITHDRAWAL_ONLY);
-        assertEq(gate.getModeString(), "WITHDRAWAL_ONLY");
+        gate.setMode(EmergencyGate.Mode.WITHDRAWALS_PAUSED);
+        assertEq(gate.getModeString(), "WITHDRAWALS_PAUSED");
 
         vm.prank(owner);
         gate.setMode(EmergencyGate.Mode.EMERGENCY);
@@ -368,7 +368,7 @@ contract EmergencyGateTest is Test {
     function test_Scenario_SelectiveDepositBlocking() public {
         // Block new deposits
         vm.prank(owner);
-        gate.setMode(EmergencyGate.Mode.DEPOSIT_ONLY);
+        gate.setMode(EmergencyGate.Mode.DEPOSITS_PAUSED);
 
         // User 1 cannot deposit
         assertFalse(gate.canSendAssets(user1));

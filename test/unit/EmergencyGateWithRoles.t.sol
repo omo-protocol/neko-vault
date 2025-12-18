@@ -62,10 +62,10 @@ contract EmergencyGateWithRolesTest is Test {
         );
         assertEq(uint8(gateEmergency.mode()), uint8(EmergencyGateWithRoles.Mode.EMERGENCY));
 
-        EmergencyGateWithRoles gateDepositOnly = new EmergencyGateWithRoles(
-            VAULT, owner, EmergencyGateWithRoles.Mode.DEPOSIT_ONLY
+        EmergencyGateWithRoles gateDepositsPaused = new EmergencyGateWithRoles(
+            VAULT, owner, EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED
         );
-        assertEq(uint8(gateDepositOnly.mode()), uint8(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY));
+        assertEq(uint8(gateDepositsPaused.mode()), uint8(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED));
     }
 
     /* ============================================================ */
@@ -188,12 +188,12 @@ contract EmergencyGateWithRolesTest is Test {
 
     function test_SetMode_AllModes() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY, "Block deposits");
-        assertEq(uint8(gate.mode()), uint8(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY));
+        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED, "Pause deposits");
+        assertEq(uint8(gate.mode()), uint8(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED));
 
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY, "Block withdrawals");
-        assertEq(uint8(gate.mode()), uint8(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY));
+        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWALS_PAUSED, "Pause withdrawals");
+        assertEq(uint8(gate.mode()), uint8(EmergencyGateWithRoles.Mode.WITHDRAWALS_PAUSED));
 
         vm.prank(owner);
         gate.setMode(EmergencyGateWithRoles.Mode.EMERGENCY, "Emergency");
@@ -550,9 +550,9 @@ contract EmergencyGateWithRolesTest is Test {
         assertTrue(gate.canSendAssets(user1));
     }
 
-    function test_GateInterface_DepositOnlyMode() public {
+    function test_GateInterface_DepositsPausedMode() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY, "Block deposits");
+        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED, "Pause deposits");
 
         // Deposits blocked
         assertFalse(gate.canReceiveShares(user1));  // Cannot receive shares (from deposits)
@@ -563,9 +563,9 @@ contract EmergencyGateWithRolesTest is Test {
         assertTrue(gate.canReceiveAssets(user1));   // Can receive assets (from withdrawals)
     }
 
-    function test_GateInterface_WithdrawalOnlyMode() public {
+    function test_GateInterface_WithdrawalsPausedMode() public {
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY, "Block withdrawals");
+        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWALS_PAUSED, "Pause withdrawals");
 
         // Deposits allowed
         assertTrue(gate.canReceiveShares(user1));   // Can receive shares (from deposits)
@@ -618,12 +618,12 @@ contract EmergencyGateWithRolesTest is Test {
         assertEq(gate.getModeString(), "NORMAL");
 
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY, "");
-        assertEq(gate.getModeString(), "DEPOSIT_ONLY");
+        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED, "");
+        assertEq(gate.getModeString(), "DEPOSITS_PAUSED");
 
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY, "");
-        assertEq(gate.getModeString(), "WITHDRAWAL_ONLY");
+        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWALS_PAUSED, "");
+        assertEq(gate.getModeString(), "WITHDRAWALS_PAUSED");
 
         vm.prank(owner);
         gate.setMode(EmergencyGateWithRoles.Mode.EMERGENCY, "");
@@ -637,17 +637,17 @@ contract EmergencyGateWithRolesTest is Test {
         assertTrue(canWithdraw);
         assertTrue(canTransfer);
 
-        // Deposit only
+        // Deposits paused
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSIT_ONLY, "");
+        gate.setMode(EmergencyGateWithRoles.Mode.DEPOSITS_PAUSED, "");
         (canDeposit, canWithdraw, canTransfer) = gate.checkPermissions(user1);
         assertFalse(canDeposit);
         assertTrue(canWithdraw);
-        assertFalse(canTransfer);
+        assertTrue(canTransfer);  // Transfers allowed when deposits paused
 
-        // Withdrawal only
+        // Withdrawals paused
         vm.prank(owner);
-        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWAL_ONLY, "");
+        gate.setMode(EmergencyGateWithRoles.Mode.WITHDRAWALS_PAUSED, "");
         (canDeposit, canWithdraw, canTransfer) = gate.checkPermissions(user1);
         assertTrue(canDeposit);
         assertFalse(canWithdraw);
