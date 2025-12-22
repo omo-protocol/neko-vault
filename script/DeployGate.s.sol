@@ -9,20 +9,20 @@ import "../src/gates/EmergencyGateWithRoles.sol";
  * @notice Deploys the EmergencyGateWithRoles contract
  *
  * Usage:
- *   PRIVATE_KEY=0x... VAULT=0x... OWNER=0x... MODE=2 forge script script/DeployGate.s.sol --rpc-url <RPC_URL> --broadcast -v
+ *   PRIVATE_KEY=0x... VAULT=0x... OWNER=0x... MODE=0 forge script script/DeployGate.s.sol --rpc-url <RPC_URL> --broadcast -v
  *
  * Modes:
- *   0 = INACTIVE
- *   1 = DEPOSIT_ONLY
- *   2 = WITHDRAWAL_ONLY
- *   3 = EMERGENCY (all blocked)
+ *   0 = NORMAL            (all operations allowed)
+ *   1 = DEPOSITS_PAUSED   (deposits blocked, withdrawals allowed)
+ *   2 = WITHDRAWALS_PAUSED (withdrawals blocked, deposits allowed)
+ *   3 = EMERGENCY         (all operations blocked)
  */
 contract DeployGate is Script {
     function run() public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address vault = vm.envAddress("VAULT");
-        address owner = vm.envAddress("OWNER");
-        uint8 mode = uint8(vm.envUint("MODE"));
+        address vault = 0xe2d5dDeB54153152DD01e98045cC412115c92F15;
+        address owner = vm.addr(deployerPrivateKey);
+        uint8 mode = 0;
 
         console.log("Deploying EmergencyGateWithRoles");
         console.log("Vault:", vault);

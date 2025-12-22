@@ -81,73 +81,108 @@ def value_options_vault_positions(
     w3: Web3,
     chainlink_abi: list,
     wrapper_abi: list,
+    erc20_abi: list,
     maker_wallet: str,
+    escrow_address: str,
+    underlying_address: str,
     oracles: Dict[str, str],
     wrapper_address: str,
-    wrapper_underlying_oracle: str,
+    wrapper_underlying_oracle: Optional[str],
     risk_free_rate: float = 0.0,
     default_iv: float = 0.80,
     short_as_liability: bool = True,
-    api_timeout: int = 10
+    api_timeout: int = 10,
+    rysk_api_base: str = "https://v12.rysk.finance",
+    use_rysk_index_price: bool = False,
+    underlying_symbol: str = "WETH"
 ) -> int:
     """
-    Value all Rysk options positions for a maker wallet.
+    Value all Rysk options positions for a maker wallet plus underlying token balance.
+
+    Total Value = Underlying Balance (escrow) + oToken Positions Value (maker wallet)
 
     Workflow:
-    1. Fetch positions from Rysk API
-    2. Fetch IV from Rysk inventory API
-    3. For each position:
-       - Get spot price from Chainlink oracle
+    1. Read underlying token balance from escrow
+    2. Fetch oToken positions from Rysk API
+    3. Fetch IV from Rysk inventory API
+    4. For each position:
+       - Get spot price from Chainlink oracle OR Rysk index price (testnet)
        - Calculate time to expiry
        - Get IV from inventory or use default
        - Calculate Black-Scholes price
        - Apply SHORT/LONG direction
-    4. Sum all position values in USD
-    5. Convert USD → underlying using Chainlink
-    6. Convert underlying → wrapper shares
+    5. Sum all position values in USD + underlying balance
+    6. Convert USD → underlying using Chainlink OR Rysk index price (testnet)
+    7. Convert underlying → wrapper shares
 
     Args:
         w3: Web3 instance
         chainlink_abi: Chainlink price feed ABI
         wrapper_abi: ERC4626 wrapper ABI (for convertToShares)
-        maker_wallet: Address holding oToken positions
+        erc20_abi: ERC20 ABI (for balanceOf)
+        maker_wallet: Address holding oToken positions (MPC wallet)
+        escrow_address: Address holding underlying tokens (escrow)
+        underlying_address: Underlying token address (e.g., WETH)
         oracles: Dict mapping symbol (e.g., "HYPE") to Chainlink feed address
         wrapper_address: ERC4626 wrapper address
-        wrapper_underlying_oracle: Chainlink feed for underlying → USD conversion
+        wrapper_underlying_oracle: Chainlink feed for underlying → USD conversion (can be None if use_rysk_index_price=True)
         risk_free_rate: Risk-free rate as decimal (default 0)
         default_iv: Default IV as decimal (default 0.80 = 80%)
         short_as_liability: If True, SHORT positions reduce value (default True)
         api_timeout: API request timeout in seconds (default 10)
+        rysk_api_base: Base URL for Rysk API (default: mainnet v12.rysk.finance)
+        use_rysk_index_price: Use Rysk index price instead of Chainlink oracles (default False, for testnet use True)
+        underlying_symbol: Symbol for underlying in Rysk API for price lookup (default "WETH", used when use_rysk_index_price=True)
 
     Returns:
         Total value in wrapper shares (18 decimals).
-        Returns 0 if no positions or on error.
+        Returns 0 if no balance and no positions.
     """
     now = time.time()
 
-    # 1. Fetch positions from Rysk API
-    logger.info(f"Fetching Rysk positions for {maker_wallet[:10]}...")
-    positions = rysk_api.fetch_maker_positions(maker_wallet, timeout=api_timeout)
+    # 1. Read underlying token balance from maker wallet (MPC holds both WETH and oTokens)
+    underlying_balance_raw = 0
+    try:
+        maker_cs = Web3.to_checksum_address(maker_wallet)
+        underlying_cs = Web3.to_checksum_address(underlying_address)
+        underlying_token = w3.eth.contract(address=underlying_cs, abi=erc20_abi)
+        underlying_balance_raw = int(underlying_token.functions.balanceOf(maker_cs).call())
+        underlying_balance = float(underlying_balance_raw) / 1e18
+        logger.info(f"Maker wallet underlying balance: {underlying_balance:.6f} ({underlying_symbol})")
+    except Exception as e:
+        logger.warning(f"Failed to read underlying balance from maker wallet: {e}")
+        underlying_balance = 0.0
+
+    # 2. Fetch oToken positions from Rysk API
+    logger.info(f"Fetching Rysk positions for {maker_wallet[:10]}... (API: {rysk_api_base})")
+    positions = rysk_api.fetch_maker_positions(
+        maker_wallet,
+        timeout=api_timeout,
+        api_base_url=rysk_api_base
+    )
 
     if not positions:
         logger.info("No oToken positions found")
-        return 0
-
-    logger.info(f"Found {len(positions)} oToken positions")
+        # Continue - we might have underlying balance
+    else:
+        logger.info(f"Found {len(positions)} oToken positions")
 
     # 2. Fetch IV data from Rysk inventory
     logger.info("Fetching Rysk inventory IV data...")
-    inventory_data = rysk_api.fetch_inventory_iv(timeout=api_timeout)
+    inventory_data = rysk_api.fetch_inventory_iv(
+        timeout=api_timeout,
+        api_base_url=rysk_api_base
+    )
 
     if not inventory_data:
         logger.warning("Failed to fetch inventory IV, will use default IV")
 
-    # 3. Value each position
-    total_value_usd = 0.0
+    # 4. Value each oToken position
+    total_options_value_usd = 0.0
     positions_valued = 0
     positions_skipped = 0
 
-    for pos in positions:
+    for pos in (positions or []):
         try:
             # Skip expired positions
             if pos.expiry <= now:
@@ -155,22 +190,37 @@ def value_options_vault_positions(
                 positions_skipped += 1
                 continue
 
-            # Get spot price from Chainlink
-            try:
-                spot_price = get_spot_price_for_symbol(
-                    w3=w3,
-                    chainlink_abi=chainlink_abi,
-                    symbol=pos.underlying_symbol,
-                    oracles=oracles
+            # Get spot price from Chainlink OR Rysk index price (testnet)
+            spot_price = None
+
+            if use_rysk_index_price:
+                # Testnet mode: try Rysk index price first
+                spot_price = rysk_api.get_index_price_from_inventory(
+                    inventory_data, pos.underlying_symbol
                 )
-            except ValueError as e:
-                logger.warning(f"No oracle for {pos.underlying_symbol}, skipping: {e}")
-                positions_skipped += 1
-                continue
-            except RuntimeError as e:
-                logger.error(f"Oracle error for {pos.underlying_symbol}: {e}")
-                positions_skipped += 1
-                continue
+                if spot_price:
+                    logger.debug(f"Using Rysk index price for {pos.underlying_symbol}: ${spot_price:.2f}")
+
+            if spot_price is None:
+                # Mainnet mode OR fallback: use Chainlink oracle
+                try:
+                    spot_price = get_spot_price_for_symbol(
+                        w3=w3,
+                        chainlink_abi=chainlink_abi,
+                        symbol=pos.underlying_symbol,
+                        oracles=oracles
+                    )
+                except (ValueError, RuntimeError) as e:
+                    if use_rysk_index_price:
+                        # In testnet mode, skip positions without prices
+                        logger.warning(f"No price available for {pos.underlying_symbol}, skipping: {e}")
+                        positions_skipped += 1
+                        continue
+                    else:
+                        # In mainnet mode, this is an error
+                        logger.error(f"Oracle error for {pos.underlying_symbol}: {e}")
+                        positions_skipped += 1
+                        continue
 
             # Calculate time to expiry in years
             time_to_expiry = max(0.0, (pos.expiry - now) / (365.25 * 86400))
@@ -204,7 +254,7 @@ def value_options_vault_positions(
                 is_short=is_short
             )
 
-            total_value_usd += position_value
+            total_options_value_usd += position_value
             positions_valued += 1
 
             logger.info(
@@ -222,56 +272,75 @@ def value_options_vault_positions(
 
     logger.info(
         f"Valued {positions_valued} positions, skipped {positions_skipped}. "
-        f"Total USD value: ${total_value_usd:,.2f}"
+        f"Options USD value: ${total_options_value_usd:,.2f}"
     )
 
-    # Handle negative net value (more liabilities than assets)
-    if total_value_usd < 0:
+    # Handle negative options value (more liabilities than assets)
+    if total_options_value_usd < 0:
         logger.warning(
-            f"Net position value is negative (${total_value_usd:,.2f}). "
-            f"SHORT liabilities exceed LONG assets. Returning 0."
+            f"Net options value is negative (${total_options_value_usd:,.2f}). "
+            f"SHORT liabilities exceed LONG assets. Setting options value to 0."
         )
-        return 0
+        total_options_value_usd = 0.0
 
-    if total_value_usd == 0:
-        logger.info("Net position value is zero")
-        return 0
+    # 5. Convert options USD value → underlying amount
+    options_underlying_amount = 0.0
 
-    # 4. Convert USD → underlying assets
-    # Get underlying price in USD
-    try:
-        underlying_price_usd = get_chainlink_price_usd(
-            w3=w3,
-            chainlink_abi=chainlink_abi,
-            feed_address=wrapper_underlying_oracle
-        )
-    except RuntimeError as e:
-        logger.error(f"Cannot convert USD to underlying: {e}")
-        return 0
+    if total_options_value_usd > 0:
+        # Get underlying price in USD for conversion
+        underlying_price_usd = None
 
-    if underlying_price_usd <= 0:
-        logger.error(f"Invalid underlying price: {underlying_price_usd}")
-        return 0
+        if use_rysk_index_price:
+            # Testnet mode: use Rysk index price for underlying
+            underlying_price_usd = rysk_api.get_index_price_from_inventory(
+                inventory_data, underlying_symbol
+            )
+            if underlying_price_usd:
+                logger.debug(f"Using Rysk index price for {underlying_symbol}: ${underlying_price_usd:.2f}")
 
-    # Convert USD value to underlying amount (18 decimals)
-    underlying_amount = total_value_usd / underlying_price_usd
-    underlying_amount_18dec = int(underlying_amount * 10**18)
+        if underlying_price_usd is None and wrapper_underlying_oracle:
+            # Mainnet mode OR fallback: use Chainlink oracle
+            try:
+                underlying_price_usd = get_chainlink_price_usd(
+                    w3=w3,
+                    chainlink_abi=chainlink_abi,
+                    feed_address=wrapper_underlying_oracle
+                )
+            except RuntimeError as e:
+                logger.error(f"Cannot convert USD to underlying: {e}")
+                # Continue with just the underlying balance
+
+        if underlying_price_usd and underlying_price_usd > 0:
+            options_underlying_amount = total_options_value_usd / underlying_price_usd
+            logger.info(
+                f"Options value: ${total_options_value_usd:,.2f} USD → "
+                f"{options_underlying_amount:.6f} underlying @ ${underlying_price_usd:.4f}/unit"
+            )
+        else:
+            logger.warning(f"Invalid underlying price, cannot convert options USD value")
+
+    # 6. Calculate total underlying amount (balance + options value)
+    total_underlying_amount = underlying_balance + options_underlying_amount
+    total_underlying_amount_18dec = int(total_underlying_amount * 10**18)
 
     logger.info(
-        f"Converted ${total_value_usd:,.2f} USD → "
-        f"{underlying_amount:.6f} underlying @ ${underlying_price_usd:.4f}/unit "
-        f"({underlying_amount_18dec} raw)"
+        f"Total underlying: {underlying_balance:.6f} (balance) + {options_underlying_amount:.6f} (options) = "
+        f"{total_underlying_amount:.6f} ({total_underlying_amount_18dec} raw)"
     )
 
-    # 5. Convert underlying → wrapper shares
+    if total_underlying_amount_18dec <= 0:
+        logger.info("Total value is zero")
+        return 0
+
+    # 7. Convert underlying → wrapper shares
     try:
         wrapper_cs = Web3.to_checksum_address(wrapper_address)
         wrapper = w3.eth.contract(address=wrapper_cs, abi=wrapper_abi)
 
-        wrapper_shares = int(wrapper.functions.convertToShares(underlying_amount_18dec).call())
+        wrapper_shares = int(wrapper.functions.convertToShares(total_underlying_amount_18dec).call())
 
         logger.info(
-            f"Converted {underlying_amount_18dec} underlying → "
+            f"Converted {total_underlying_amount_18dec} underlying → "
             f"{wrapper_shares} wrapper shares"
         )
 
@@ -281,7 +350,7 @@ def value_options_vault_positions(
         logger.error(f"Failed to convert to wrapper shares: {e}")
         # Fallback: return underlying amount as shares (assumes 1:1)
         logger.warning("Falling back to 1:1 underlying:shares ratio")
-        return underlying_amount_18dec
+        return total_underlying_amount_18dec
 
 
 # Legacy function for backward compatibility with old config format

@@ -43,6 +43,7 @@ from utils import lending_utils
 from utils import pricing_utils
 from utils import conversion_utils
 from utils import options_utils
+from utils import rysk_api
 
 # Configure logging
 logging.basicConfig(
@@ -159,6 +160,7 @@ class OffchainValuationKeeper:
         self.gas_limit = int(ks.get('gas_limit', 350_000))
         self.max_fee_gwei = float(ks.get('max_fee_gwei', 20.0))
         self.max_priority_gwei = float(ks.get('max_priority_gwei', 2.0))
+        self.gas_buffer_percent = float(ks.get('gas_buffer_percent', 20.0))  # 20% buffer for gas estimation
 
         # Load strategies
         self.strategies: List[StrategyConfig] = []
@@ -740,21 +742,29 @@ class OffchainValuationKeeper:
         Values Rysk oToken positions using Black-Scholes pricing.
 
         Architecture:
-        - Fetches positions from Rysk V12 API (maker wallet)
+        - Fetches positions from Rysk API (configurable: mainnet or testnet)
         - Gets IV from Rysk inventory API
-        - Gets spot prices from Chainlink oracles
+        - Gets spot prices from Chainlink oracles OR Rysk index price (testnet)
         - Calculates option values using Black-Scholes
         - SHORT positions are treated as liabilities (subtracted)
 
         Configuration (extras):
             maker_wallet: Address holding oToken positions (required)
-            oracles: Dict mapping symbol to Chainlink feed address (required)
+            oracles: Dict mapping symbol to Chainlink feed address (required for mainnet, optional for testnet)
                 e.g., {"HYPE": "0xa5a72...", "kHYPE": "0xC66B2..."}
-            wrapper_oracle: Chainlink feed for underlying→USD conversion (required)
+            wrapper_oracle: Chainlink feed for underlying→USD conversion (required unless use_rysk_index_price=true)
             risk_free_bps: Risk-free rate in basis points (default 0)
             default_iv_bps: Default IV in basis points (default 8000 = 80%)
             short_as_liability: Treat SHORT as liability (default true)
             api_timeout: API timeout in seconds (default 10)
+            rysk_api_base: Base URL for Rysk API (default: https://v12.rysk.finance, for testnet use https://rip-testnet.rysk.finance)
+            use_rysk_index_price: Use Rysk index price instead of Chainlink (default false, for testnet use true)
+            underlying_symbol: Symbol for underlying in Rysk API (default "WETH", used when use_rysk_index_price=true)
+            position_cache_ttl: Cache TTL for positions in seconds (default 30)
+            inventory_cache_ttl: Cache TTL for inventory IV data in seconds (default 60)
+            api_max_retries: Max retry attempts for API calls (default 3)
+            api_retry_delay: Initial delay between retries in seconds (default 1.0)
+            api_retry_backoff: Exponential backoff multiplier (default 2.0)
 
         REFACTORED: Uses utils.options_utils ✅
         """
@@ -766,14 +776,21 @@ class OffchainValuationKeeper:
             logger.error(f"[{s.id_text}] Missing 'maker_wallet' in extras")
             return 0
 
+        # Testnet configuration
+        rysk_api_base = extras.get('rysk_api_base', 'https://v12.rysk.finance')
+        use_rysk_index_price = extras.get('use_rysk_index_price', False)
+        underlying_symbol = extras.get('underlying_symbol', 'WETH')
+
+        # Oracles configuration (can be empty for testnet with use_rysk_index_price=true)
         oracles = extras.get('oracles', {})
-        if not oracles:
-            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (symbol → Chainlink feed mapping)")
+        if not oracles and not use_rysk_index_price:
+            logger.error(f"[{s.id_text}] Missing 'oracles' in extras (required unless use_rysk_index_price=true)")
             return 0
 
+        # Wrapper oracle (required for mainnet, optional for testnet)
         wrapper_oracle = extras.get('wrapper_oracle')
-        if not wrapper_oracle:
-            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (Chainlink feed for underlying)")
+        if not wrapper_oracle and not use_rysk_index_price:
+            logger.error(f"[{s.id_text}] Missing 'wrapper_oracle' in extras (required unless use_rysk_index_price=true)")
             return 0
 
         # Optional configuration with defaults
@@ -782,19 +799,52 @@ class OffchainValuationKeeper:
         short_as_liability = extras.get('short_as_liability', True)
         api_timeout = int(extras.get('api_timeout', 10))
 
-        # Value options positions using utils
+        # Cache configuration (reduces API calls)
+        position_cache_ttl = float(extras.get('position_cache_ttl', 30))  # 30 seconds default
+        inventory_cache_ttl = float(extras.get('inventory_cache_ttl', 60))  # 60 seconds default
+
+        # Configure Rysk API cache
+        rysk_api.set_cache_ttl(position_cache_ttl, inventory_cache_ttl)
+
+        # Retry configuration (improves resilience)
+        api_max_retries = int(extras.get('api_max_retries', 3))
+        api_retry_delay = float(extras.get('api_retry_delay', 1.0))
+        api_retry_backoff = float(extras.get('api_retry_backoff', 2.0))
+
+        # Configure Rysk API retry
+        rysk_api.set_retry_config(
+            max_retries=api_max_retries,
+            initial_delay=api_retry_delay,
+            backoff_multiplier=api_retry_backoff
+        )
+
+        logger.info(
+            f"[{s.id_text}] options_vault config: "
+            f"rysk_api={rysk_api_base}, use_rysk_index_price={use_rysk_index_price}, "
+            f"cache_ttl=pos:{position_cache_ttl}s/inv:{inventory_cache_ttl}s, "
+            f"retry={api_max_retries}x/{api_retry_delay}s/{api_retry_backoff}x, "
+            f"escrow={s.escrow[:10]}..., underlying={s.underlying[:10]}..."
+        )
+
+        # Value options positions + underlying balance using utils
         wrapper_shares = options_utils.value_options_vault_positions(
             w3=self.w3,
             chainlink_abi=CHAINLINK_FEED_ABI,
             wrapper_abi=WRAPPER_ABI,
+            erc20_abi=ERC20_ABI,
             maker_wallet=maker_wallet,
+            escrow_address=s.escrow,
+            underlying_address=s.underlying,
             oracles=oracles,
             wrapper_address=self.wrapper_address,
             wrapper_underlying_oracle=wrapper_oracle,
             risk_free_rate=risk_free_rate,
             default_iv=default_iv,
             short_as_liability=short_as_liability,
-            api_timeout=api_timeout
+            api_timeout=api_timeout,
+            rysk_api_base=rysk_api_base,
+            use_rysk_index_price=use_rysk_index_price,
+            underlying_symbol=underlying_symbol
         )
 
         logger.info(
@@ -802,6 +852,9 @@ class OffchainValuationKeeper:
             f"maker_wallet={maker_wallet[:10]}..., "
             f"wrapper_shares={wrapper_shares/1e18:.6f}"
         )
+
+        # Log cache stats periodically
+        rysk_api.get_cache().log_stats()
 
         return int(wrapper_shares)
 
@@ -858,12 +911,33 @@ class OffchainValuationKeeper:
         signed = self.account.sign_message(message)
         return signed.signature
 
+    def _estimate_gas(self, contract_func, gas_buffer_percent: Optional[float] = None) -> int:
+        """
+        Estimate gas for a contract function call with buffer.
+
+        Args:
+            contract_func: The contract function to estimate gas for
+            gas_buffer_percent: Buffer percentage to add (uses configured gas_buffer_percent if None)
+
+        Returns:
+            Estimated gas with buffer, or configured gas_limit on failure
+        """
+        buffer = gas_buffer_percent if gas_buffer_percent is not None else self.gas_buffer_percent
+        try:
+            estimated = contract_func.estimate_gas({'from': self.account.address})
+            buffered = int(estimated * (1 + buffer / 100))
+            logger.debug(f"Gas estimated: {estimated} + {buffer}% buffer = {buffered}")
+            return buffered
+        except Exception as e:
+            logger.debug(f"Gas estimation failed: {e}, using configured gas_limit={self.gas_limit}")
+            return self.gas_limit
+
     def _build_tx_params(self, gas_limit: Optional[int] = None, nonce_offset: int = 0) -> Dict[str, Any]:
         """
         Build transaction parameters with proper nonce and gas handling.
 
         Args:
-            gas_limit: Optional gas limit override
+            gas_limit: Optional gas limit override (use _estimate_gas for dynamic estimation)
             nonce_offset: Offset to add to nonce (for sequential txs in same block)
         """
         # Use 'pending' to include pending transactions in nonce calculation
@@ -905,8 +979,13 @@ class OffchainValuationKeeper:
 
         try:
             adapter = self._adapter(s.adapter)
-            tx = adapter.functions.refreshCachedValuation().build_transaction(
-                self._build_tx_params(gas_limit=100_000, nonce_offset=nonce_offset)
+            refresh_func = adapter.functions.refreshCachedValuation()
+
+            # Estimate gas dynamically with 20% buffer
+            estimated_gas = self._estimate_gas(refresh_func)
+
+            tx = refresh_func.build_transaction(
+                self._build_tx_params(gas_limit=estimated_gas, nonce_offset=nonce_offset)
             )
             signed_tx = self.account.sign_transaction(tx)
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
@@ -952,15 +1031,21 @@ class OffchainValuationKeeper:
 
             signature = self._sign_update(escrow_total_id, total_value, s.confidence, nonce, expiry)
 
-            # No nonce_offset needed - chain state already reflects confirmed txs
-            tx = self.valuer.functions.updateValue(
+            # Build contract function for gas estimation
+            update_func = self.valuer.functions.updateValue(
                 escrow_total_id,
                 total_value,
                 s.confidence,
                 nonce,
                 expiry,
                 [signature]
-            ).build_transaction(self._build_tx_params())
+            )
+
+            # Estimate gas dynamically with 20% buffer
+            estimated_gas = self._estimate_gas(update_func)
+
+            # No nonce_offset needed - chain state already reflects confirmed txs
+            tx = update_func.build_transaction(self._build_tx_params(gas_limit=estimated_gas))
 
             signed_tx = self.account.sign_transaction(tx)
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
@@ -1004,15 +1089,21 @@ class OffchainValuationKeeper:
 
             signature = self._sign_update(strategy_id, value, s.confidence, nonce, expiry)
 
-            # Build and send transaction
-            tx = self.valuer.functions.updateValue(
+            # Build contract function for gas estimation
+            update_func = self.valuer.functions.updateValue(
                 strategy_id,
                 value,
                 s.confidence,
                 nonce,
                 expiry,
                 [signature]
-            ).build_transaction(self._build_tx_params())
+            )
+
+            # Estimate gas dynamically with 20% buffer
+            estimated_gas = self._estimate_gas(update_func)
+
+            # Build and send transaction
+            tx = update_func.build_transaction(self._build_tx_params(gas_limit=estimated_gas))
 
             signed_tx = self.account.sign_transaction(tx)
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)

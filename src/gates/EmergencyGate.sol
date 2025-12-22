@@ -11,7 +11,7 @@ import "../interfaces/IGate.sol";
 /// @dev CRITICAL: Gates must not consume excessive gas
 ///
 /// SECURITY FEATURES:
-/// - Multi-mode operation: NORMAL (allow all), DEPOSIT_ONLY (block withdrawals), EMERGENCY (block all)
+/// - Multi-mode operation: NORMAL (allow all), DEPOSITS_PAUSED (block deposits), WITHDRAWALS_PAUSED (block withdrawals), EMERGENCY (block all)
 /// - Owner-based access control with ownership transfer
 /// - Exception list for emergency operations (e.g., allow specific addresses during emergency)
 /// - Event emission for transparency and monitoring
@@ -19,8 +19,8 @@ import "../interfaces/IGate.sol";
 ///
 /// USE CASES:
 /// 1. Normal Operations: mode = NORMAL, all operations allowed
-/// 2. Block New Deposits: mode = DEPOSIT_ONLY, deposits blocked, withdrawals allowed
-/// 3. Block Withdrawals: mode = WITHDRAWAL_ONLY, deposits allowed, withdrawals blocked
+/// 2. Block New Deposits: mode = DEPOSITS_PAUSED, deposits blocked, withdrawals allowed
+/// 3. Block Withdrawals: mode = WITHDRAWALS_PAUSED, deposits allowed, withdrawals blocked
 /// 4. Complete Lockdown: mode = EMERGENCY, all operations blocked
 /// 5. Selective Access: mode = EMERGENCY + exceptions list for authorized addresses
 ///
@@ -35,10 +35,10 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
     /* TYPES */
 
     enum Mode {
-        NORMAL,           // All operations allowed
-        DEPOSIT_ONLY,     // Block new deposits, allow withdrawals
-        WITHDRAWAL_ONLY,  // Allow deposits, block withdrawals
-        EMERGENCY         // Block all operations
+        NORMAL,             // All operations allowed
+        DEPOSITS_PAUSED,    // Deposits blocked, withdrawals allowed
+        WITHDRAWALS_PAUSED, // Withdrawals blocked, deposits allowed
+        EMERGENCY           // All operations blocked
     }
 
     /* IMMUTABLES */
@@ -165,8 +165,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false; 
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;
+        if (mode == Mode.DEPOSITS_PAUSED) return false;  // Block deposits
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
@@ -181,8 +181,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;  // Allow withdrawals and transfers
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;  // Allow sending shares (for transfers, not withdrawals - vault handles withdrawal blocking differently)
+        if (mode == Mode.DEPOSITS_PAUSED) return true;  // Allow withdrawals and transfers
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;  // Allow sending shares (for transfers)
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
@@ -198,8 +198,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return true;
-        if (mode == Mode.WITHDRAWAL_ONLY) return false;
+        if (mode == Mode.DEPOSITS_PAUSED) return true;  // Allow withdrawals
+        if (mode == Mode.WITHDRAWALS_PAUSED) return false;  // Block withdrawals
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
@@ -214,8 +214,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         // Check mode
         if (mode == Mode.NORMAL) return true;
-        if (mode == Mode.DEPOSIT_ONLY) return false;  // Block deposits -> block sending assets
-        if (mode == Mode.WITHDRAWAL_ONLY) return true;  // Allow deposits -> allow sending assets
+        if (mode == Mode.DEPOSITS_PAUSED) return false;  // Block deposits
+        if (mode == Mode.WITHDRAWALS_PAUSED) return true;  // Allow deposits
         if (mode == Mode.EMERGENCY) return false;  // Block everything
 
         return false;  // Default: block
@@ -226,8 +226,8 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
     /// @notice Get current mode as string for easier debugging
     function getModeString() external view returns (string memory) {
         if (mode == Mode.NORMAL) return "NORMAL";
-        if (mode == Mode.DEPOSIT_ONLY) return "DEPOSIT_ONLY";
-        if (mode == Mode.WITHDRAWAL_ONLY) return "WITHDRAWAL_ONLY";
+        if (mode == Mode.DEPOSITS_PAUSED) return "DEPOSITS_PAUSED";
+        if (mode == Mode.WITHDRAWALS_PAUSED) return "WITHDRAWALS_PAUSED";
         if (mode == Mode.EMERGENCY) return "EMERGENCY";
         return "UNKNOWN";
     }
@@ -250,10 +250,10 @@ contract EmergencyGate is IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGat
 
         if (mode == Mode.NORMAL) {
             return (true, true, true);
-        } else if (mode == Mode.DEPOSIT_ONLY) {
-            return (false, true, false);
-        } else if (mode == Mode.WITHDRAWAL_ONLY) {
-            return (true, false, true);
+        } else if (mode == Mode.DEPOSITS_PAUSED) {
+            return (false, true, true);  // Deposits blocked, withdrawals & transfers allowed
+        } else if (mode == Mode.WITHDRAWALS_PAUSED) {
+            return (true, false, true);  // Withdrawals blocked, deposits & transfers allowed
         } else if (mode == Mode.EMERGENCY) {
             return (false, false, false);
         }
