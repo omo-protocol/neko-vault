@@ -45,6 +45,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     uint256 public emergencyMinConfidence = 50;
 
+    mapping(address => bool) public isKeeper;
+
     /* MODIFIERS */
 
     modifier onlyOwner() {
@@ -54,6 +56,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     modifier notEmergency() {
         if (emergencyMode) revert EmergencyMode();
+        _;
+    }
+
+    modifier onlyOwnerOrKeeper() {
+        if (msg.sender != owner && !isKeeper[msg.sender]) revert NotAuthorized();
         _;
     }
 
@@ -75,7 +82,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override onlyOwner notEmergency {
+    ) external override onlyOwnerOrKeeper notEmergency {
         if (registeredEscrowTotals[strategyId] != address(0)) {
             revert CannotUpdateReservedEscrowTotal();
         }
@@ -220,7 +227,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 nonce,
         uint256 expiry,
         bytes[] calldata signatures
-    ) external override onlyOwner notEmergency {
+    ) external override onlyOwnerOrKeeper notEmergency {
         if (strategyIds.length != values.length ||
             strategyIds.length != confidences.length) {
             revert ArrayLengthMismatch();
@@ -305,12 +312,20 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /* ADMIN FUNCTIONS */
 
+    /// @notice Set keeper status for an address
+    /// @param account Address to update
+    /// @param newIsKeeper Whether the address should be a keeper
+    function setIsKeeper(address account, bool newIsKeeper) external onlyOwner {
+        isKeeper[account] = newIsKeeper;
+        emit SetIsKeeper(account, newIsKeeper);
+    }
+
     /// @notice Initiate signer configuration change (step 1 of 2-step process)
     function initiateSignerChange(
         address signer,
         bool authorized,
         uint256 weight
-    ) external onlyOwner {
+    ) external onlyOwnerOrKeeper {
         if (!authorized && signers[signer].authorized) {
             signerChangeTimestamp[signer] = block.timestamp + SIGNER_TIMELOCK;
             pendingSignerRemoval[signer] = true;
@@ -357,7 +372,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 maxStaleness,
         uint256 pushThreshold,
         uint256 minConfidence
-    ) external onlyOwner {
+    ) external onlyOwnerOrKeeper {
         if (minUpdateInterval < MIN_UPDATE_INTERVAL) revert UpdateTooFrequent();
         if (maxStaleness > MAX_STALENESS) revert ValueTooStale();
         if (pushThreshold > MAX_PRICE_CHANGE_BPS) revert InvalidPriceChangeBounds();
@@ -438,13 +453,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @notice Toggle emergency mode
-    function setEmergencyMode(bool enabled) external onlyOwner {
+    function setEmergencyMode(bool enabled) external onlyOwnerOrKeeper {
         emergencyMode = enabled;
         emit EmergencyModeToggled(enabled);
     }
 
     /// @notice Force update a value in emergency
-    function emergencyUpdate(bytes32 strategyId, uint256 value) external onlyOwner {
+    function emergencyUpdate(bytes32 strategyId, uint256 value) external onlyOwnerOrKeeper {
         if (!emergencyMode) revert NotInEmergencyMode();
 
         latestReports[strategyId] = ValueReport({

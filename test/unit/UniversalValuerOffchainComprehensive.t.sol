@@ -639,6 +639,180 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.stopPrank();
     }
 
+    /* KEEPER ROLE TESTS */
+
+    function testSetIsKeeper() public {
+        address keeper = address(0x123);
+
+        // Initially not a keeper
+        assertFalse(valuer.isKeeper(keeper));
+
+        // Owner can set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        assertTrue(valuer.isKeeper(keeper));
+
+        // Owner can revoke keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, false);
+
+        assertFalse(valuer.isKeeper(keeper));
+    }
+
+    function testSetIsKeeperUnauthorized() public {
+        address keeper = address(0x123);
+
+        vm.prank(unauthorized);
+        vm.expectRevert(IUniversalValuerOffchain.NotAuthorized.selector);
+        valuer.setIsKeeper(keeper, true);
+    }
+
+    function testKeeperCanCallUpdateValue() public {
+        address keeper = address(0x456);
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Keeper can call updateValue
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
+
+        vm.prank(keeper);
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures);
+
+        // Verify value was updated
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+    }
+
+    function testKeeperCanCallConfigureStrategy() public {
+        address keeper = address(0x456);
+        bytes32 newStrategy = keccak256("NEW_STRATEGY");
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Keeper can call configureStrategy
+        vm.prank(keeper);
+        valuer.configureStrategy(newStrategy, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 95);
+    }
+
+    function testKeeperCanCallInitiateSignerChange() public {
+        address keeper = address(0x456);
+        address newSigner = address(0x789);
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Keeper can call initiateSignerChange
+        vm.prank(keeper);
+        valuer.initiateSignerChange(newSigner, true, 50);
+
+        // Verify signer was added
+        assertTrue(valuer.isAuthorizedSigner(newSigner));
+    }
+
+    function testKeeperCanCallSetEmergencyMode() public {
+        address keeper = address(0x456);
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Keeper can enable emergency mode
+        vm.prank(keeper);
+        valuer.setEmergencyMode(true);
+
+        assertTrue(valuer.emergencyMode());
+
+        // Keeper can disable emergency mode
+        vm.prank(keeper);
+        valuer.setEmergencyMode(false);
+
+        assertFalse(valuer.emergencyMode());
+    }
+
+    function testKeeperCanCallEmergencyUpdate() public {
+        address keeper = address(0x456);
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Enable emergency mode first
+        vm.prank(keeper);
+        valuer.setEmergencyMode(true);
+
+        // Keeper can call emergencyUpdate
+        vm.prank(keeper);
+        valuer.emergencyUpdate(STRATEGY_A, 2000e18);
+
+        // Verify value was updated (need to disable emergency mode first to call getValue)
+        vm.prank(keeper);
+        valuer.setEmergencyMode(false);
+
+        assertEq(valuer.getValue(STRATEGY_A), 2000e18);
+    }
+
+    function testKeeperCanCallBatchUpdateValues() public {
+        address keeper = address(0x456);
+
+        // Set keeper
+        vm.prank(owner);
+        valuer.setIsKeeper(keeper, true);
+
+        // Prepare batch update
+        bytes32[] memory strategyIds = new bytes32[](2);
+        strategyIds[0] = STRATEGY_A;
+        strategyIds[1] = STRATEGY_B;
+
+        uint256[] memory values = new uint256[](2);
+        values[0] = 1000e18;
+        values[1] = 2000e18;
+
+        uint256[] memory confidences = new uint256[](2);
+        confidences[0] = 95;
+        confidences[1] = 95;
+
+        uint256 nonce = 1;
+        uint256 expiry = block.timestamp + 1 hours;
+
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
+
+        // Keeper can call batchUpdateValues
+        vm.prank(keeper);
+        valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
+
+        // Verify values were updated
+        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
+        assertEq(valuer.getValue(STRATEGY_B), 2000e18);
+    }
+
+    function testRevokedKeeperCannotCallFunctions() public {
+        address keeper = address(0x456);
+
+        // Set and then revoke keeper
+        vm.startPrank(owner);
+        valuer.setIsKeeper(keeper, true);
+        valuer.setIsKeeper(keeper, false);
+        vm.stopPrank();
+
+        // Revoked keeper cannot call functions
+        vm.startPrank(keeper);
+
+        vm.expectRevert(IUniversalValuerOffchain.NotAuthorized.selector);
+        valuer.setEmergencyMode(true);
+
+        vm.expectRevert(IUniversalValuerOffchain.NotAuthorized.selector);
+        valuer.configureStrategy(STRATEGY_A, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 95);
+
+        vm.stopPrank();
+    }
+
     /* VALUATION HEALTH TESTS */
 
     function testValuationHealthyWithFreshValue() public {

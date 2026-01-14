@@ -72,6 +72,7 @@ interface IUniversalValuerOffchain {
     event EmergencyMinConfidenceUpdated(uint256 newThreshold);
     event StaleStrategySkipped(bytes32 indexed strategyId, uint256 stalenessAge, uint256 maxStaleness);
     event ValuationHealthChecked(address indexed escrow, bool isHealthy, uint256 freshCount, uint256 staleCount);
+    event SetIsKeeper(address indexed account, bool newIsKeeper);
 
     /* STRUCTS - Health Check */
 
@@ -181,4 +182,14 @@ interface IUniversalValuerOffchain {
     /// @param escrow The escrow address
     /// @return healthy True if all strategies have fresh values
     function isValuationHealthy(address escrow) external view returns (bool healthy);
+
+    /// @notice Check if an address is an authorized keeper
+    /// @param account The address to check
+    /// @return True if the address is an authorized keeper
+    function isKeeper(address account) external view returns (bool);
+
+    /// @notice Set keeper status for an address (owner only)
+    /// @param account Address to update
+    /// @param newIsKeeper Whether the address should be a keeper
+    function setIsKeeper(address account, bool newIsKeeper) external;
 }

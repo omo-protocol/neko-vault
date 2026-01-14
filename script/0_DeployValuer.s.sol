@@ -5,8 +5,11 @@ import "forge-std/Script.sol";
 import "../src/valuers/UniversalValuerOffchain.sol";
 
 contract DeployValuer is Script {
-    address asset = 0x5555555555555555555555555555555555555555; // WHYPE
-    bytes32 constant STRATEGY_ID = keccak256("alm-whype-sthype"); // alm-whype-sthype / pt-khype-loop
+    address asset = 0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111;
+    bytes32 constant STRATEGY_ID = keccak256("cmeth-option-vault");
+
+    // Keeper address for automated operations
+    address keeper = 0x7e87BF151c027b6134031d5C7E26cE1376be475e;
 
     function run() public {
         // Load private key
@@ -33,12 +36,16 @@ contract DeployValuer is Script {
         // Set price change bounds (50% max change)
         valuer.setPriceChangeBounds(STRATEGY_ID, 5000);
 
+        // Set keeper for automated operations
+        valuer.setIsKeeper(keeper, true);
+
         vm.stopBroadcast();
 
         console.log("\n=================================================");
         console.log("    VALUER DEPLOYMENT COMPLETE!");
         console.log("=================================================");
         console.log("Valuer deployed:", address(valuer));
+        console.log("Keeper set:", keeper);
         console.log("\n[SUCCESS] Valuer deployed!");
     }
 }
