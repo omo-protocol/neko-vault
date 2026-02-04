@@ -28,6 +28,11 @@ interface Config {
   periodDays: number;
   fromBlock?: number;
   valuerOnly: boolean;
+  mpcWalletAddress?: string;  // MPC wallet holding external assets
+  usdt0Address?: string;      // USDT0 token address for premium tracking
+  isOptionsVault: boolean;    // True for monthly options strategies (shows monthly return)
+  originalDeposit?: string;   // Manual override for original deposit amount (in wei)
+  vaultAgeDays?: number;      // Actual vault age in days (for accurate APR/APY calculation)
 }
 
 // HyperEVM Mainnet defaults from keeper_config_options_vault.json
@@ -40,6 +45,11 @@ const DEFAULT_CONFIG: Config = {
   strategyId: "whype-stack-vault",
   periodDays: 30,
   valuerOnly: false,
+  mpcWalletAddress: "0x2F10b3FF99F507f438A0e338A8dE31af1E0cdCd7",  // MPC wallet holding WHYPE
+  usdt0Address: "0x94e8396e0869C9F2200760aB075A3e6A48E4F050",      // USDT0 token for premium tracking
+  isOptionsVault: true,  // Monthly options strategy from Rysk Finance
+  originalDeposit: "138610000000000000000",  // 138.61 WHYPE (actual deposit for whype-stack-vault)
+  vaultAgeDays: 30,  // Vault has been running for ~30 days (1 month)
 };
 
 // ==================== ABIs ====================
@@ -62,6 +72,8 @@ const VAULT_ABI = [
   "function symbol() view returns (string)",
   "function asset() view returns (address)",
   "function maxRate() view returns (uint64)",
+  "event Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)",
+  "event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)",
 ];
 
 const ESCROW_ABI = [
@@ -149,6 +161,22 @@ interface EscrowTotalInfo {
   isPush: boolean;
 }
 
+interface MPCWalletInfo {
+  address: string;
+  whypeBalance: string;
+  usdt0Balance: string;
+  usdt0AsWhype: string;  // Converted at estimated rate
+}
+
+interface DepositWithdrawSummary {
+  totalDeposits: string;
+  totalWithdrawals: string;
+  netDeposits: string;
+  depositCount: number;
+  withdrawalCount: number;
+  firstDepositTimestamp: number | null;
+}
+
 interface PerformanceMetrics {
   periodStartTimestamp: number;
   periodEndTimestamp: number;
@@ -160,6 +188,17 @@ interface PerformanceMetrics {
   averageAUM: string;
   annualizedYieldPercent: number;
   eventsCount: number;
+  // Deposit-based metrics
+  originalDeposit: string;         // Total net deposits
+  currentAUM: string;              // Current total AUM
+  totalReturnPercent: number;      // (currentAUM - deposit) / deposit * 100
+  totalReturnAmount: string;       // currentAUM - deposit
+  isAnnualizedReliable: boolean;   // true if period > 7 days
+  // Options vault metrics (monthly strategy)
+  isOptionsVault: boolean;         // true for monthly options strategies
+  monthlyReturnPercent: number;    // Return normalized to 30-day period
+  apr: number;                     // Annual Percentage Rate (simple)
+  apy: number;                     // Annual Percentage Yield (compounded monthly)
 }
 
 interface VaultPerformance {
@@ -169,6 +208,8 @@ interface VaultPerformance {
   escrow: EscrowInfo | null;
   strategy: StrategyInfo;
   escrowTotal: EscrowTotalInfo | null;  // ESCROW_TOTAL is the actual AUM source
+  mpcWallet: MPCWalletInfo | null;      // MPC wallet holdings
+  depositSummary: DepositWithdrawSummary | null;  // Deposit/withdrawal history
   valueHistory: ValueHistoryEntry[];
   performance: PerformanceMetrics | null;
 }
@@ -216,6 +257,28 @@ function parseArgs(): Partial<Config> {
       case "--valuer-only":
         parsed.valuerOnly = true;
         break;
+      case "--mpc-wallet":
+        parsed.mpcWalletAddress = next;
+        i++;
+        break;
+      case "--usdt0":
+        parsed.usdt0Address = next;
+        i++;
+        break;
+      case "--options-vault":
+        parsed.isOptionsVault = true;
+        break;
+      case "--no-options-vault":
+        parsed.isOptionsVault = false;
+        break;
+      case "--original-deposit":
+        parsed.originalDeposit = next;
+        i++;
+        break;
+      case "--vault-age":
+        parsed.vaultAgeDays = parseFloat(next);
+        i++;
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -238,10 +301,16 @@ Options:
   --valuer <address>    UniversalValuerOffchain address
   --vault <address>     VaultV2 address (auto-detected from escrow if not provided)
   --escrow <address>    UniversalAdapterEscrow address
-  --strategy-id <id>    Strategy identifier (default: "rysk-options-vault")
+  --strategy-id <id>    Strategy identifier (default: "whype-stack-vault")
   --period-days <n>     Performance calculation period in days (default: 30)
   --from-block <n>      Starting block for event query (auto-calculated if not provided)
   --valuer-only         Only fetch valuer data (skip vault/escrow calls)
+  --mpc-wallet <addr>   MPC wallet address holding external assets
+  --usdt0 <address>     USDT0 token address for premium tracking
+  --options-vault       Treat as monthly options vault (shows monthly return, APR, APY)
+  --no-options-vault    Disable options vault mode
+  --original-deposit <wei>  Override original deposit amount (in wei)
+  --vault-age <days>    Actual vault age in days (for accurate APR/APY)
   --help, -h            Show this help message
 
 Examples:
@@ -296,6 +365,97 @@ async function safeCall<T>(fn: () => Promise<T>, defaultValue: T): Promise<T> {
   } catch {
     return defaultValue;
   }
+}
+
+// Fetch MPC wallet holdings
+async function fetchMPCWalletInfo(
+  provider: JsonRpcProvider,
+  mpcWalletAddress: string,
+  whypeAddress: string,
+  usdt0Address: string | undefined,
+  _whypeDecimals: number  // Reserved for future use
+): Promise<MPCWalletInfo> {
+  const whype = new Contract(whypeAddress, ERC20_ABI, provider);
+  const whypeBalance = await safeCall(() => whype.balanceOf(mpcWalletAddress), 0n);
+
+  let usdt0Balance = 0n;
+  let usdt0AsWhype = "0";
+
+  if (usdt0Address) {
+    const usdt0 = new Contract(usdt0Address, ERC20_ABI, provider);
+    usdt0Balance = await safeCall(() => usdt0.balanceOf(mpcWalletAddress), 0n);
+
+    // USDT0 has 6 decimals, WHYPE has 18 decimals
+    // Assume ~33.3 USDT0 per WHYPE (based on user feedback: 1375 USDT0 ≈ 41.3 WHYPE)
+    // This is an approximation - in production, use an oracle
+    const USDT0_PER_WHYPE = 33.3;
+    const usdt0Value = Number(formatUnits(usdt0Balance, 6));
+    const whypeEquivalent = usdt0Value / USDT0_PER_WHYPE;
+    // Convert to 18 decimals
+    usdt0AsWhype = (BigInt(Math.floor(whypeEquivalent * 1e18))).toString();
+  }
+
+  return {
+    address: mpcWalletAddress,
+    whypeBalance: whypeBalance.toString(),
+    usdt0Balance: usdt0Balance.toString(),
+    usdt0AsWhype,
+  };
+}
+
+// Fetch deposit/withdrawal history from vault events
+async function fetchDepositWithdrawSummary(
+  vault: Contract,
+  fromBlock: number,
+  toBlock: number
+): Promise<DepositWithdrawSummary> {
+  let totalDeposits = 0n;
+  let totalWithdrawals = 0n;
+  let depositCount = 0;
+  let withdrawalCount = 0;
+  let firstDepositTimestamp: number | null = null;
+
+  try {
+    // Fetch Deposit events
+    const depositFilter = vault.filters.Deposit();
+    const depositEvents = await fetchEventsChunked(vault, depositFilter, fromBlock, toBlock, 1000);
+
+    for (const event of depositEvents) {
+      const eventLog = event as EventLog;
+      const decoded = vault.interface.decodeEventLog("Deposit", eventLog.data, eventLog.topics);
+      totalDeposits += BigInt(decoded.assets);
+      depositCount++;
+
+      if (firstDepositTimestamp === null) {
+        const block = await event.getBlock();
+        firstDepositTimestamp = block.timestamp;
+      }
+    }
+
+    // Fetch Withdraw events
+    const withdrawFilter = vault.filters.Withdraw();
+    const withdrawEvents = await fetchEventsChunked(vault, withdrawFilter, fromBlock, toBlock, 1000);
+
+    for (const event of withdrawEvents) {
+      const eventLog = event as EventLog;
+      const decoded = vault.interface.decodeEventLog("Withdraw", eventLog.data, eventLog.topics);
+      totalWithdrawals += BigInt(decoded.assets);
+      withdrawalCount++;
+    }
+  } catch (e) {
+    console.error(`  Warning: Error fetching deposit/withdraw events: ${e}`);
+  }
+
+  const netDeposits = totalDeposits - totalWithdrawals;
+
+  return {
+    totalDeposits: totalDeposits.toString(),
+    totalWithdrawals: totalWithdrawals.toString(),
+    netDeposits: netDeposits.toString(),
+    depositCount,
+    withdrawalCount,
+    firstDepositTimestamp,
+  };
 }
 
 // Chunked event fetching to handle RPC block range limits
@@ -526,7 +686,40 @@ async function fetchVaultPerformance(config: Config): Promise<VaultPerformance> 
     };
   }
 
-  // Calculate performance metrics using ESCROW_TOTAL (actual AUM)
+  // Fetch MPC wallet info if address is provided
+  let mpcWalletInfo: MPCWalletInfo | null = null;
+  if (config.mpcWalletAddress && assetInfo && !config.valuerOnly) {
+    console.error(`  Fetching MPC wallet holdings...`);
+    mpcWalletInfo = await fetchMPCWalletInfo(
+      provider,
+      config.mpcWalletAddress,
+      assetInfo.address,
+      config.usdt0Address,
+      assetInfo.decimals
+    );
+    console.error(`    WHYPE: ${formatUnits(mpcWalletInfo.whypeBalance, assetInfo.decimals)}`);
+    if (config.usdt0Address) {
+      console.error(`    USDT0: ${formatUnits(mpcWalletInfo.usdt0Balance, 6)}`);
+      console.error(`    USDT0 as WHYPE: ${formatUnits(mpcWalletInfo.usdt0AsWhype, assetInfo.decimals)}`);
+    }
+  }
+
+  // Fetch deposit/withdrawal summary
+  // Search deposit history - use a reasonable window to avoid RPC timeouts
+  let depositSummary: DepositWithdrawSummary | null = null;
+  if (vaultInfo && !config.valuerOnly) {
+    console.error(`  Fetching deposit/withdrawal history...`);
+    const vault = new Contract(vaultInfo.address, VAULT_ABI, provider);
+    // Search from ~60 days ago for deposits (balance between coverage and speed)
+    // For truly accurate deposit tracking, consider using an indexer service
+    const depositFromBlock = Math.max(0, currentBlock - blocksPerDay * 60); // 60 days
+    depositSummary = await fetchDepositWithdrawSummary(vault, depositFromBlock, currentBlock);
+    console.error(`    Deposits: ${depositSummary.depositCount} totaling ${formatUnits(depositSummary.totalDeposits, assetInfo?.decimals ?? 18)} ${assetInfo?.symbol ?? ""}`);
+    console.error(`    Withdrawals: ${depositSummary.withdrawalCount} totaling ${formatUnits(depositSummary.totalWithdrawals, assetInfo?.decimals ?? 18)} ${assetInfo?.symbol ?? ""}`);
+    console.error(`    Net Deposits: ${formatUnits(depositSummary.netDeposits, assetInfo?.decimals ?? 18)} ${assetInfo?.symbol ?? ""}`);
+  }
+
+  // Calculate performance metrics using DEPOSIT-BASED returns (fixed formula)
   let performance: PerformanceMetrics | null = null;
 
   if (valueHistory.length > 0) {
@@ -554,20 +747,83 @@ async function fetchVaultPerformance(config: Config): Promise<VaultPerformance> 
     const actualPeriodDays =
       (periodEndTimestamp - Math.max(startEntry.timestamp, periodStartTimestamp)) / 86400;
 
-    let annualizedYieldPercent = 0;
     let valueChangePercent = 0;
-
-    if (averageAUM > 0n && actualPeriodDays > 0) {
-      // valueChangePercent = (valueChange / startValue) * 100
-      if (startValue > 0n) {
-        valueChangePercent = Number((valueChange * 10000n) / startValue) / 100;
-      }
-
-      // annualizedYield = (valueChange / averageAUM) * (365 / days) * 100
-      // Use floating point for final calculation to handle sub-day periods correctly
-      const returnRate = Number(valueChange * 10000n / averageAUM) / 10000; // decimal return
-      annualizedYieldPercent = (returnRate * 365 / actualPeriodDays) * 100;
+    if (startValue > 0n) {
+      valueChangePercent = Number((valueChange * 10000n) / startValue) / 100;
     }
+
+    // ========== FIXED PERFORMANCE CALCULATION ==========
+    // Use net deposits as the baseline (original deposit amount)
+    // This is the KEY FIX: compare current AUM to what was deposited, not short-term fluctuations
+
+    // Determine original deposit amount with fallbacks:
+    // 1. Use manual override from config (most reliable if known)
+    // 2. Use net deposits from vault events
+    // 3. Fallback to earliest recorded value in value history
+    // 4. Fallback to start value of the query period
+    let originalDeposit: bigint;
+    if (config.originalDeposit) {
+      originalDeposit = BigInt(config.originalDeposit);
+      console.error(`  Using configured original deposit: ${formatUnits(originalDeposit.toString(), 18)}`);
+    } else if (depositSummary && BigInt(depositSummary.netDeposits) > 0n) {
+      originalDeposit = BigInt(depositSummary.netDeposits);
+    } else if (valueHistory.length > 0) {
+      // Use the earliest recorded value as proxy for original deposit
+      originalDeposit = BigInt(valueHistory[0].value);
+      console.error(`  Note: Using earliest recorded value (${formatUnits(originalDeposit.toString(), 18)}) as deposit baseline`);
+    } else {
+      originalDeposit = startValue;
+    }
+
+    const currentAUM = endValue;
+    const totalReturnAmount = currentAUM - originalDeposit;
+
+    // Calculate TRUE total return based on deposits
+    let totalReturnPercent = 0;
+    if (originalDeposit > 0n) {
+      totalReturnPercent = Number((totalReturnAmount * 10000n) / originalDeposit) / 100;
+    }
+
+    // Only calculate annualized yield for periods > 7 days
+    // For short periods, annualization produces unrealistic numbers
+    const MIN_DAYS_FOR_ANNUALIZATION = 7;
+    const isAnnualizedReliable = actualPeriodDays >= MIN_DAYS_FOR_ANNUALIZATION;
+
+    let annualizedYieldPercent = 0;
+    if (isAnnualizedReliable && actualPeriodDays > 0) {
+      // Annualize the total return based on actual period
+      annualizedYieldPercent = totalReturnPercent * (365 / actualPeriodDays);
+    } else if (actualPeriodDays > 0) {
+      // For short periods, still calculate but mark as unreliable
+      annualizedYieldPercent = totalReturnPercent * (365 / actualPeriodDays);
+      console.error(`  Warning: Period (${actualPeriodDays.toFixed(1)} days) < ${MIN_DAYS_FOR_ANNUALIZATION} days, annualized yield may be unreliable`);
+    }
+
+    // ========== OPTIONS VAULT METRICS (Monthly Strategy) ==========
+    // Normalize return to 30-day period for monthly options strategies
+    let monthlyReturnPercent = 0;
+    let apr = 0;
+    let apy = 0;
+
+    // Use vault age if configured, otherwise use actual period from data
+    const effectivePeriodDays = config.vaultAgeDays ?? actualPeriodDays;
+
+    if (effectivePeriodDays > 0 && totalReturnPercent !== 0) {
+      // Monthly return: normalize to 30 days
+      monthlyReturnPercent = totalReturnPercent * (30 / effectivePeriodDays);
+
+      // APR: Simple annual rate (monthly return × 12)
+      apr = monthlyReturnPercent * 12;
+
+      // APY: Compounded annual yield ((1 + monthly_return)^12 - 1)
+      const monthlyReturnDecimal = monthlyReturnPercent / 100;
+      apy = (Math.pow(1 + monthlyReturnDecimal, 12) - 1) * 100;
+    }
+
+    if (config.vaultAgeDays) {
+      console.error(`  Using configured vault age: ${config.vaultAgeDays} days`);
+    }
+    // ========== END FIXED CALCULATION ==========
 
     performance = {
       periodStartTimestamp: Math.max(startEntry.timestamp, periodStartTimestamp),
@@ -580,6 +836,17 @@ async function fetchVaultPerformance(config: Config): Promise<VaultPerformance> 
       averageAUM: averageAUM.toString(),
       annualizedYieldPercent,
       eventsCount: valueHistory.length,
+      // Deposit-based metrics
+      originalDeposit: originalDeposit.toString(),
+      currentAUM: currentAUM.toString(),
+      totalReturnPercent,
+      totalReturnAmount: totalReturnAmount.toString(),
+      isAnnualizedReliable,
+      // Options vault metrics
+      isOptionsVault: config.isOptionsVault,
+      monthlyReturnPercent,
+      apr,
+      apy,
     };
   }
 
@@ -590,6 +857,8 @@ async function fetchVaultPerformance(config: Config): Promise<VaultPerformance> 
     escrow: escrowInfo,
     strategy,
     escrowTotal: escrowTotalInfo,
+    mpcWallet: mpcWalletInfo,
+    depositSummary,
     valueHistory,
     performance,
   };
@@ -608,6 +877,9 @@ async function main(): Promise<void> {
   console.error(`  Valuer: ${config.valuerAddress}`);
   if (!config.valuerOnly) {
     console.error(`  Escrow: ${config.escrowAddress}`);
+    if (config.mpcWalletAddress) {
+      console.error(`  MPC Wallet: ${config.mpcWalletAddress}`);
+    }
   }
   console.error("");
 
@@ -667,14 +939,68 @@ async function main(): Promise<void> {
       }
     }
 
-    if (result.performance) {
+    // MPC Wallet holdings
+    if (result.mpcWallet) {
       console.error("");
-      console.error(`Performance (${result.performance.periodDays.toFixed(1)} days):`);
-      console.error(`  Start Value: ${result.performance.startValue} (raw)`);
-      console.error(`  End Value: ${result.performance.endValue} (raw)`);
-      console.error(`  Value Change: ${result.performance.valueChange} (${result.performance.valueChangePercent.toFixed(2)}%)`);
-      console.error(`  Average AUM: ${result.performance.averageAUM} (raw)`);
-      console.error(`  Annualized Yield: ${result.performance.annualizedYieldPercent.toFixed(2)}%`);
+      console.error(`MPC Wallet (${result.mpcWallet.address}):`);
+      console.error(`  WHYPE Balance: ${formatUnits(result.mpcWallet.whypeBalance, result.asset?.decimals ?? 18)} ${result.asset?.symbol ?? ""}`);
+      if (result.mpcWallet.usdt0Balance !== "0") {
+        console.error(`  USDT0 Balance: ${formatUnits(result.mpcWallet.usdt0Balance, 6)} USDT0`);
+        console.error(`  USDT0 as WHYPE: ~${formatUnits(result.mpcWallet.usdt0AsWhype, result.asset?.decimals ?? 18)} ${result.asset?.symbol ?? ""}`);
+      }
+    }
+
+    // Deposit/Withdrawal Summary
+    if (result.depositSummary) {
+      console.error("");
+      console.error(`Deposit Summary:`);
+      console.error(`  Total Deposits: ${formatUnits(result.depositSummary.totalDeposits, result.asset?.decimals ?? 18)} ${result.asset?.symbol ?? ""} (${result.depositSummary.depositCount} txs)`);
+      console.error(`  Total Withdrawals: ${formatUnits(result.depositSummary.totalWithdrawals, result.asset?.decimals ?? 18)} ${result.asset?.symbol ?? ""} (${result.depositSummary.withdrawalCount} txs)`);
+      console.error(`  Net Deposits: ${formatUnits(result.depositSummary.netDeposits, result.asset?.decimals ?? 18)} ${result.asset?.symbol ?? ""}`);
+      if (result.depositSummary.firstDepositTimestamp) {
+        console.error(`  First Deposit: ${new Date(result.depositSummary.firstDepositTimestamp * 1000).toISOString()}`);
+      }
+    }
+
+    if (result.performance) {
+      const decimals = result.asset?.decimals ?? 18;
+      const symbol = result.asset?.symbol ?? "";
+
+      console.error("");
+      console.error(`=== Performance Summary ===`);
+      console.error(`Original Deposit: ${formatUnits(result.performance.originalDeposit, decimals)} ${symbol}`);
+      console.error(`Current AUM: ${formatUnits(result.performance.currentAUM, decimals)} ${symbol}`);
+
+      const returnSign = BigInt(result.performance.totalReturnAmount) >= 0n ? "+" : "";
+      console.error(`Total Return: ${returnSign}${formatUnits(result.performance.totalReturnAmount, decimals)} ${symbol} (${returnSign}${result.performance.totalReturnPercent.toFixed(2)}%)`);
+      console.error(`Period: ${result.performance.periodDays.toFixed(1)} days`);
+
+      // Options Vault: Show Monthly Return, APR, APY as primary metrics
+      if (result.performance.isOptionsVault) {
+        console.error("");
+        console.error(`=== Monthly Options Strategy Metrics ===`);
+        const monthlySign = result.performance.monthlyReturnPercent >= 0 ? "+" : "";
+        console.error(`Monthly Return (30d): ${monthlySign}${result.performance.monthlyReturnPercent.toFixed(2)}%`);
+        console.error(`APR (simple annual): ${result.performance.apr.toFixed(2)}%`);
+        console.error(`APY (compounded):    ${result.performance.apy.toFixed(2)}%`);
+        console.error("");
+        console.error(`Note: Monthly options returns are variable. Past performance`);
+        console.error(`      does not guarantee future results.`);
+      } else {
+        // Non-options vault: show annualized yield
+        if (result.performance.isAnnualizedReliable) {
+          console.error(`Annualized Yield: ${result.performance.annualizedYieldPercent.toFixed(2)}%`);
+        } else {
+          console.error(`Annualized Yield: ${result.performance.annualizedYieldPercent.toFixed(2)}% (unreliable - period < 7 days)`);
+        }
+      }
+
+      console.error("");
+      console.error(`Raw Performance Data (${result.performance.periodDays.toFixed(1)} days):`);
+      console.error(`  Start Value: ${formatUnits(result.performance.startValue, decimals)} ${symbol}`);
+      console.error(`  End Value: ${formatUnits(result.performance.endValue, decimals)} ${symbol}`);
+      console.error(`  Value Change: ${formatUnits(result.performance.valueChange, decimals)} ${symbol} (${result.performance.valueChangePercent.toFixed(2)}%)`);
+      console.error(`  Average AUM: ${formatUnits(result.performance.averageAUM, decimals)} ${symbol}`);
       console.error(`  Events in Period: ${result.performance.eventsCount}`);
     } else {
       console.error("");
