@@ -48,7 +48,7 @@ const DEFAULT_CONFIG: Config = {
   mpcWalletAddress: "0x2F10b3FF99F507f438A0e338A8dE31af1E0cdCd7",  // MPC wallet holding WHYPE
   usdt0Address: "0x94e8396e0869C9F2200760aB075A3e6A48E4F050",      // USDT0 token for premium tracking
   isOptionsVault: true,  // Monthly options strategy from Rysk Finance
-  originalDeposit: "138610000000000000000",  // 138.61 WHYPE (actual deposit for whype-stack-vault)
+  originalDeposit: "184233000000000000000",  // 184.233 WHYPE (from Allocate events)
   vaultAgeDays: 30,  // Vault has been running for ~30 days (1 month)
 };
 
