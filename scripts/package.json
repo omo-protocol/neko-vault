@@ -1,0 +1,18 @@
+{
+  "name": "vault-v2-scripts",
+  "version": "1.0.0",
+  "description": "TypeScript scripts for vault-v2 operations",
+  "scripts": {
+    "fetch-performance": "ts-node fetch-vault-performance.ts",
+    "fetch-performance:7d": "ts-node fetch-vault-performance.ts --period-days 7",
+    "fetch-performance:30d": "ts-node fetch-vault-performance.ts --period-days 30"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}
