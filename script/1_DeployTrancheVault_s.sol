@@ -7,6 +7,7 @@ import "../src/VaultV2Factory.sol";
 import "../src/adapters/UniversalAdapterEscrow.sol";
 import "../src/adapters/UniversalAdapterEscrowFactory.sol";
 import "../src/valuers/UniversalValuerOffchain.sol";
+import "../src/libraries/ConstantsLib.sol";
 import {IVaultV2} from "../src/interfaces/IVaultV2.sol";
 import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 
@@ -91,6 +92,17 @@ contract DeployPTLoopVault is Script {
         vault.setCurator(deployer);
         console.log("  Curator set:", deployer);
 
+        // Step 4: Set deployer as allocator (required for setMaxRate)
+        console.log("\n[Step 4] Setting allocator...");
+        vault.submit(abi.encodeCall(IVaultV2.setIsAllocator, (deployer, true)));
+        vault.setIsAllocator(deployer, true);
+        console.log("  Allocator set:", deployer);
+
+        // Step 5: Set maxRate to MAX_MAX_RATE (200% APR)
+        console.log("\n[Step 5] Setting maxRate...");
+        vault.setMaxRate(MAX_MAX_RATE);
+        console.log("  maxRate set to MAX_MAX_RATE:", MAX_MAX_RATE);
+
         vm.stopBroadcast();
 
         // Final status
@@ -100,5 +112,9 @@ contract DeployPTLoopVault is Script {
         console.log("\nDeployed Contracts:");
         console.log("  VaultV2:", address(vault));
         console.log("  UniversalAdapterEscrow:", address(adapter));
+        console.log("\nConfiguration:");
+        console.log("  Curator:", deployer);
+        console.log("  Allocator:", deployer);
+        console.log("  maxRate:", vault.maxRate(), "(200% APR)");
     }
 }

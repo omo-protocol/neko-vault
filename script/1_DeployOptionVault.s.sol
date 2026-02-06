@@ -7,6 +7,7 @@ import "../src/VaultV2Factory.sol";
 import "../src/adapters/UniversalAdapterEscrow.sol";
 import "../src/adapters/UniversalAdapterEscrowFactory.sol";
 import "../src/valuers/UniversalValuerOffchain.sol";
+import "../src/libraries/ConstantsLib.sol";
 import {IVaultV2} from "../src/interfaces/IVaultV2.sol";
 import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 
@@ -32,12 +33,12 @@ import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdap
  */
 contract DeployPTLoopVault is Script {
     // Strategy IDs
-    bytes32 constant STRATEGY_ID = keccak256("hype-stack-vault");
+    bytes32 constant STRATEGY_ID = keccak256("fxrp-stack-vault-low-risk");
     // Asset configuration
-    address asset = 0xfD739d4e423301CE9385c1fb8850539D657C296D; // KHYPE
-    address vaultFactoryAddress = 0x8B9683393356EF81c4f1B639EB218EB649Ae0B38; // config to vault factory address
-    address adapterFactoryAddress = 0x448853b8FDA515464aE5CD512C1759581e3c1062; // config to adapter factory address
-    address valuerAddress = 0x0B94EB87a201B659Def509B54239D19A8A5f595A; // config to valuer address
+    address asset = 0xd70659a6396285BF7214d7Ea9673184e7C72E07E;
+    address vaultFactoryAddress = 0x7D0a9BC5eD2183BCFc61e609621C942519b25025; // config to vault factory address
+    address adapterFactoryAddress = 0xA98B486F2cf6eFdd03d00B0aa3140665C30d2a82; // config to adapter factory address
+    address valuerAddress = 0x89D09ceF07a65fEd30cAF33AF7D4C8B2121B9c29; // config to valuer address
 
     function run() public {
         // Load private key
@@ -91,6 +92,17 @@ contract DeployPTLoopVault is Script {
         vault.setCurator(deployer);
         console.log("  Curator set:", deployer);
 
+        // Step 4: Set deployer as allocator (required for setMaxRate)
+        console.log("\n[Step 4] Setting allocator...");
+        vault.submit(abi.encodeCall(IVaultV2.setIsAllocator, (deployer, true)));
+        vault.setIsAllocator(deployer, true);
+        console.log("  Allocator set:", deployer);
+
+        // Step 5: Set maxRate to MAX_MAX_RATE (200% APR)
+        console.log("\n[Step 5] Setting maxRate...");
+        vault.setMaxRate(MAX_MAX_RATE);
+        console.log("  maxRate set to MAX_MAX_RATE:", MAX_MAX_RATE);
+
         vm.stopBroadcast();
 
         // Final status
@@ -100,5 +112,9 @@ contract DeployPTLoopVault is Script {
         console.log("\nDeployed Contracts:");
         console.log("  VaultV2:", address(vault));
         console.log("  UniversalAdapterEscrow:", address(adapter));
+        console.log("\nConfiguration:");
+        console.log("  Curator:", deployer);
+        console.log("  Allocator:", deployer);
+        console.log("  maxRate:", vault.maxRate(), "(200% APR)");
     }
 }
