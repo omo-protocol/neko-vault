@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.0;
 
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IVaultV2} from "./interfaces/IVaultV2.sol";
 import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
@@ -29,8 +30,7 @@ import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
  *      - Wrapper holds vault shares, users hold receipt tokens
  *      - Non-custodial guarantees via forceDeallocate
  */
-contract VaultTimeLockWrapper {
-
+contract VaultTimeLockWrapper is ReentrancyGuard {
     // ============================================
     // STATE VARIABLES
     // ============================================
@@ -119,7 +119,7 @@ contract VaultTimeLockWrapper {
      * @param assets Amount of underlying assets to deposit
      * @return vTokens Amount of receipt tokens minted
      */
-    function deposit(uint256 assets) external returns (uint256 vTokens) {
+    function deposit(uint256 assets) external nonReentrant returns (uint256 vTokens) {
         return _depositInternal(assets, msg.sender, msg.sender);
     }
 
@@ -130,7 +130,7 @@ contract VaultTimeLockWrapper {
      * @param onBehalf Address to receive vTokens
      * @return vTokens Amount of receipt tokens minted
      */
-    function depositFor(uint256 assets, address onBehalf) external returns (uint256 vTokens) {
+    function depositFor(uint256 assets, address onBehalf) external nonReentrant returns (uint256 vTokens) {
         if (!canDepositFor[onBehalf][msg.sender]) revert NotApprovedForDeposit();
         return _depositInternal(assets, msg.sender, onBehalf);
     }
@@ -178,7 +178,7 @@ contract VaultTimeLockWrapper {
     /**
      * @notice Mint specific amount of vault shares and receive vTokens
      */
-    function mint(uint256 shares) external returns (uint256 assets) {
+    function mint(uint256 shares) external nonReentrant returns (uint256 assets) {
         if (shares == 0) revert ZeroAmount();
 
         // SECURITY FIX: Check batch limit
@@ -232,6 +232,7 @@ contract VaultTimeLockWrapper {
      */
     function withdraw(uint256 assets, address receiver, address onBehalf)
         external
+        nonReentrant
         returns (uint256 vTokensBurned)
     {
         if (receiver == address(0)) revert ZeroAddress();
@@ -268,6 +269,7 @@ contract VaultTimeLockWrapper {
      */
     function redeem(uint256 vTokens, address receiver, address onBehalf)
         external
+        nonReentrant
         returns (uint256 assets)
     {
         if (receiver == address(0)) revert ZeroAddress();
@@ -367,13 +369,12 @@ contract VaultTimeLockWrapper {
         address adapter,
         bytes memory data,
         uint256 assets
-    ) external returns (uint256 penaltyShares) {
+    ) external nonReentrant returns (uint256 penaltyShares) {
         if (balanceOf[msg.sender] == 0) revert InsufficientBalance();
 
         // SECURITY FIX: Approve vault for penalty shares before forceDeallocate
         // forceDeallocate internally calls withdraw(penaltyAssets, vault, wrapper)
         // which requires wrapper to approve vault for the penalty shares
-        uint256 vaultBalanceBefore = vault.balanceOf(address(this));
         vault.approve(address(vault), type(uint256).max);
 
         // Step 1: Force deallocate from adapter (charges penalty)
@@ -437,7 +438,7 @@ contract VaultTimeLockWrapper {
      * @notice Transfer vTokens to another address
      * @dev SECURITY FIX: Maintains proper FIFO ordering during transfers
      */
-    function transfer(address to, uint256 amount) external returns (bool) {
+    function transfer(address to, uint256 amount) external nonReentrant returns (bool) {
         if (to == address(0)) revert ZeroAddress();
         _transferWithBatches(msg.sender, to, amount);
         return true;
@@ -446,7 +447,7 @@ contract VaultTimeLockWrapper {
     /**
      * @notice Transfer vTokens from one address to another (requires approval)
      */
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) external nonReentrant returns (bool) {
         if (to == address(0)) revert ZeroAddress();
 
         // Check and update allowance
@@ -614,7 +615,7 @@ contract VaultTimeLockWrapper {
         uint256 amount,
         uint256 depositTime,
         uint256 unlockTime,
-        bool isUnlocked
+        bool unlocked
     ) {
         require(index < userDeposits[user].length, "Index out of bounds");
 
@@ -622,7 +623,7 @@ contract VaultTimeLockWrapper {
         amount = batch.amount;
         depositTime = batch.depositTime;
         unlockTime = depositTime + LOCK_PERIOD;
-        isUnlocked = block.timestamp >= unlockTime;
+        unlocked = block.timestamp >= unlockTime;
     }
 
     /**
