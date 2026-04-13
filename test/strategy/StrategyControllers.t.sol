@@ -718,11 +718,28 @@ contract StrategyControllersTest is Test {
             ""
         );
 
+        uint64 maxAllowedTimestamp = uint64(block.timestamp + store.MAX_CLOCK_SKEW());
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RemotePpsSnapshotStore.FutureSnapshotTimestamp.selector,
+                30_102,
+                maxAllowedTimestamp + 1,
+                maxAllowedTimestamp
+            )
+        );
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 2}),
+            bytes32("pps-future"),
+            abi.encode(uint256(250e6), maxAllowedTimestamp + 1),
+            address(0),
+            ""
+        );
+
         vm.expectRevert(
             abi.encodeWithSelector(RemotePpsSnapshotStore.StaleSnapshotTimestamp.selector, 30_102, firstTimestamp - 1, firstTimestamp)
         );
         store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 2}),
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 3}),
             bytes32("pps-2"),
             abi.encode(uint256(200e6), firstTimestamp - 1),
             address(0),

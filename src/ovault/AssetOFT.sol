@@ -39,4 +39,9 @@ contract AssetOFT is OFT {
         super.transferOwnership(newOwner);
         endpoint.setDelegate(newOwner);
     }
+
+    function renounceOwnership() public override onlyOwner {
+        super.renounceOwnership();
+        endpoint.setDelegate(address(0));
+    }
 }

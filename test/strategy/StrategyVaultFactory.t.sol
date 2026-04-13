@@ -12,9 +12,12 @@ import {CoreWriter} from "../../src/controllers/venue_specific/hyperliquid/CoreW
 import {L1Read} from "../../src/controllers/venue_specific/hyperliquid/L1Read.sol";
 import {StrategyVaultFactory} from "../../src/factories/StrategyVaultFactory.sol";
 import {AssetOFT} from "../../src/ovault/AssetOFT.sol";
+import {ShareOFT} from "../../src/ovault/ShareOFT.sol";
 import {ShareOFTAdapter} from "../../src/ovault/ShareOFTAdapter.sol";
 import {VaultComposerSync} from "../../src/ovault/VaultComposerSync.sol";
 import {VaultTimeLockWrapper} from "../../src/VaultTimeLockWrapper.sol";
+import {SendParam} from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
+import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
 import {
     ChainManifest,
     DeltaNeutralAutomationConfig,
@@ -246,6 +249,89 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(ShareOFTAdapter(shareAdapter).sharedDecimals(), 4);
         assertEq(VaultComposerSync(vaultComposer).ASSET_OFT(), address(omnichainAssetOFT));
         assertEq(VaultComposerSync(vaultComposer).SHARE_OFT(), shareAdapter);
+    }
+
+    function testOmnichainOAppsResetDelegateOnRenounceOwnership() public {
+        MockEndpointV2 assetEndpoint = new MockEndpointV2(30_184);
+        AssetOFT localAssetOFT = new AssetOFT("Omnichain USDC", "oUSDC", address(assetEndpoint), owner);
+
+        vm.prank(owner);
+        localAssetOFT.transferOwnership(curator);
+        assertEq(assetEndpoint.delegate(), curator);
+
+        vm.prank(curator);
+        localAssetOFT.renounceOwnership();
+        assertEq(localAssetOFT.owner(), address(0));
+        assertEq(assetEndpoint.delegate(), address(0));
+
+        MockEndpointV2 shareEndpoint = new MockEndpointV2(30_184);
+        ShareOFT localShareOFT = new ShareOFT("Vault Share", "vSHARE", address(shareEndpoint), owner);
+
+        vm.prank(owner);
+        localShareOFT.transferOwnership(curator);
+        assertEq(shareEndpoint.delegate(), curator);
+
+        vm.prank(curator);
+        localShareOFT.renounceOwnership();
+        assertEq(localShareOFT.owner(), address(0));
+        assertEq(shareEndpoint.delegate(), address(0));
+
+        MockEndpointV2 adapterEndpoint = new MockEndpointV2(30_184);
+        MockERC20 shareToken = new MockERC20("Vault Share", "vSHARE", 18);
+        ShareOFTAdapter localShareAdapter = new ShareOFTAdapter(address(shareToken), address(adapterEndpoint), owner);
+
+        vm.prank(owner);
+        localShareAdapter.transferOwnership(curator);
+        assertEq(adapterEndpoint.delegate(), curator);
+
+        vm.prank(curator);
+        localShareAdapter.renounceOwnership();
+        assertEq(localShareAdapter.owner(), address(0));
+        assertEq(adapterEndpoint.delegate(), address(0));
+    }
+
+    function testVaultComposerRejectsNonCanonicalComposeFrom() public {
+        DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: false,
+            enableOmnichainVault: true,
+            asset: address(omnichainAssetOFT),
+            valuer: address(valuer),
+            name: "Delta Neutral Vault",
+            symbol: "ldn",
+            strategyIdData: bytes("hyperliquid-dn-omni-compose"),
+            spotSideMode: SpotSideMode.Hold,
+            targetReserveBps: 2_000,
+            maxDeltaBps: 250,
+            kellyConfig: _defaultKellyConfig(),
+            automationConfig: _defaultDeltaAutomationConfig(),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("delta-omni-compose"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: HYPERLIQUID_VENUE_ID,
+                venue: address(coreWriter),
+                helper: address(l1Read),
+                usesLayerZero: false
+            }),
+            chainManifests: _homeManifestWithAssetOFT(address(omnichainAssetOFT))
+        });
+
+        Deployment memory deployment = childFactory.createDeltaNeutralVault(params);
+        VaultComposerSync composer = VaultComposerSync(childFactory.vaultComposerSyncOf(deployment.vault));
+        bytes32 invalidComposeFrom = bytes32(type(uint256).max);
+        bytes memory composeMsg = abi.encode(
+            SendParam({dstEid: 30_102, to: bytes32(uint256(uint160(owner))), amountLD: 0, minAmountLD: 0, extraOptions: "", composeMsg: "", oftCmd: ""}),
+            uint256(0)
+        );
+        bytes memory message = OFTComposeMsgCodec.encode(1, 30_102, 1e6, abi.encodePacked(invalidComposeFrom, composeMsg));
+
+        vm.prank(address(endpoint));
+        vm.expectRevert(abi.encodeWithSelector(VaultComposerSync.InvalidComposeFrom.selector, invalidComposeFrom));
+        composer.lzCompose(address(omnichainAssetOFT), bytes32("compose"), message, address(0), "");
     }
 
     function testCreateDeltaNeutralVaultRejectsTimelockWithOmnichainVault() public {
@@ -713,6 +799,7 @@ contract MockAssetOFTView {
 
 contract MockEndpointV2 {
     uint32 internal immutable _eid;
+    address public delegate;
 
     constructor(uint32 eid_) {
         _eid = eid_;
@@ -722,5 +809,7 @@ contract MockEndpointV2 {
         return _eid;
     }
 
-    function setDelegate(address) external {}
+    function setDelegate(address newDelegate) external {
+        delegate = newDelegate;
+    }
 }

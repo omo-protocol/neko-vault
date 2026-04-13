@@ -2032,9 +2032,6 @@ contract UniversalValuerOffchainComprehensive is Test {
     }
 
     function testCannotBatchUpdateRegisteredEscrowTotalId() public {
-        // NOTE: batchUpdateValues currently does NOT check for reserved escrow IDs
-        // This test documents that behavior - individual updateValue has the check but batch doesn't
-
         // Create a mock escrow and register its total ID
         address mockEscrow = address(0xBEEF);
         bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
@@ -2075,14 +2072,9 @@ contract UniversalValuerOffchainComprehensive is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signer1Key, ethSignedHash);
         signatures[0] = abi.encodePacked(r, s, v);
 
-        // Currently batchUpdateValues does NOT check for reserved IDs, so this succeeds
-        // (unlike updateValue which does check and reverts with CannotUpdateReservedEscrowTotal)
         vm.prank(owner);
+        vm.expectRevert(IUniversalValuerOffchain.CannotUpdateReservedEscrowTotal.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, block.timestamp + 1 hours, signatures);
-
-        // Verify the batch update succeeded (even though it included a reserved ID)
-        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
-        // Note: Getting the escrowTotalId value would fail because it's reserved
     }
 
     function testCrossEscrowCollisionPrevention() public {

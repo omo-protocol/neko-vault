@@ -99,47 +99,53 @@ contract RemotePpsSnapshotSender {
     }
 
     function _previewSnapshot() internal view returns (uint256 assets, uint64 snapshotTimestamp) {
-        (bool success, uint256 liveAssets, bool healthy) = _readSnapshot();
-        if (success && healthy) {
-            return (liveAssets, uint64(block.timestamp));
+        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool healthy) = _readSnapshot();
+        if (success && healthy && liveTimestamp != 0) {
+            return (liveAssets, liveTimestamp);
         }
         if (cachedSnapshotTimestamp != 0) {
             return (cachedSnapshotAssets, cachedSnapshotTimestamp);
         }
         if (success) {
-            return (liveAssets, 0);
+            return (liveAssets, liveTimestamp);
         }
         return (0, 0);
     }
 
     function _currentSnapshot() internal returns (uint256 assets, uint64 snapshotTimestamp) {
-        (bool success, uint256 liveAssets, bool healthy) = _readSnapshot();
-        if (success && healthy) {
+        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool healthy) = _readSnapshot();
+        if (success && healthy && liveTimestamp != 0) {
             cachedSnapshotAssets = liveAssets;
-            cachedSnapshotTimestamp = uint64(block.timestamp);
+            cachedSnapshotTimestamp = liveTimestamp;
             return (liveAssets, cachedSnapshotTimestamp);
         }
         if (cachedSnapshotTimestamp != 0) {
             return (cachedSnapshotAssets, cachedSnapshotTimestamp);
         }
         if (success) {
-            return (liveAssets, 0);
+            return (liveAssets, liveTimestamp);
         }
         return (0, 0);
     }
 
-    function _readSnapshot() internal view returns (bool success, uint256 assets, bool healthy) {
+    function _readSnapshot() internal view returns (bool success, uint256 assets, uint64 snapshotTimestamp, bool healthy) {
         bytes memory data;
+        (success, data) = sleeve.staticcall(abi.encodeWithSignature("quoteSnapshotState()"));
+        if (success && data.length >= 96) {
+            (assets, snapshotTimestamp, healthy) = abi.decode(data, (uint256, uint64, bool));
+            return (true, assets, snapshotTimestamp, healthy);
+        }
+
         (success, data) = sleeve.staticcall(abi.encodeWithSignature("quoteSnapshotAssets()"));
         if (success && data.length >= 64) {
             (assets, healthy) = abi.decode(data, (uint256, bool));
-            return (true, assets, healthy);
+            return (true, assets, healthy ? uint64(block.timestamp) : 0, healthy);
         }
 
         try IAdapter(sleeve).realAssets() returns (uint256 liveAssets) {
-            return (true, liveAssets, true);
+            return (true, liveAssets, 0, false);
         } catch {
-            return (false, 0, false);
+            return (false, 0, 0, false);
         }
     }
 }

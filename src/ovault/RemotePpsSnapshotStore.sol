@@ -12,6 +12,8 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     error InvalidConfig();
     error InvalidSnapshotOrder(uint32 srcEid, uint64 nonce, uint64 lastNonce);
     error StaleSnapshotTimestamp(uint32 srcEid, uint64 snapshotTimestamp, uint64 lastSnapshotTimestamp);
+    error FutureSnapshotTimestamp(uint32 srcEid, uint64 snapshotTimestamp, uint64 maxAllowedTimestamp);
+    error NativeTransferFailed();
 
     event PeerSet(uint32 indexed eid, bytes32 peer);
     event SnapshotReceived(uint32 indexed srcEid, uint256 assets, uint64 snapshotTimestamp, bytes32 guid);
@@ -24,6 +26,7 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     }
 
     uint256 public constant MAX_SNAPSHOT_AGE = 1 days;
+    uint256 public constant MAX_CLOCK_SKEW = 10 minutes;
 
     address public immutable owner;
     ILayerZeroEndpointV2 public immutable endpoint;
@@ -69,6 +72,7 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
 
             if (
                 snapshot.receivedAt == 0 || snapshot.snapshotTimestamp == 0
+                    || block.timestamp > uint256(snapshot.receivedAt) + MAX_SNAPSHOT_AGE
                     || block.timestamp > uint256(snapshot.snapshotTimestamp) + MAX_SNAPSHOT_AGE
             ) {
                 healthy = false;
@@ -93,6 +97,10 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
         if (peers[origin.srcEid] != origin.sender) revert OnlyPeer(origin.srcEid, origin.sender);
 
         (uint256 assets, uint64 snapshotTimestamp) = abi.decode(message, (uint256, uint64));
+        uint64 maxAllowedTimestamp = uint64(block.timestamp + MAX_CLOCK_SKEW);
+        if (snapshotTimestamp > maxAllowedTimestamp) {
+            revert FutureSnapshotTimestamp(origin.srcEid, snapshotTimestamp, maxAllowedTimestamp);
+        }
         Snapshot memory current = snapshots[origin.srcEid];
         if (current.receivedAt != 0) {
             if (origin.nonce <= current.nonce) {
@@ -111,5 +119,10 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
         });
 
         emit SnapshotReceived(origin.srcEid, assets, snapshotTimestamp, guid);
+    }
+
+    function recoverNative(address recipient) external onlyOwner {
+        (bool success,) = payable(recipient).call{value: address(this).balance}("");
+        if (!success) revert NativeTransferFailed();
     }
 }

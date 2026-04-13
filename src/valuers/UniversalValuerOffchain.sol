@@ -89,6 +89,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         UpdateConfig memory config = updateConfigs[strategyId];
         uint256 changePercent = _calculateChangePercent(lastReport.value, value);
+        uint256 minConfidence = _effectiveMinConfidence(config);
 
         if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
             if (changePercent < config.pushThreshold) {
@@ -105,7 +106,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
         }
 
-        if (confidence < config.minConfidence) revert LowConfidence();
+        if (confidence < minConfidence) revert LowConfidence();
 
         uint256 totalWeight = _verifySignatures(
             strategyId,
@@ -135,8 +136,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        bool isStale = block.timestamp > report.timestamp + config.maxStaleness;
-        bool lowConfidence = report.confidence < config.minConfidence;
+        bool isStale = block.timestamp > report.timestamp + _effectiveMaxStaleness(config);
+        bool lowConfidence = report.confidence < _effectiveMinConfidence(config);
 
         if (isStale || lowConfidence) {
             emit UpdateRequested(strategyId, msg.sender, UpdateReason.STALENESS);
@@ -187,8 +188,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             ValueReport memory report = latestReports[strategyId];
             UpdateConfig memory config = updateConfigs[strategyId];
 
-            uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
-            uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
+            uint256 maxStaleness = _effectiveMaxStaleness(config);
+            uint256 minConfidence = _effectiveMinConfidence(config);
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
@@ -243,6 +244,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
+            if (registeredEscrowTotals[strategyId] != address(0)) {
+                revert CannotUpdateReservedEscrowTotal();
+            }
             ValueReport memory lastReport = latestReports[strategyId];
 
             if (nonce <= lastReport.nonce) revert StaleNonce();
@@ -250,6 +254,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
+            uint256 minConfidence = _effectiveMinConfidence(config);
 
             if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
                 if (changePercent < config.pushThreshold) {
@@ -258,8 +263,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
             if (lastReport.value > 0) {
                 _validatePriceBounds(strategyId, changePercent);
+            } else {
+                uint256 maxInitial = maxInitialValue[strategyId];
+                if (maxInitial > 0 && values[i] > maxInitial) {
+                    revert InitialValueExceedsMax(values[i], maxInitial);
+                }
             }
-            if (confidences[i] < config.minConfidence) revert LowConfidence();
+            if (confidences[i] < minConfidence) revert LowConfidence();
         }
 
         for (uint256 i = 0; i < strategyIds.length; i++) {
@@ -446,6 +456,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Force update a value in emergency
     function emergencyUpdate(bytes32 strategyId, uint256 value) external onlyOwner {
         if (!emergencyMode) revert NotInEmergencyMode();
+        if (registeredEscrowTotals[strategyId] != address(0)) revert CannotUpdateReservedEscrowTotal();
 
         latestReports[strategyId] = ValueReport({
             value: value,
@@ -543,6 +554,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
 
         return totalWeight;
+    }
+
+    function _effectiveMaxStaleness(UpdateConfig memory config) internal view returns (uint256 maxStaleness) {
+        return config.minUpdateInterval > 0 ? config.maxStaleness : MAX_STALENESS;
+    }
+
+    function _effectiveMinConfidence(UpdateConfig memory config) internal view returns (uint256 minConfidence) {
+        return config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
     }
 
     /// @dev Verify batch signatures

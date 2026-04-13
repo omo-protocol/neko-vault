@@ -43,4 +43,9 @@ contract ShareOFTAdapter is OFTAdapter {
         super.transferOwnership(newOwner);
         endpoint.setDelegate(newOwner);
     }
+
+    function renounceOwnership() public override onlyOwner {
+        super.renounceOwnership();
+        endpoint.setDelegate(address(0));
+    }
 }

@@ -39,6 +39,11 @@ contract ShareOFT is OFT {
         endpoint.setDelegate(newOwner);
     }
 
+    function renounceOwnership() public override onlyOwner {
+        super.renounceOwnership();
+        endpoint.setDelegate(address(0));
+    }
+
     // NOTE: The LayerZero OFT standard needs to mint/burn during cross-chain transfers
     // This is different from the hub's ShareOFTAdapter which uses a lockbox pattern
     // On spoke chains, shares are minted when bridged FROM hub, burned when bridged TO hub

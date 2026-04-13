@@ -2,8 +2,10 @@
 pragma solidity ^0.8.22;
 
 import {VaultComposerSync as BaseVaultComposerSync} from "@layerzerolabs/ovault-evm/contracts/VaultComposerSync.sol";
-import {IOFT, SendParam, MessagingFee} from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
+import {IOFT, SendParam, MessagingFee, OFTReceipt} from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
 import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IVaultV2} from "../interfaces/IVaultV2.sol";
 
 /// @title VaultComposerSync
 /// @notice Orchestrates cross-chain ERC-4626 vault operations on the hub chain
@@ -50,6 +52,12 @@ import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTCompo
 contract VaultComposerSync is BaseVaultComposerSync {
     using OFTComposeMsgCodec for bytes;
     using OFTComposeMsgCodec for bytes32;
+
+    error InvalidComposeFrom(bytes32 composeFrom);
+    error UserCannotSendAssets(address user);
+    error UserCannotReceiveShares(address user);
+    error UserCannotSendShares(address user);
+    error UserCannotReceiveAssets(address user);
 
     /// @notice Initializes the vault composer
     /// @param _vault VaultV2 contract address (ERC-4626 compliant)
@@ -124,7 +132,7 @@ contract VaultComposerSync is BaseVaultComposerSync {
         bytes32 composeFrom = _message.composeFrom();
         uint256 amount = _message.amountLD();
         bytes memory composeMsg = _message.composeMsg();
-        address refundAddress = composeFrom.bytes32ToAddress();
+        address refundAddress = _composeFromToAddress(composeFrom);
 
         try this.handleComposeSafe{value: msg.value}(_composeSender, composeFrom, composeMsg, amount) {
             emit Sent(_guid);
@@ -149,11 +157,87 @@ contract VaultComposerSync is BaseVaultComposerSync {
         (SendParam memory sendParam, uint256 minMsgValue) = abi.decode(_composeMsg, (SendParam, uint256));
         if (msg.value < minMsgValue) revert InsufficientMsgValue(minMsgValue, msg.value);
 
-        address refundAddress = _composeFrom.bytes32ToAddress();
+        address refundAddress = _composeFromToAddress(_composeFrom);
         if (_oftIn == ASSET_OFT) {
             _depositAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
         } else {
             _redeemAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
+        }
+    }
+
+    function _deposit(bytes32 _depositor, uint256 _assetAmount) internal override returns (uint256 shareAmount) {
+        address depositor = _composeFromToAddress(_depositor);
+        IVaultV2 vault = IVaultV2(address(VAULT));
+
+        if (!vault.canSendAssets(depositor)) revert UserCannotSendAssets(depositor);
+        if (!vault.canReceiveShares(depositor)) revert UserCannotReceiveShares(depositor);
+
+        shareAmount = vault.deposit(_assetAmount, address(this));
+    }
+
+    function _redeem(bytes32 _redeemer, uint256 _shareAmount) internal override returns (uint256 assetAmount) {
+        address redeemer = _composeFromToAddress(_redeemer);
+        IVaultV2 vault = IVaultV2(address(VAULT));
+
+        if (!vault.canSendShares(redeemer)) revert UserCannotSendShares(redeemer);
+        if (!vault.canReceiveAssets(redeemer)) revert UserCannotReceiveAssets(redeemer);
+
+        assetAmount = vault.redeem(_shareAmount, address(this), address(this));
+    }
+
+    function _depositAndSend(
+        bytes32 _depositor,
+        uint256 _assetAmount,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        uint256 _msgValue
+    ) internal override {
+        uint256 preShareBalance = IERC20(SHARE_ERC20).balanceOf(address(this));
+        _deposit(_depositor, _assetAmount);
+        uint256 postShareBalance = IERC20(SHARE_ERC20).balanceOf(address(this));
+
+        uint256 shareAmountReceived = postShareBalance - preShareBalance;
+        _assertSlippage(shareAmountReceived, _sendParam.minAmountLD);
+
+        _sendParam.amountLD = shareAmountReceived;
+        _sendParam.minAmountLD = _quoteMinCrossChainAmount(SHARE_OFT, _sendParam);
+
+        _send(SHARE_OFT, _sendParam, _refundAddress, _msgValue);
+        emit Deposited(_depositor, _sendParam.to, _sendParam.dstEid, _assetAmount, shareAmountReceived);
+    }
+
+    function _redeemAndSend(
+        bytes32 _redeemer,
+        uint256 _shareAmount,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        uint256 _msgValue
+    ) internal override {
+        uint256 preAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
+        _redeem(_redeemer, _shareAmount);
+        uint256 postAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
+
+        uint256 assetAmountReceived = postAssetBalance - preAssetBalance;
+        _assertSlippage(assetAmountReceived, _sendParam.minAmountLD);
+
+        _sendParam.amountLD = assetAmountReceived;
+        _sendParam.minAmountLD = _quoteMinCrossChainAmount(ASSET_OFT, _sendParam);
+
+        _send(ASSET_OFT, _sendParam, _refundAddress, _msgValue);
+        emit Redeemed(_redeemer, _sendParam.to, _sendParam.dstEid, _shareAmount, assetAmountReceived);
+    }
+
+    function _quoteMinCrossChainAmount(address _oft, SendParam memory _sendParam) internal view returns (uint256 minAmountLD) {
+        SendParam memory quoteParam = _sendParam;
+        quoteParam.minAmountLD = 0;
+        (,, OFTReceipt memory receipt) = IOFT(_oft).quoteOFT(quoteParam);
+        return receipt.amountReceivedLD;
+    }
+
+    function _composeFromToAddress(bytes32 composeFrom) internal pure returns (address user) {
+        user = composeFrom.bytes32ToAddress();
+        if (user == address(0) || bytes32(uint256(uint160(user))) != composeFrom) {
+            revert InvalidComposeFrom(composeFrom);
         }
     }
 }

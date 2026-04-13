@@ -174,10 +174,8 @@ contract EmergencyModeSecurityFixTest is Test {
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // With no tracked in-adapter assets, the conservative fallback is clamped to zero
-        // even when a cached valuation exists.
-        uint256 fallbackValue = adapter.realAssets();
-        assertEq(fallbackValue, 0, "Should clamp cached fallback to tracked assets");
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
+        adapter.realAssets();
 
         // Enable emergency mode - This invalidates the cached valuation timestamp
         adapter.enableEmergencyMode();

@@ -257,7 +257,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - slack);
     }
 
-    /// @notice Test force deallocate with true partial fulfillment (slack > available balance)
+    /// @notice Test force deallocate reverts when slack exceeds available balance
     function test_forceDeallocate_TruePartialFulfillment() public {
         uint256 allocAmount = 100e18;
         uint256 depositAmount = 70e18;
@@ -301,22 +301,16 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         
         bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
         
-        // Should emit PartialDeallocate since slack > available balance
-        vm.expectEmit(true, false, false, true);
-        emit PartialDeallocate(STRATEGY_ID, slack, newAvailableBalance);
-        
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
+        vm.expectRevert(
+            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, newAvailableBalance, slack)
+        );
+        adapter.deallocate(
             deallocData,
             slack,
             FORCE_DEALLOCATE_SELECTOR,
             address(0)
         );
-
-        // Verify partial fulfillment - returns only what's available
-        assertEq(ids.length, 1);
-        assertEq(change, -int256(newAvailableBalance)); // Returns available (20e18), not requested (30e18)
-        assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - newAvailableBalance);
     }
 
     /* ========== WITHDRAW FROM STRATEGY TESTS ========== */
