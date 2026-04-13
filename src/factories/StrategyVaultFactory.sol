@@ -79,6 +79,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
             params.absoluteCap,
             params.relativeCap
         );
+        if (params.enableTimelock && params.enableOmnichainVault) revert InvalidConfig();
         _validateChainManifests(params.venueConfig.usesLayerZero, params.enableOmnichainVault, params.chainManifests);
 
         bytes32 strategyId = keccak256(params.strategyIdData);
@@ -97,7 +98,6 @@ contract StrategyVaultFactory is ReentrancyGuard {
             remotePpsStore,
             strategyId,
             params.targetReserveBps,
-            params.minReserveBps,
             params.venueConfig,
             _materializeManifests(params.chainManifests, address(sleeve)),
             params.spotSideMode,
@@ -189,6 +189,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
             params.absoluteCap,
             params.relativeCap
         );
+        if (params.enableTimelock && params.enableOmnichainVault) revert InvalidConfig();
         _validateChainManifests(params.venueConfig.usesLayerZero, params.enableOmnichainVault, params.chainManifests);
 
         bytes32 strategyId = keccak256(params.strategyIdData);
@@ -209,7 +210,6 @@ contract StrategyVaultFactory is ReentrancyGuard {
             params.ptToken,
             strategyId,
             params.targetReserveBps,
-            params.minReserveBps,
             params.venueConfig,
             _materializeManifests(params.chainManifests, address(sleeve)),
             params.automationConfig,

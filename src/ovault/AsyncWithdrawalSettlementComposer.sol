@@ -18,10 +18,12 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
     error OnlyQueueOwner(address caller);
     error PendingSettlementNotFound();
     error PendingSettlementAlreadyExists();
+    error NativeTransferFailed();
 
     event SettlementReceived(uint256 indexed requestId, uint256 amountReceived, bytes32 guid, uint32 srcEid);
     event SettlementPending(uint256 indexed requestId, uint256 amountReceived, bytes32 guid, bytes reason);
     event PendingSettlementRecovered(bytes32 indexed guid, address indexed recipient, uint256 amountRecovered);
+    event NativeRecovered(address indexed recipient, uint256 amountRecovered);
 
     AsyncWithdrawalQueue public immutable queue;
     address public immutable sleeve;
@@ -29,6 +31,7 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
     address public immutable asset;
     address public immutable endpoint;
     mapping(bytes32 guid => PendingSettlement) public pendingSettlements;
+    mapping(bytes32 guid => bytes) private _pendingComposeMsgs;
 
     struct PendingSettlement {
         uint256 requestId;
@@ -55,19 +58,25 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
         if (msg.sender != endpoint) revert OnlyEndpoint(msg.sender);
         if (composeSender != assetOFT) revert OnlyAssetOFT(composeSender);
 
-        uint256 requestId = abi.decode(message.composeMsg(), (uint256));
+        bytes memory composeMsg = message.composeMsg();
         uint256 amountReceived = message.amountLD();
-        try this.handleSettlement(requestId, amountReceived, guid) {
+        try this.handleSettlementMessage(composeMsg, amountReceived, guid) returns (uint256 requestId) {
             emit SettlementReceived(requestId, amountReceived, guid, message.srcEid());
         } catch (bytes memory reason) {
             if (pendingSettlements[guid].amountReceived != 0) revert PendingSettlementAlreadyExists();
-            pendingSettlements[guid] = PendingSettlement({requestId: requestId, amountReceived: amountReceived});
+            (bool decoded, uint256 requestId) = _decodeRequestId(composeMsg);
+            pendingSettlements[guid] = PendingSettlement({requestId: decoded ? requestId : 0, amountReceived: amountReceived});
+            _pendingComposeMsgs[guid] = composeMsg;
             emit SettlementPending(requestId, amountReceived, guid, reason);
         }
     }
 
-    function handleSettlement(uint256 requestId, uint256 amountReceived, bytes32 guid) external {
+    function handleSettlementMessage(bytes calldata composeMsg, uint256 amountReceived, bytes32 guid)
+        external
+        returns (uint256 requestId)
+    {
         if (msg.sender != address(this)) revert InvalidRequest();
+        requestId = abi.decode(composeMsg, (uint256));
         SafeERC20Lib.safeTransfer(asset, sleeve, amountReceived);
         queue.creditSettlement(requestId, amountReceived, guid);
     }
@@ -76,8 +85,12 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
         PendingSettlement memory pending = pendingSettlements[guid];
         if (pending.amountReceived == 0) revert PendingSettlementNotFound();
 
+        bytes memory composeMsg = _pendingComposeMsgs[guid];
+        if (composeMsg.length == 0) revert PendingSettlementNotFound();
+
+        this.handleSettlementMessage(composeMsg, pending.amountReceived, guid);
         delete pendingSettlements[guid];
-        this.handleSettlement(pending.requestId, pending.amountReceived, guid);
+        delete _pendingComposeMsgs[guid];
         emit SettlementReceived(pending.requestId, pending.amountReceived, guid, 0);
     }
 
@@ -89,7 +102,28 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
         if (pending.amountReceived == 0) revert PendingSettlementNotFound();
 
         delete pendingSettlements[guid];
+        delete _pendingComposeMsgs[guid];
         SafeERC20Lib.safeTransfer(asset, recipient, pending.amountReceived);
         emit PendingSettlementRecovered(guid, recipient, pending.amountReceived);
+    }
+
+    function recoverNative(address recipient) external {
+        if (msg.sender != queue.owner()) revert OnlyQueueOwner(msg.sender);
+        if (recipient == address(0)) revert InvalidRequest();
+
+        uint256 nativeBalance = address(this).balance;
+        if (nativeBalance == 0) revert InvalidRequest();
+
+        (bool success,) = payable(recipient).call{value: nativeBalance}("");
+        if (!success) revert NativeTransferFailed();
+        emit NativeRecovered(recipient, nativeBalance);
+    }
+
+    function _decodeRequestId(bytes memory composeMsg) internal pure returns (bool decoded, uint256 requestId) {
+        if (composeMsg.length != 32) {
+            return (false, 0);
+        }
+        requestId = abi.decode(composeMsg, (uint256));
+        return (true, requestId);
     }
 }

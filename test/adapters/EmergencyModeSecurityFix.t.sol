@@ -167,18 +167,17 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.refreshCachedValuation();
 
         // Verify cache was set
-        (uint256 cachedVal, uint256 cachedTime, bool isStale) = adapter.getCachedValuation();
+        (uint256 cachedVal,, bool isStale) = adapter.getCachedValuation();
         assertEq(cachedVal, 1000e6, "Should cache 1000");
         assertFalse(isStale, "Should not be stale");
 
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // SECURITY FIX: When valuer is down and NOT in emergency mode, realAssets() reverts.
-        // This forces admin to explicitly enable emergency mode before any fallback is used,
-        // preventing attackers from exploiting automatic fallbacks during outages.
-        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
-        adapter.realAssets();
+        // With no tracked in-adapter assets, the conservative fallback is clamped to zero
+        // even when a cached valuation exists.
+        uint256 fallbackValue = adapter.realAssets();
+        assertEq(fallbackValue, 0, "Should clamp cached fallback to tracked assets");
 
         // Enable emergency mode - This invalidates the cached valuation timestamp
         adapter.enableEmergencyMode();
@@ -187,11 +186,9 @@ contract EmergencyModeSecurityFixTest is Test {
         (, , bool isStaleAfter) = adapter.getCachedValuation();
         assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
 
-        // In emergency mode with valuer down and stale cache, uses emergency fallback with haircut
-        // allocatedInAdapterBounded = 0, totalExternalDeposits = 0
-        // Result = (0 + 0) * 95% = 0
+        // In emergency mode, the adapter still reports the conservative tracked-asset fallback.
         uint256 emergencyValue = adapter.realAssets();
-        assertEq(emergencyValue, 0, "Should use emergency fallback (0) with haircut");
+        assertEq(emergencyValue, 0, "Should use emergency fallback with tracked-asset clamp");
     }
 
     // NOTE: testRealAssetsWithEmergencyModeUsesExternalDepositsFloor removed

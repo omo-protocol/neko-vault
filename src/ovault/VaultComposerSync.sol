@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import {VaultComposerSync as BaseVaultComposerSync} from "@layerzerolabs/ovault-evm/contracts/VaultComposerSync.sol";
 import {IOFT, SendParam, MessagingFee} from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
+import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
 
 /// @title VaultComposerSync
 /// @notice Orchestrates cross-chain ERC-4626 vault operations on the hub chain
@@ -47,6 +48,9 @@ import {IOFT, SendParam, MessagingFee} from "@layerzerolabs/oft-evm/contracts/in
 /// - Slippage exceeded: Manual refund from hub chain
 /// - Invalid message: Revert (tokens stay on source chain)
 contract VaultComposerSync is BaseVaultComposerSync {
+    using OFTComposeMsgCodec for bytes;
+    using OFTComposeMsgCodec for bytes32;
+
     /// @notice Initializes the vault composer
     /// @param _vault VaultV2 contract address (ERC-4626 compliant)
     /// @param _assetOFT Asset OFT contract address
@@ -105,5 +109,51 @@ contract VaultComposerSync is BaseVaultComposerSync {
     ) internal override {
         require(_msgValue == 0, "NonZeroMsgValueOnLocal");
         super._sendLocal(_oft, _sendParam, _refundAddress, _msgValue);
+    }
+
+    function lzCompose(
+        address _composeSender,
+        bytes32 _guid,
+        bytes calldata _message,
+        address,
+        bytes calldata
+    ) public payable override {
+        if (msg.sender != ENDPOINT) revert OnlyEndpoint(msg.sender);
+        if (_composeSender != ASSET_OFT && _composeSender != SHARE_OFT) revert OnlyValidComposeCaller(_composeSender);
+
+        bytes32 composeFrom = _message.composeFrom();
+        uint256 amount = _message.amountLD();
+        bytes memory composeMsg = _message.composeMsg();
+        address refundAddress = composeFrom.bytes32ToAddress();
+
+        try this.handleComposeSafe{value: msg.value}(_composeSender, composeFrom, composeMsg, amount) {
+            emit Sent(_guid);
+        } catch (bytes memory _err) {
+            if (bytes4(_err) == InsufficientMsgValue.selector) {
+                assembly {
+                    revert(add(32, _err), mload(_err))
+                }
+            }
+
+            _refund(_composeSender, _message, amount, refundAddress, msg.value);
+            emit Refunded(_guid);
+        }
+    }
+
+    function handleComposeSafe(address _oftIn, bytes32 _composeFrom, bytes memory _composeMsg, uint256 _amount)
+        external
+        payable
+    {
+        if (msg.sender != address(this)) revert OnlySelf(msg.sender);
+
+        (SendParam memory sendParam, uint256 minMsgValue) = abi.decode(_composeMsg, (SendParam, uint256));
+        if (msg.value < minMsgValue) revert InsufficientMsgValue(minMsgValue, msg.value);
+
+        address refundAddress = _composeFrom.bytes32ToAddress();
+        if (_oftIn == ASSET_OFT) {
+            _depositAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
+        } else {
+            _redeemAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
+        }
     }
 }

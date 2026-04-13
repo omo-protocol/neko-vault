@@ -492,6 +492,10 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
      */
     function _transferWithBatches(address from, address to, uint256 amount) internal {
         if (balanceOf[from] < amount) revert InsufficientBalance();
+        if (from == to || amount == 0) {
+            emit Transfer(from, to, amount);
+            return;
+        }
 
         // Standard ERC20 balance transfer
         balanceOf[from] -= amount;

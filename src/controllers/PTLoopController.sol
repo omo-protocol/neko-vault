@@ -5,7 +5,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
-import {IAutomatedWithdrawalController, IOnchainStrategyValuer, IRemotePpsSnapshotStore} from "./StrategyControllerInterfaces.sol";
+import {
+    IAutomatedWithdrawalController,
+    IOnchainStrategyValuer,
+    IRemotePpsSnapshotStore,
+    IWithdrawalReserveSource
+} from "./StrategyControllerInterfaces.sol";
 import {
     PendleLib,
     IPendleStaticQuoter,
@@ -49,7 +54,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     address public immutable asset;
     bytes32 public immutable strategyId;
     uint256 public immutable targetReserveBps;
-    uint256 public immutable minReserveBps;
     bytes32 public immutable venueId;
     address public immutable venue;
     address public immutable helper;
@@ -82,7 +86,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         address ptToken_,
         bytes32 strategyId_,
         uint256 targetReserveBps_,
-        uint256 minReserveBps_,
         VenueConfig memory venueConfig_,
         ChainManifest[] memory chainManifests_,
         PTLoopAutomationConfig memory automationConfig_,
@@ -93,7 +96,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
             owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
         ) revert InvalidAddress();
-        if (targetReserveBps_ > BPS || minReserveBps_ > targetReserveBps_) revert InvalidReserveConfig();
+        if (targetReserveBps_ > BPS) revert InvalidReserveConfig();
         if (venueConfig_.venueId != PENDLE_VENUE_ID || venueConfig_.venue == address(0)) revert InvalidVenue();
         if (maxUnwindSlippageBps_ > BPS || automationConfig_.maxEntrySlippageBps > BPS) revert InvalidSlippageConfig();
         if (venueConfig_.helper == address(0) || market_ == address(0) || ptToken_ == address(0)) {
@@ -108,7 +111,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         asset = IVaultV2(vault_).asset();
         strategyId = strategyId_;
         targetReserveBps = targetReserveBps_;
-        minReserveBps = minReserveBps_;
         venueId = venueConfig_.venueId;
         venue = venueConfig_.venue;
         helper = venueConfig_.helper;
@@ -126,8 +128,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
             kind: StrategyKind.PTLoop,
             asset: asset,
             strategyId: strategyId,
-            targetReserveBps: targetReserveBps,
-            minReserveBps: minReserveBps
+            targetReserveBps: targetReserveBps
         });
     }
 
@@ -153,14 +154,29 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         return totalAssets * targetReserveBps / BPS;
     }
 
-    function reserveFloor(uint256 totalAssets) public view returns (uint256) {
-        return totalAssets * minReserveBps / BPS;
+    function protectedWithdrawalLiquidity() public view returns (uint256 assets) {
+        address queue = _settlementQueue();
+        if (queue == address(0)) return 0;
+
+        (bool success, bytes memory data) =
+            queue.staticcall(abi.encodeWithSelector(IWithdrawalReserveSource.totalProtectedAssets.selector));
+        if (!success || data.length < 32) return 0;
+        return abi.decode(data, (uint256));
+    }
+
+    function requiredLocalLiquidity(uint256 totalAssets) public view returns (uint256) {
+        uint256 targetReserve = reserveTarget(totalAssets);
+        uint256 protectedAssets = protectedWithdrawalLiquidity();
+        return targetReserve > protectedAssets ? targetReserve : protectedAssets;
     }
 
     function availableToAllocate(uint256 idleAssets, uint256 totalAssets) public view returns (uint256) {
-        uint256 targetReserve = reserveTarget(totalAssets);
-        if (idleAssets <= targetReserve) return 0;
-        return idleAssets - targetReserve;
+        uint256 requiredLiquidity = requiredLocalLiquidity(totalAssets);
+        uint256 totalLiquidAssets = IERC20(asset).balanceOf(address(vault)) + idleAssets;
+        if (totalLiquidAssets <= requiredLiquidity) return 0;
+
+        uint256 allocatableAssets = totalLiquidAssets - requiredLiquidity;
+        return allocatableAssets < idleAssets ? allocatableAssets : idleAssets;
     }
 
     function liquidityData() public view returns (bytes memory) {
@@ -170,10 +186,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
 
     function allocateIdle(uint256 assets) external onlyOwner nonReentrant {
         vault.allocate(address(sleeve), liquidityData(), assets);
-    }
-
-    function deallocateToVault(uint256 assets) external onlyOwner nonReentrant {
-        vault.deallocate(address(sleeve), liquidityData(), assets);
     }
 
     function executeStrategy(IUniversalAdapterEscrow.Call[] calldata calls) external onlyOwner nonReentrant {
@@ -440,6 +452,12 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     function _quoteRemoteAssets() internal view returns (uint256 assets, bool healthy) {
         if (remotePpsSnapshotStore == address(0)) return (0, true);
         return IRemotePpsSnapshotStore(remotePpsSnapshotStore).quoteRemoteAssets();
+    }
+
+    function _settlementQueue() internal view returns (address queue) {
+        (bool success, bytes memory data) = address(sleeve).staticcall(abi.encodeWithSignature("settlementQueue()"));
+        if (!success || data.length < 32) return address(0);
+        return abi.decode(data, (address));
     }
 
     function _storeChainManifests(ChainManifest[] memory manifests, address homeSleeve) internal {

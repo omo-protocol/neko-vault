@@ -133,7 +133,6 @@ contract StrategyLaunchpadScriptsTest is Test {
         vm.setEnv("NAME", "Script Vault");
         vm.setEnv("SYMBOL", "sv");
         vm.setEnv("TARGET_RESERVE_BPS", "1500");
-        vm.setEnv("MIN_RESERVE_BPS", "500");
         vm.setEnv("ABSOLUTE_CAP", "1000000");
         vm.setEnv("RELATIVE_CAP", "1000000000000000000");
         vm.setEnv("USE_OFFCHAIN_VALUER", "false");

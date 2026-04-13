@@ -133,6 +133,39 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
     }
 
+    function test_deallocate_UserExitSelectorDoesNotTriggerAutoWithdrawal() public {
+        uint256 allocAmount = 100e18;
+
+        vm.prank(address(vault));
+        asset.transfer(address(adapter), allocAmount);
+
+        vm.prank(address(vault));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
+
+        IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
+        depositCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(protocol),
+            data: abi.encodeWithSelector(protocol.deposit.selector, 40e18),
+            value: 0
+        });
+
+        vm.prank(agent);
+        adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
+
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 2, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes4 withdrawSelector = bytes4(keccak256("withdraw(uint256,address,address)"));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 60e18, 80e18)
+        );
+        vm.prank(address(vault));
+        adapter.deallocate(deallocData, 80e18, withdrawSelector, address(0));
+
+        assertEq(protocol.balanceOf(address(adapter)), 40e18);
+        assertEq(asset.balanceOf(address(adapter)), 60e18);
+    }
+
     /// @notice Test deallocate ignores withdrawCalls (backward compatibility)
     function test_deallocate_IgnoresWithdrawCalls() public {
         uint256 allocAmount = 100e18;

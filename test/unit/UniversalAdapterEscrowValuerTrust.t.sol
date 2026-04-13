@@ -197,11 +197,11 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // Now force valuer to return 0 (simulating valuation failure)
         maliciousValuer.setReturnValue(0);
 
-        // SECURITY FIX: When valuer fails and NOT in emergency mode, realAssets() REVERTS.
-        // This forces admin to explicitly enable emergency mode before any fallback is used,
-        // preventing attackers from exploiting automatic fallbacks during outages.
-        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
-        adapter.realAssets();
+        // With a fresh cached valuation and tracked assets present, normal mode falls back
+        // to a conservative haircutted cached value instead of reverting.
+        uint256 fallbackAssets = adapter.realAssets();
+        uint256 expectedFallbackValue = (1000e18 * (10000 - adapter.EMERGENCY_HAIRCUT())) / 10000;
+        assertEq(fallbackAssets, expectedFallbackValue, "Should use conservative cached fallback");
 
         // Enable emergency mode - This invalidates the cached valuation timestamp
         // and enables the fallback mechanism
@@ -223,7 +223,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = 1000e18
         // Expected = (1000e18 + 0) * 9500 / 10000 = 950e18
         uint256 reportedAssets = adapter.realAssets();
-        uint256 expectedEmergencyValue = (1000e18 * (10000 - adapter.EMERGENCY_HAIRCUT())) / 10000;
+        uint256 expectedEmergencyValue = expectedFallbackValue;
         assertEq(reportedAssets, expectedEmergencyValue, "Should use emergency fallback with haircut in emergency mode");
     }
 

@@ -31,6 +31,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     uint256 public totalAllocations;
     mapping(bytes32 => uint256) public externalDeposits;
     uint256 public totalExternalDeposits;
+    uint256 public settlementSurplusAssets;
     uint256 private cachedValuation;
     uint256 private cachedValuationTimestamp;
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
@@ -141,7 +142,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (!strategies[strategyId].active) revert StrategyNotActive();
 
-        if (autoWithdrawalEnabled && caller != FORCE_DEALLOCATE_SELECTOR && assets > adapterBalance) {
+        if (autoWithdrawalEnabled && caller == IVaultV2.deallocate.selector && assets > adapterBalance) {
             _autoWithdraw(strategyId, assets - adapterBalance);
             adapterBalance = IERC20(asset).balanceOf(address(this));
         }
@@ -187,17 +188,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     function realAssets() external view override returns (uint256 assets) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
-
-        uint256 allocatedInAdapter =
-            totalAllocations > totalExternalDeposits ? totalAllocations - totalExternalDeposits : 0;
-
-        uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
+        (uint256 allocatedInAdapterBounded,, uint256 trackedAssets) = _trackedAssets(balance);
 
         (bool hasValue, bool hasStaleData, bool needsTrackedAssetCap, uint256 totalValue) = _resolveCurrentValuation();
 
         if (hasValue && totalValue > 0) {
             if (needsTrackedAssetCap && (hasStaleData || emergencyMode)) {
-                uint256 trackedAssets = allocatedInAdapterBounded + totalExternalDeposits;
                 if (totalValue > trackedAssets) {
                     totalValue = trackedAssets;
                 }
@@ -212,6 +208,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (totalAllocations == 0) {
             return 0; // Legitimate 0 value when nothing allocated
         }
+        if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
+            uint256 cachedBounded = cachedValuation < trackedAssets ? cachedValuation : trackedAssets;
+            return cachedBounded * (10000 - EMERGENCY_HAIRCUT) / 10000;
+        }
         if (
             emergencyMode && cachedValuationTimestamp != 0
                 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE
@@ -223,6 +223,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (emergencyMode) {
             // gate deposits/withdrawals via EmergencyGate
             return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+        }
+        if (trackedAssets > 0) {
+            return trackedAssets * (10000 - EMERGENCY_HAIRCUT) / 10000;
         }
 
         revert ValuationUnavailable();
@@ -424,6 +427,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     function setSettlementQueue(address settlementQueue_) external onlyOwner {
         if (settlementQueue_ == address(0)) revert InvalidAmount();
+        if (settlementQueue != address(0) && settlementQueue != settlementQueue_) revert InvalidData();
+        if (
+            ISettlementQueueValidation(settlementQueue_).vault() != parentVault
+                || ISettlementQueueValidation(settlementQueue_).sleeve() != address(this)
+        ) {
+            revert InvalidData();
+        }
         settlementQueue = settlementQueue_;
         emit SettlementQueueSet(settlementQueue_);
     }
@@ -439,12 +449,24 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         if (reduction == 0) {
+            if (allocations[strategyId] == 0) {
+                SafeERC20Lib.safeTransfer(asset, parentVault, assetsReceived);
+            } else {
+                settlementSurplusAssets += assetsReceived;
+            }
             emit SettlementRecorded(strategyId, assetsReceived, oldExtDeposits);
             return;
         }
 
         externalDeposits[strategyId] = oldExtDeposits - reduction;
         totalExternalDeposits -= reduction;
+
+        uint256 surplus = assetsReceived - reduction;
+        if (allocations[strategyId] == 0) {
+            SafeERC20Lib.safeTransfer(asset, parentVault, assetsReceived);
+        } else if (surplus > 0) {
+            settlementSurplusAssets += surplus;
+        }
 
         emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
         emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);
@@ -603,11 +625,25 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high");
         }
 
-        if (totalValue > 0) {
-            cachedValuation = totalValue;
-            cachedValuationTimestamp = block.timestamp;
-            emit CachedValuationRefreshed(totalValue, block.timestamp);
+        cachedValuation = totalValue;
+        cachedValuationTimestamp = block.timestamp;
+        emit CachedValuationRefreshed(totalValue, block.timestamp);
+    }
+
+    function quoteSnapshotAssets() external view returns (uint256 assets, bool healthy) {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        (, , uint256 trackedAssets) = _trackedAssets(balance);
+        (bool hasValue, bool hasStaleData,, uint256 totalValue) = _resolveCurrentValuation();
+
+        if (!hasValue) {
+            return (trackedAssets, false);
         }
+
+        if (totalValue > trackedAssets) {
+            totalValue = trackedAssets;
+        }
+
+        return (totalValue, !hasStaleData && !emergencyMode);
     }
 
     /* VIEW FUNCTIONS */
@@ -724,6 +760,21 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
     }
 
+    function _trackedAssets(uint256 balance)
+        internal
+        view
+        returns (uint256 allocatedInAdapterBounded, uint256 trackedSurplus, uint256 trackedAssets)
+    {
+        uint256 allocatedInAdapter =
+            totalAllocations > totalExternalDeposits ? totalAllocations - totalExternalDeposits : 0;
+
+        allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
+
+        uint256 idleBalance = balance > allocatedInAdapterBounded ? balance - allocatedInAdapterBounded : 0;
+        trackedSurplus = settlementSurplusAssets < idleBalance ? settlementSurplusAssets : idleBalance;
+        trackedAssets = allocatedInAdapterBounded + totalExternalDeposits + trackedSurplus;
+    }
+
     function _resolveCurrentValuation()
         internal
         view
@@ -828,4 +879,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         emit EmergencyModeDisabled(block.timestamp, duration);
     }
+}
+
+interface ISettlementQueueValidation {
+    function vault() external view returns (address);
+    function sleeve() external view returns (address);
 }

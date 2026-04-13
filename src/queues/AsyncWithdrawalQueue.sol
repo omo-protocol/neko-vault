@@ -41,6 +41,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
     address public settlementHook;
     uint256 public nextRequestId = 1;
     uint256 public totalReservedLocalAssets;
+    uint256 public totalProtectedAssets;
 
     mapping(uint256 requestId => WithdrawalRequest request) internal _requests;
     mapping(bytes32 guid => bool seen) public processedGuids;
@@ -98,6 +99,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
                 ? WithdrawalRequestStatus.Claimable
                 : WithdrawalRequestStatus.Pending
         });
+        totalProtectedAssets += reservedLocalAssets;
 
         emit WithdrawalRequested(requestId, msg.sender, receiver, shares, assetEstimate);
         if (reservedLocalAssets >= assetEstimate) {
@@ -130,6 +132,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
 
         processedGuids[guid] = true;
         request.assetsFunded += assetsReceived;
+        totalProtectedAssets += assetsReceived;
         IUniversalAdapterEscrow(sleeve).recordSettlement(strategyId, assetsReceived);
 
         uint256 currentRequirement = vault.previewRedeem(request.sharesEscrowed);
@@ -145,12 +148,11 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
 
     function claim(uint256 requestId) external nonReentrant returns (uint256 assetsOut) {
         WithdrawalRequest storage request = _requests[requestId];
-        if (request.status != WithdrawalRequestStatus.Claimable) {
-            _refreshRequest(requestId, request);
-            if (request.status != WithdrawalRequestStatus.Claimable) revert RequestNotClaimable();
-        }
+        _refreshRequest(requestId, request);
+        if (request.status != WithdrawalRequestStatus.Claimable) revert RequestNotClaimable();
 
         request.status = WithdrawalRequestStatus.Claimed;
+        totalProtectedAssets -= request.reservedLocalAssets + request.assetsFunded;
         totalReservedLocalAssets -= request.reservedLocalAssets;
         request.reservedLocalAssets = 0;
         assetsOut = vault.redeem(request.sharesEscrowed, request.receiver, address(this));

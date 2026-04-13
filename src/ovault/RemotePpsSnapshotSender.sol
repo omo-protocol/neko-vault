@@ -9,14 +9,19 @@ contract RemotePpsSnapshotSender {
     error NotVaultManager();
     error InvalidConfig();
     error NoPeer(uint32 dstEid);
+    error InvalidRefundAddress();
 
     event PeerSet(uint32 indexed eid, bytes32 peer);
+    event RefundAddressSet(address refundAddress);
     event SnapshotSent(uint32 indexed dstEid, uint256 assets, uint64 snapshotTimestamp, bytes32 guid);
 
     address public immutable owner;
     address public immutable vaultManager;
     address public immutable sleeve;
     ILayerZeroEndpointV2 public immutable endpoint;
+    address public refundAddress;
+    uint256 public cachedSnapshotAssets;
+    uint64 public cachedSnapshotTimestamp;
 
     mapping(uint32 eid => bytes32 peer) public peers;
 
@@ -38,6 +43,7 @@ contract RemotePpsSnapshotSender {
         vaultManager = vaultManager_;
         sleeve = sleeve_;
         endpoint = ILayerZeroEndpointV2(endpoint_);
+        refundAddress = owner_;
     }
 
     function setPeer(uint32 eid, bytes32 peer) external onlyOwner {
@@ -45,15 +51,22 @@ contract RemotePpsSnapshotSender {
         emit PeerSet(eid, peer);
     }
 
+    function setRefundAddress(address refundAddress_) external onlyOwner {
+        if (refundAddress_ == address(0)) revert InvalidRefundAddress();
+        refundAddress = refundAddress_;
+        emit RefundAddressSet(refundAddress_);
+    }
+
     function quoteSnapshot(uint32 dstEid, bytes calldata options) external view returns (MessagingFee memory fee) {
         bytes32 receiver = peers[dstEid];
         if (receiver == bytes32(0)) revert NoPeer(dstEid);
+        (uint256 assets, uint64 snapshotTimestamp) = _previewSnapshot();
 
         fee = endpoint.quote(
             MessagingParams({
                 dstEid: dstEid,
                 receiver: receiver,
-                message: abi.encode(IAdapter(sleeve).realAssets(), uint64(block.timestamp)),
+                message: abi.encode(assets, snapshotTimestamp),
                 options: options,
                 payInLzToken: false
             }),
@@ -70,8 +83,7 @@ contract RemotePpsSnapshotSender {
         bytes32 receiver = peers[dstEid];
         if (receiver == bytes32(0)) revert NoPeer(dstEid);
 
-        uint256 assets = IAdapter(sleeve).realAssets();
-        uint64 snapshotTimestamp = uint64(block.timestamp);
+        (uint256 assets, uint64 snapshotTimestamp) = _currentSnapshot();
         receipt = endpoint.send{value: msg.value}(
             MessagingParams({
                 dstEid: dstEid,
@@ -80,9 +92,54 @@ contract RemotePpsSnapshotSender {
                 options: options,
                 payInLzToken: false
             }),
-            payable(msg.sender)
+            payable(refundAddress)
         );
 
         emit SnapshotSent(dstEid, assets, snapshotTimestamp, receipt.guid);
+    }
+
+    function _previewSnapshot() internal view returns (uint256 assets, uint64 snapshotTimestamp) {
+        (bool success, uint256 liveAssets, bool healthy) = _readSnapshot();
+        if (success && healthy) {
+            return (liveAssets, uint64(block.timestamp));
+        }
+        if (cachedSnapshotTimestamp != 0) {
+            return (cachedSnapshotAssets, cachedSnapshotTimestamp);
+        }
+        if (success) {
+            return (liveAssets, 0);
+        }
+        return (0, 0);
+    }
+
+    function _currentSnapshot() internal returns (uint256 assets, uint64 snapshotTimestamp) {
+        (bool success, uint256 liveAssets, bool healthy) = _readSnapshot();
+        if (success && healthy) {
+            cachedSnapshotAssets = liveAssets;
+            cachedSnapshotTimestamp = uint64(block.timestamp);
+            return (liveAssets, cachedSnapshotTimestamp);
+        }
+        if (cachedSnapshotTimestamp != 0) {
+            return (cachedSnapshotAssets, cachedSnapshotTimestamp);
+        }
+        if (success) {
+            return (liveAssets, 0);
+        }
+        return (0, 0);
+    }
+
+    function _readSnapshot() internal view returns (bool success, uint256 assets, bool healthy) {
+        bytes memory data;
+        (success, data) = sleeve.staticcall(abi.encodeWithSignature("quoteSnapshotAssets()"));
+        if (success && data.length >= 64) {
+            (assets, healthy) = abi.decode(data, (uint256, bool));
+            return (true, assets, healthy);
+        }
+
+        try IAdapter(sleeve).realAssets() returns (uint256 liveAssets) {
+            return (true, liveAssets, true);
+        } catch {
+            return (false, 0, false);
+        }
     }
 }

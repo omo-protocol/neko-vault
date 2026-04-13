@@ -785,6 +785,32 @@ contract VaultTimeLockWrapperTest is Test {
         vm.stopPrank();
     }
 
+    function test_erc20_selfTransferPreservesDepositBatches() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), 1000e18);
+        wrapper.deposit(600e18);
+        vm.warp(block.timestamp + 1 days);
+        wrapper.deposit(400e18);
+
+        uint256 depositCountBefore = wrapper.getDepositCount(alice);
+        (uint256 amount0Before, uint256 time0Before) = wrapper.userDeposits(alice, 0);
+        (uint256 amount1Before, uint256 time1Before) = wrapper.userDeposits(alice, 1);
+
+        wrapper.transfer(alice, 250e18);
+
+        assertEq(wrapper.balanceOf(alice), 1_000e18, "Self transfer should preserve balance");
+        assertEq(wrapper.getDepositCount(alice), depositCountBefore, "Self transfer should preserve batch count");
+
+        (uint256 amount0After, uint256 time0After) = wrapper.userDeposits(alice, 0);
+        (uint256 amount1After, uint256 time1After) = wrapper.userDeposits(alice, 1);
+
+        assertEq(amount0After, amount0Before, "First batch amount should be unchanged");
+        assertEq(time0After, time0Before, "First batch timestamp should be unchanged");
+        assertEq(amount1After, amount1Before, "Second batch amount should be unchanged");
+        assertEq(time1After, time1Before, "Second batch timestamp should be unchanged");
+        vm.stopPrank();
+    }
+
     function test_erc20_transferFromWorksWithApproval() public {
         vm.startPrank(alice);
         asset.approve(address(wrapper), 1000e18);

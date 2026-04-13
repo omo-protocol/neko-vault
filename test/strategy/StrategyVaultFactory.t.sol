@@ -77,7 +77,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -145,7 +144,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn-onchain"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -180,7 +178,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -222,7 +219,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn-omni"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -247,8 +243,43 @@ contract StrategyVaultFactoryTest is Test {
         assertTrue(vaultComposer != address(0));
         assertEq(ShareOFTAdapter(shareAdapter).token(), deployment.vault);
         assertEq(ShareOFTAdapter(shareAdapter).owner(), owner);
+        assertEq(ShareOFTAdapter(shareAdapter).sharedDecimals(), 4);
         assertEq(VaultComposerSync(vaultComposer).ASSET_OFT(), address(omnichainAssetOFT));
         assertEq(VaultComposerSync(vaultComposer).SHARE_OFT(), shareAdapter);
+    }
+
+    function testCreateDeltaNeutralVaultRejectsTimelockWithOmnichainVault() public {
+        DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: true,
+            enableOmnichainVault: true,
+            asset: address(omnichainAssetOFT),
+            valuer: address(valuer),
+            name: "Delta Neutral Vault",
+            symbol: "ldn",
+            strategyIdData: bytes("hyperliquid-dn-omni-lock"),
+            spotSideMode: SpotSideMode.Hold,
+            targetReserveBps: 2_000,
+            maxDeltaBps: 250,
+            kellyConfig: _defaultKellyConfig(),
+            automationConfig: _defaultDeltaAutomationConfig(),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("delta-omni-lock"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: HYPERLIQUID_VENUE_ID,
+                venue: address(coreWriter),
+                helper: address(l1Read),
+                usesLayerZero: false
+            }),
+            chainManifests: _homeManifestWithAssetOFT(address(omnichainAssetOFT))
+        });
+
+        vm.expectRevert(StrategyVaultFactory.InvalidConfig.selector);
+        childFactory.createDeltaNeutralVault(params);
     }
 
     function testCreateDeltaNeutralVaultWithOmnichainInfrastructureRejectsMissingHomeAssetOFT() public {
@@ -265,7 +296,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn-omni"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -301,7 +331,6 @@ contract StrategyVaultFactoryTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
             absoluteCap: 1_000_000e6,
@@ -339,6 +368,40 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(remoteManifest.chainId, 56);
     }
 
+    function testCreatePTLoopVaultRejectsTimelockWithOmnichainVault() public {
+        PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: true,
+            enableOmnichainVault: true,
+            asset: address(omnichainAssetOFT),
+            market: PENDLE_MARKET,
+            ptToken: PENDLE_PT,
+            valuer: address(valuer),
+            name: "PT Loop Vault",
+            symbol: "lpt",
+            strategyIdData: bytes("pendle-loop-omni-lock"),
+            targetReserveBps: 1_500,
+            maxUnwindSlippageBps: 600,
+            automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("pt-loop-omni-lock"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: PENDLE_VENUE_ID,
+                venue: address(0x2001),
+                helper: address(0x2002),
+                usesLayerZero: true
+            }),
+            chainManifests: _homeAndRemoteManifestWithAssetOFT(address(omnichainAssetOFT))
+        });
+
+        vm.expectRevert(StrategyVaultFactory.InvalidConfig.selector);
+        childFactory.createPTLoopVault(params);
+    }
+
     function testCreatePTLoopVaultAllowsZeroValuerForAsyncRemoteSnapshots() public {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
@@ -354,7 +417,6 @@ contract StrategyVaultFactoryTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop-remote"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
             absoluteCap: 1_000_000e6,
@@ -389,7 +451,6 @@ contract StrategyVaultFactoryTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop-omni"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
             absoluteCap: 1_000_000e6,
@@ -427,7 +488,6 @@ contract StrategyVaultFactoryTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop-omni"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
             absoluteCap: 1_000_000e6,
@@ -462,7 +522,6 @@ contract StrategyVaultFactoryTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
             absoluteCap: 1_000_000e6,
@@ -496,7 +555,6 @@ contract StrategyVaultFactoryTest is Test {
             strategyIdData: bytes("hyperliquid-dn"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),

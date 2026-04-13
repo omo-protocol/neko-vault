@@ -359,7 +359,42 @@ contract StrategyControllersTest is Test {
         assertEq(vault.balanceOf(address(queue)), 0);
     }
 
-    function testPTLoopDefersDepositLoopingUntilSyncAndStillUnwindsOnWithdraw() public {
+    function testDeltaNeutralSyncPreservesClaimableWithdrawalReserve() public {
+        Deployment memory deployment = _deployDeltaNeutral(false);
+        DeltaNeutralController controller = DeltaNeutralController(deployment.controller);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+
+        _mockCustomHyperliquidReads(deployment.sleeve, 100_000_000, 100_000_000, 0, 0, 0, 1_000_000_000, 100_000_000);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        uint256 sharesNeeded = vault.previewWithdraw(700e6);
+        vault.approve(address(queue), sharesNeeded);
+        uint256 requestId = queue.requestWithdraw(700e6, user);
+        vm.stopPrank();
+
+        WithdrawalRequest memory request = queue.getRequest(requestId);
+        assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Claimable));
+        assertEq(request.reservedLocalAssets, 700e6);
+        assertEq(queue.totalProtectedAssets(), 700e6);
+
+        _mockCustomHyperliquidReads(
+            deployment.sleeve, 100_000_000, 100_000_000, -5_000_000, 500_000_000, 0, 100_000_000, 90_000_000
+        );
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        queue.claim(requestId);
+
+        assertEq(queue.totalProtectedAssets(), 0);
+        assertEq(asset.balanceOf(user), 700e6);
+    }
+
+    function testPTLoopDefersDepositLoopingUntilSyncAndRejectsDirectUserExitUnwinds() public {
         Deployment memory deployment = _deployPTLoop(false);
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -380,12 +415,13 @@ contract StrategyControllersTest is Test {
         assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
 
         vm.prank(user);
+        vm.expectRevert();
         vault.withdraw(700e6, user, user);
 
-        assertEq(asset.balanceOf(user), 700e6);
-        assertLt(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
         assertEq(asset.balanceOf(address(vault)), 0);
-        assertGt(asset.balanceOf(deployment.sleeve), 0);
+        assertEq(asset.balanceOf(deployment.sleeve), 150e6);
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
@@ -500,6 +536,48 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
+    function testPTLoopSyncPreservesProtectedSettlementLiquidity() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        PTLoopController controller = PTLoopController(deployment.controller);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        vm.startPrank(user);
+        uint256 sharesNeeded = vault.previewWithdraw(700e6);
+        vault.approve(address(queue), sharesNeeded);
+        uint256 requestId = queue.requestWithdraw(700e6, user);
+        vm.stopPrank();
+
+        assertEq(queue.totalProtectedAssets(), 150e6);
+
+        asset.mint(address(composer), 700e6);
+        bytes memory message = OFTComposeMsgCodec.encode(
+            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(requestId))
+        );
+        composer.lzCompose(address(assetOFT), bytes32("remote-fill-2"), message, address(0), "");
+
+        assertEq(queue.totalProtectedAssets(), 850e6);
+
+        vm.prank(owner);
+        assertFalse(controller.sync());
+
+        queue.claim(requestId);
+
+        assertEq(queue.totalProtectedAssets(), 0);
+        assertEq(asset.balanceOf(user), 700e6);
+    }
+
     function testCrossChainPpsSnapshotPropagatesToHomeSyncPps() public {
         Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
@@ -560,6 +638,107 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
+    function testCrossChainSettlementComposerStoresUndecodablePayloadForRecovery() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        asset.mint(address(composer), 700e6);
+        bytes32 guid = bytes32("decode-fail");
+        bytes memory message =
+            OFTComposeMsgCodec.encode(1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), hex"1234"));
+
+        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+
+        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
+        assertEq(requestId, 0);
+        assertEq(amountReceived, 700e6);
+
+        vm.prank(owner);
+        composer.recoverPendingSettlement(guid, user);
+
+        (, amountReceived) = composer.pendingSettlements(guid);
+        assertEq(amountReceived, 0);
+        assertEq(asset.balanceOf(user), 700e6);
+    }
+
+    function testAsyncWithdrawalQueueRechecksFifoOnClaim() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        PTLoopController controller = PTLoopController(deployment.controller);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        vm.startPrank(user);
+        uint256 firstShares = vault.previewWithdraw(700e6);
+        vault.approve(address(queue), type(uint256).max);
+        uint256 firstRequestId = queue.requestWithdraw(700e6, user);
+        vm.stopPrank();
+
+        asset.mint(deployment.sleeve, 100e6);
+
+        vm.startPrank(user);
+        uint256 secondShares = vault.previewWithdraw(100e6);
+        uint256 secondRequestId = queue.requestWithdraw(100e6, user);
+        vm.stopPrank();
+
+        WithdrawalRequest memory firstRequest = queue.getRequest(firstRequestId);
+        WithdrawalRequest memory secondRequest = queue.getRequest(secondRequestId);
+        assertEq(firstRequest.sharesEscrowed, firstShares);
+        assertEq(secondRequest.sharesEscrowed, secondShares);
+        assertEq(uint8(secondRequest.status), uint8(WithdrawalRequestStatus.Claimable));
+
+        vm.expectRevert(AsyncWithdrawalQueue.RequestNotClaimable.selector);
+        queue.claim(secondRequestId);
+    }
+
+    function testRemotePpsSnapshotStoreRejectsOutOfOrderSnapshotsAndClearsOnPeerChange() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
+        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
+        address remoteReporter = makeAddr("remoteReporter");
+        address newRemoteReporter = makeAddr("newRemoteReporter");
+        uint64 firstTimestamp = uint64(block.timestamp);
+
+        vm.prank(owner);
+        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
+
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
+            bytes32("pps-1"),
+            abi.encode(uint256(300e6), firstTimestamp),
+            address(0),
+            ""
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(RemotePpsSnapshotStore.StaleSnapshotTimestamp.selector, 30_102, firstTimestamp - 1, firstTimestamp)
+        );
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 2}),
+            bytes32("pps-2"),
+            abi.encode(uint256(200e6), firstTimestamp - 1),
+            address(0),
+            ""
+        );
+
+        vm.prank(owner);
+        store.setPeer(30_102, bytes32(uint256(uint160(newRemoteReporter))));
+
+        (uint256 assetsStored, uint64 snapshotTimestamp, uint64 receivedAt, uint64 nonce) = store.snapshots(30_102);
+        assertEq(assetsStored, 0);
+        assertEq(snapshotTimestamp, 0);
+        assertEq(receivedAt, 0);
+        assertEq(nonce, 0);
+    }
+
     function testPTLoopControllerSupportsCrossChainPlanning() public {
         Deployment memory deployment = _deployPTLoop(true);
         PTLoopController controller = PTLoopController(deployment.controller);
@@ -599,7 +778,6 @@ contract StrategyControllersTest is Test {
             strategyIdData: bytes("hyperliquid-dn"),
             spotSideMode: SpotSideMode.Hold,
             targetReserveBps: 2_000,
-            minReserveBps: 500,
             maxDeltaBps: 250,
             kellyConfig: _defaultKellyConfig(),
             automationConfig: _defaultDeltaAutomationConfig(),
@@ -683,7 +861,6 @@ contract StrategyControllersTest is Test {
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
             targetReserveBps: 1_500,
-            minReserveBps: 500,
             maxUnwindSlippageBps: 600,
             automationConfig: _defaultPTAutomationConfig(),
             absoluteCap: 1_000_000e6,

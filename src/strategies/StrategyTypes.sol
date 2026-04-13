@@ -37,7 +37,6 @@ struct StrategySpec {
     address asset;
     bytes32 strategyId;
     uint256 targetReserveBps;
-    uint256 minReserveBps;
 }
 
 struct ChainManifest {
@@ -139,7 +138,6 @@ struct DeltaNeutralDeploymentParams {
     bytes strategyIdData;
     SpotSideMode spotSideMode;
     uint256 targetReserveBps;
-    uint256 minReserveBps;
     uint256 maxDeltaBps;
     DeltaNeutralKellyConfig kellyConfig;
     DeltaNeutralAutomationConfig automationConfig;
@@ -165,7 +163,6 @@ struct PTLoopDeploymentParams {
     string symbol;
     bytes strategyIdData;
     uint256 targetReserveBps;
-    uint256 minReserveBps;
     uint256 maxUnwindSlippageBps;
     PTLoopAutomationConfig automationConfig;
     uint256 absoluteCap;

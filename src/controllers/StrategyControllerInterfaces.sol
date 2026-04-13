@@ -26,3 +26,7 @@ interface IOnchainStrategyValuer {
 interface IRemotePpsSnapshotStore {
     function quoteRemoteAssets() external view returns (uint256 assets, bool healthy);
 }
+
+interface IWithdrawalReserveSource {
+    function totalProtectedAssets() external view returns (uint256 assets);
+}

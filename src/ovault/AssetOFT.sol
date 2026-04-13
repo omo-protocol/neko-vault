@@ -10,6 +10,10 @@ import {OFT} from "@layerzerolabs/oft-evm/contracts/OFT.sol";
 /// @dev Enables cross-chain transfers of vault collateral assets
 /// @dev Uses LayerZero OFT standard for omnichain fungibility
 contract AssetOFT is OFT {
+    error MintDisabled();
+
+    uint8 internal constant SHARED_DECIMALS = 4;
+
     /// @notice Initializes the Asset OFT contract
     /// @param _name Token name (e.g., "USD Tether")
     /// @param _symbol Token symbol (e.g., "USDT")
@@ -22,12 +26,17 @@ contract AssetOFT is OFT {
         address _delegate
     ) OFT(_name, _symbol, _lzEndpoint, _delegate) Ownable(_delegate) {}
 
-    /// @notice Mints initial tokens for testing/liquidity
-    /// @dev Should only be called during deployment for initial setup
-    /// @dev In production, consider restricting or removing this function
-    /// @param _to Address to receive minted tokens
-    /// @param _amount Amount of tokens to mint
-    function mint(address _to, uint256 _amount) external onlyOwner {
-        _mint(_to, _amount);
+    /// @notice Disabled owner mint hook kept only for ABI compatibility
+    function mint(address, uint256) external pure {
+        revert MintDisabled();
+    }
+
+    function sharedDecimals() public pure override returns (uint8) {
+        return SHARED_DECIMALS;
+    }
+
+    function transferOwnership(address newOwner) public override onlyOwner {
+        super.transferOwnership(newOwner);
+        endpoint.setDelegate(newOwner);
     }
 }
