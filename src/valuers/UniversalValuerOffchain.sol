@@ -108,14 +108,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         if (confidence < minConfidence) revert LowConfidence();
 
-        uint256 totalWeight = _verifySignatures(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            signatures
-        );
+        uint256 totalWeight = _verifySignatures(strategyId, value, confidence, nonce, expiry, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
@@ -180,7 +173,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @dev Used by isValuationHealthy() to determine if any strategy has stale data
     /// @param escrow The escrow address to compute total value for
     /// @return result Struct containing value and staleness indicators
-    function _computeTotalValueWithStaleness(address escrow) internal view returns (IUniversalValuerOffchain.TotalValueResult memory result) {
+    function _computeTotalValueWithStaleness(address escrow)
+        internal
+        view
+        returns (IUniversalValuerOffchain.TotalValueResult memory result)
+    {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -195,18 +192,16 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
                 result.value += report.value;
                 result.freshCount++;
-            }
-            else if (fallbackValues[strategyId] > 0) {
+            } else if (fallbackValues[strategyId] > 0) {
                 result.value += fallbackValues[strategyId];
                 result.hasStaleData = true;
                 result.fallbackCount++;
-            }
-            else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence) {
+            } else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence)
+            {
                 result.value += report.value;
                 result.hasStaleData = true;
                 result.staleCount++;
-            }
-            else {
+            } else {
                 result.hasStaleData = true;
                 result.staleCount++;
             }
@@ -222,22 +217,14 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 expiry,
         bytes[] calldata signatures
     ) external override onlyOwner notEmergency {
-        if (strategyIds.length != values.length ||
-            strategyIds.length != confidences.length) {
+        if (strategyIds.length != values.length || strategyIds.length != confidences.length) {
             revert ArrayLengthMismatch();
         }
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
-        bytes32 batchHash = keccak256(abi.encode(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            block.chainid,
-            address(this)
-        ));
+        bytes32 batchHash =
+            keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry, block.chainid, address(this)));
         uint256 totalWeight = _verifyBatchSignatures(batchHash, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
@@ -316,20 +303,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /* ADMIN FUNCTIONS */
 
     /// @notice Initiate signer configuration change (step 1 of 2-step process)
-    function initiateSignerChange(
-        address signer,
-        bool authorized,
-        uint256 weight
-    ) external onlyOwner {
+    function initiateSignerChange(address signer, bool authorized, uint256 weight) external onlyOwner {
         if (!authorized && signers[signer].authorized) {
             signerChangeTimestamp[signer] = block.timestamp + SIGNER_TIMELOCK;
             pendingSignerRemoval[signer] = true;
             emit SignerRemovalInitiated(signer, signerChangeTimestamp[signer]);
         } else {
-            signers[signer] = SignerConfig({
-                authorized: authorized,
-                weight: weight
-            });
+            signers[signer] = SignerConfig({authorized: authorized, weight: weight});
             emit SignerConfigured(signer, authorized, weight);
         }
     }
@@ -339,10 +319,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (!pendingSignerRemoval[signer]) revert NoSignerRemovalPending();
         if (block.timestamp < signerChangeTimestamp[signer]) revert SignerRemovalTimelockNotExpired();
 
-        signers[signer] = SignerConfig({
-            authorized: false,
-            weight: 0
-        });
+        signers[signer] = SignerConfig({authorized: false, weight: 0});
 
         pendingSignerRemoval[signer] = false;
         signerChangeTimestamp[signer] = 0;
@@ -477,11 +454,15 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        if (block.timestamp > report.timestamp + config.maxStaleness) {
+        if (report.timestamp == 0) {
             return true;
         }
-        
-        if (report.confidence < config.minConfidence) {
+
+        if (block.timestamp > report.timestamp + _effectiveMaxStaleness(config)) {
+            return true;
+        }
+
+        if (report.confidence < _effectiveMinConfidence(config)) {
             return true;
         }
 
@@ -515,20 +496,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 expiry,
         bytes[] calldata signatures
     ) internal view returns (uint256 totalWeight) {
-        bytes32 messageHash = keccak256(abi.encode(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(this)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, block.chainid, address(this)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
@@ -546,7 +517,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
+            if (
+                signers[signer].authorized
+                    && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)
+            ) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;
@@ -565,14 +539,12 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     }
 
     /// @dev Verify batch signatures
-    function _verifyBatchSignatures(
-        bytes32 batchHash,
-        bytes[] calldata signatures
-    ) internal view returns (uint256 totalWeight) {
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            batchHash
-        ));
+    function _verifyBatchSignatures(bytes32 batchHash, bytes[] calldata signatures)
+        internal
+        view
+        returns (uint256 totalWeight)
+    {
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
 
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
@@ -590,7 +562,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
+            if (
+                signers[signer].authorized
+                    && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)
+            ) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;

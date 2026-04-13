@@ -15,10 +15,11 @@ contract RemotePpsSnapshotSender {
     error InvalidConfig();
     error NoPeer(uint32 dstEid);
     error InvalidRefundAddress();
+    error SnapshotUnavailable();
 
     event PeerSet(uint32 indexed eid, bytes32 peer);
     event RefundAddressSet(address refundAddress);
-    event SnapshotSent(uint32 indexed dstEid, uint256 assets, uint64 snapshotTimestamp, bytes32 guid);
+    event SnapshotSent(uint32 indexed dstEid, uint256 assets, uint64 snapshotTimestamp, bool healthy, bytes32 guid);
 
     address public immutable owner;
     address public immutable vaultManager;
@@ -65,13 +66,13 @@ contract RemotePpsSnapshotSender {
     function quoteSnapshot(uint32 dstEid, bytes calldata options) external view returns (MessagingFee memory fee) {
         bytes32 receiver = peers[dstEid];
         if (receiver == bytes32(0)) revert NoPeer(dstEid);
-        (uint256 assets, uint64 snapshotTimestamp) = _previewSnapshot();
+        (uint256 assets, uint64 snapshotTimestamp, bool healthy) = _previewSnapshot();
 
         fee = endpoint.quote(
             MessagingParams({
                 dstEid: dstEid,
                 receiver: receiver,
-                message: abi.encode(assets, snapshotTimestamp),
+                message: abi.encode(assets, snapshotTimestamp, healthy),
                 options: options,
                 payInLzToken: false
             }),
@@ -88,43 +89,36 @@ contract RemotePpsSnapshotSender {
         bytes32 receiver = peers[dstEid];
         if (receiver == bytes32(0)) revert NoPeer(dstEid);
 
-        (uint256 assets, uint64 snapshotTimestamp) = _currentSnapshot();
+        (uint256 assets, uint64 snapshotTimestamp, bool healthy) = _currentSnapshot();
         receipt = endpoint.send{value: msg.value}(
             MessagingParams({
                 dstEid: dstEid,
                 receiver: receiver,
-                message: abi.encode(assets, snapshotTimestamp),
+                message: abi.encode(assets, snapshotTimestamp, healthy),
                 options: options,
                 payInLzToken: false
             }),
             payable(refundAddress)
         );
 
-        emit SnapshotSent(dstEid, assets, snapshotTimestamp, receipt.guid);
+        emit SnapshotSent(dstEid, assets, snapshotTimestamp, healthy, receipt.guid);
     }
 
-    function _previewSnapshot() internal view returns (uint256 assets, uint64 snapshotTimestamp) {
-        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool healthy) = _readSnapshot();
-        if (success && healthy && liveTimestamp != 0) {
-            return (liveAssets, liveTimestamp);
-        }
-        if (cachedSnapshotTimestamp != 0) {
-            return (cachedSnapshotAssets, cachedSnapshotTimestamp);
-        }
-        return (0, 0);
+    function _previewSnapshot() internal view returns (uint256 assets, uint64 snapshotTimestamp, bool healthy) {
+        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool liveHealthy) = _readSnapshot();
+        if (!success) revert SnapshotUnavailable();
+        return (liveAssets, liveTimestamp, liveHealthy);
     }
 
-    function _currentSnapshot() internal returns (uint256 assets, uint64 snapshotTimestamp) {
-        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool healthy) = _readSnapshot();
-        if (success && healthy && liveTimestamp != 0) {
+    function _currentSnapshot() internal returns (uint256 assets, uint64 snapshotTimestamp, bool healthy) {
+        (bool success, uint256 liveAssets, uint64 liveTimestamp, bool liveHealthy) = _readSnapshot();
+        if (!success) revert SnapshotUnavailable();
+        if (liveHealthy && liveTimestamp != 0) {
             cachedSnapshotAssets = liveAssets;
             cachedSnapshotTimestamp = liveTimestamp;
-            return (liveAssets, cachedSnapshotTimestamp);
+            return (liveAssets, cachedSnapshotTimestamp, liveHealthy);
         }
-        if (cachedSnapshotTimestamp != 0) {
-            return (cachedSnapshotAssets, cachedSnapshotTimestamp);
-        }
-        return (0, 0);
+        return (liveAssets, liveTimestamp, liveHealthy);
     }
 
     function _readSnapshot()
@@ -142,7 +136,7 @@ contract RemotePpsSnapshotSender {
         (success, data) = sleeve.staticcall(abi.encodeWithSignature("quoteSnapshotAssets()"));
         if (success && data.length >= 64) {
             (assets, healthy) = abi.decode(data, (uint256, bool));
-            return (true, assets, healthy ? uint64(block.timestamp) : 0, healthy);
+            return (true, assets, 0, healthy);
         }
 
         try IAdapter(sleeve).realAssets() returns (uint256 liveAssets) {

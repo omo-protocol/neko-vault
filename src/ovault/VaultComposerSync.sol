@@ -58,28 +58,27 @@ contract VaultComposerSync is BaseVaultComposerSync {
     error UserCannotReceiveShares(address user);
     error UserCannotSendShares(address user);
     error UserCannotReceiveAssets(address user);
+    error ZeroDestinationAmount(address oft, uint256 amountLD);
 
     /// @notice Initializes the vault composer
     /// @param _vault VaultV2 contract address (ERC-4626 compliant)
     /// @param _assetOFT Asset OFT contract address
     /// @param _shareOFT Share OFT Adapter contract address (lockbox on hub)
-    constructor(
-        address _vault,
-        address _assetOFT,
-        address _shareOFT
-    ) BaseVaultComposerSync(_vault, _assetOFT, _shareOFT) {}
+    constructor(address _vault, address _assetOFT, address _shareOFT)
+        BaseVaultComposerSync(_vault, _assetOFT, _shareOFT)
+    {}
 
     /// @notice Get quote for cross-chain vault operation
     /// @dev SECURITY FIX: Overrides base implementation to remove max* checks
     ///      VaultV2 returns 0 for maxDeposit/maxRedeem due to gate unpredictability
     ///      (gates can arbitrarily revert, so conservative design returns 0)
-    ///      
+    ///
     ///      Quote is an ESTIMATE only. Actual execution may fail if:
     ///      - Gates block the operation (validated at execution time in deposit/redeem)
     ///      - Insufficient balance/allowance
     ///      - Share price changes significantly (use slippage protection in composeMsg)
     ///      - LayerZero message fails (out of gas, DVN unavailable, etc.)
-    ///      
+    ///
     ///      This is acceptable because cross-chain operations already have many
     ///      potential failure points. Quote provides messaging fee estimate for UX.
     ///      Actual validation happens atomically during send() execution.
@@ -88,44 +87,40 @@ contract VaultComposerSync is BaseVaultComposerSync {
     /// @param _vaultInAmount Amount in vault terms (shares for redeem, assets for deposit)
     /// @param _sendParam OFT send parameters (will be modified with correct amountLD)
     /// @return MessagingFee Cross-chain messaging fee estimate
-    function quoteSend(
-        address /* _from */,
-        address _targetOFT,
-        uint256 _vaultInAmount,
-        SendParam memory _sendParam
-    ) external view override returns (MessagingFee memory) {
+    function quoteSend(address, /* _from */ address _targetOFT, uint256 _vaultInAmount, SendParam memory _sendParam)
+        external
+        view
+        override
+        returns (MessagingFee memory)
+    {
         if (_targetOFT == ASSET_OFT) {
             // Withdrawing: Convert shares to assets estimate
             // VaultV2.previewRedeem calculates assets user would receive for given shares
             _sendParam.amountLD = VAULT.previewRedeem(_vaultInAmount);
         } else {
-            // Depositing: Convert assets to shares estimate  
+            // Depositing: Convert assets to shares estimate
             // VaultV2.previewDeposit calculates shares user would receive for given assets
             _sendParam.amountLD = VAULT.previewDeposit(_vaultInAmount);
         }
-        
+
         // Get LayerZero messaging fee for the cross-chain send
         return IOFT(_targetOFT).quoteSend(_sendParam, false);
     }
 
     /// @dev Prevent ETH from being locked on local sends by rejecting non-zero msg.value.
-    function _sendLocal(
-        address _oft,
-        SendParam memory _sendParam,
-        address _refundAddress,
-        uint256 _msgValue
-    ) internal override {
+    function _sendLocal(address _oft, SendParam memory _sendParam, address _refundAddress, uint256 _msgValue)
+        internal
+        override
+    {
         require(_msgValue == 0, "NonZeroMsgValueOnLocal");
         super._sendLocal(_oft, _sendParam, _refundAddress, _msgValue);
     }
 
-    function lzCompose(
-        address _composeSender,
-        bytes32 _guid,
-        bytes calldata _message,
-        address,
-        bytes calldata
-    ) public payable override {
+    function lzCompose(address _composeSender, bytes32 _guid, bytes calldata _message, address, bytes calldata)
+        public
+        payable
+        override
+    {
         if (msg.sender != ENDPOINT) revert OnlyEndpoint(msg.sender);
         if (_composeSender != ASSET_OFT && _composeSender != SHARE_OFT) revert OnlyValidComposeCaller(_composeSender);
 
@@ -170,7 +165,6 @@ contract VaultComposerSync is BaseVaultComposerSync {
         IVaultV2 vault = IVaultV2(address(VAULT));
 
         if (!vault.canSendAssets(depositor)) revert UserCannotSendAssets(depositor);
-        if (!vault.canReceiveShares(depositor)) revert UserCannotReceiveShares(depositor);
 
         shareAmount = vault.deposit(_assetAmount, address(this));
     }
@@ -180,7 +174,6 @@ contract VaultComposerSync is BaseVaultComposerSync {
         IVaultV2 vault = IVaultV2(address(VAULT));
 
         if (!vault.canSendShares(redeemer)) revert UserCannotSendShares(redeemer);
-        if (!vault.canReceiveAssets(redeemer)) revert UserCannotReceiveAssets(redeemer);
 
         assetAmount = vault.redeem(_shareAmount, address(this), address(this));
     }
@@ -192,6 +185,9 @@ contract VaultComposerSync is BaseVaultComposerSync {
         address _refundAddress,
         uint256 _msgValue
     ) internal override {
+        address receiver = _composeFromToAddress(_sendParam.to);
+        if (!IVaultV2(address(VAULT)).canReceiveShares(receiver)) revert UserCannotReceiveShares(receiver);
+
         uint256 preShareBalance = IERC20(SHARE_ERC20).balanceOf(address(this));
         _deposit(_depositor, _assetAmount);
         uint256 postShareBalance = IERC20(SHARE_ERC20).balanceOf(address(this));
@@ -201,6 +197,9 @@ contract VaultComposerSync is BaseVaultComposerSync {
 
         _sendParam.amountLD = shareAmountReceived;
         _sendParam.minAmountLD = _quoteMinCrossChainAmount(SHARE_OFT, _sendParam);
+        if (_sendParam.amountLD > 0 && _sendParam.minAmountLD == 0) {
+            revert ZeroDestinationAmount(SHARE_OFT, _sendParam.amountLD);
+        }
 
         _send(SHARE_OFT, _sendParam, _refundAddress, _msgValue);
         emit Deposited(_depositor, _sendParam.to, _sendParam.dstEid, _assetAmount, shareAmountReceived);
@@ -213,6 +212,9 @@ contract VaultComposerSync is BaseVaultComposerSync {
         address _refundAddress,
         uint256 _msgValue
     ) internal override {
+        address receiver = _composeFromToAddress(_sendParam.to);
+        if (!IVaultV2(address(VAULT)).canReceiveAssets(receiver)) revert UserCannotReceiveAssets(receiver);
+
         uint256 preAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
         _redeem(_redeemer, _shareAmount);
         uint256 postAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
@@ -222,12 +224,19 @@ contract VaultComposerSync is BaseVaultComposerSync {
 
         _sendParam.amountLD = assetAmountReceived;
         _sendParam.minAmountLD = _quoteMinCrossChainAmount(ASSET_OFT, _sendParam);
+        if (_sendParam.amountLD > 0 && _sendParam.minAmountLD == 0) {
+            revert ZeroDestinationAmount(ASSET_OFT, _sendParam.amountLD);
+        }
 
         _send(ASSET_OFT, _sendParam, _refundAddress, _msgValue);
         emit Redeemed(_redeemer, _sendParam.to, _sendParam.dstEid, _shareAmount, assetAmountReceived);
     }
 
-    function _quoteMinCrossChainAmount(address _oft, SendParam memory _sendParam) internal view returns (uint256 minAmountLD) {
+    function _quoteMinCrossChainAmount(address _oft, SendParam memory _sendParam)
+        internal
+        view
+        returns (uint256 minAmountLD)
+    {
         SendParam memory quoteParam = _sendParam;
         quoteParam.minAmountLD = 0;
         (,, OFTReceipt memory receipt) = IOFT(_oft).quoteOFT(quoteParam);

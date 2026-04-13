@@ -394,7 +394,7 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
-    function testPTLoopAutomatesLoopingAndRejectsDirectUserExitUnwinds() public {
+    function testPTLoopAutomatesLoopingAndSupportsDirectUserExitUnwinds() public {
         Deployment memory deployment = _deployPTLoop(false);
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -415,13 +415,12 @@ contract StrategyControllersTest is Test {
         assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
 
         vm.prank(user);
-        vm.expectRevert();
         vault.withdraw(700e6, user, user);
 
-        assertEq(asset.balanceOf(user), 0);
-        assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
+        assertEq(asset.balanceOf(user), 700e6);
+        assertLt(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
         assertEq(asset.balanceOf(address(vault)), 0);
-        assertEq(asset.balanceOf(deployment.sleeve), 150e6);
+        assertLt(asset.balanceOf(deployment.sleeve), 150e6);
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
@@ -686,6 +685,55 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
+    function testCrossChainSettlementComposerRejectsZeroAmountCompose() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        bytes memory message = OFTComposeMsgCodec.encode(
+            1, 30_102, 0, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(uint256(1)))
+        );
+
+        vm.expectRevert(AsyncWithdrawalSettlementComposer.InvalidRequest.selector);
+        composer.lzCompose(address(assetOFT), bytes32("zero-settlement"), message, address(0), "");
+    }
+
+    function testCrossChainSettlementComposerRetrySettlementPreservesPendingOnFailure() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        asset.mint(address(composer), 700e6);
+        bytes32 guid = bytes32("retry-fail");
+        bytes memory message = OFTComposeMsgCodec.encode(
+            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(uint256(999)))
+        );
+
+        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+
+        vm.expectRevert();
+        composer.retrySettlement(guid);
+
+        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
+        assertEq(requestId, 999);
+        assertEq(amountReceived, 700e6);
+        assertEq(asset.balanceOf(address(composer)), 700e6);
+    }
+
+    function testCrossChainSettlementComposerRecoverNative() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        vm.deal(address(composer), 1 ether);
+
+        vm.prank(owner);
+        composer.recoverNative(user);
+
+        assertEq(address(composer).balance, 0);
+        assertEq(user.balance, 1 ether);
+    }
+
     function testAsyncWithdrawalQueueRechecksFifoOnClaim() public {
         Deployment memory deployment = _deployPTLoop(true);
         PTLoopController controller = PTLoopController(deployment.controller);
@@ -724,7 +772,7 @@ contract StrategyControllersTest is Test {
         queue.claim(secondRequestId);
     }
 
-    function testRemotePpsSnapshotStoreRejectsOutOfOrderSnapshotsAndClearsOnPeerChange() public {
+    function testRemotePpsSnapshotStoreAcceptsNewerNonceWithOlderTimestampAndClearsOnPeerChange() public {
         Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
         RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
         address remoteReporter = makeAddr("remoteReporter");
@@ -759,11 +807,6 @@ contract StrategyControllersTest is Test {
             ""
         );
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                RemotePpsSnapshotStore.StaleSnapshotTimestamp.selector, 30_102, firstTimestamp - 1, firstTimestamp
-            )
-        );
         store.lzReceive(
             Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 3}),
             bytes32("pps-2"),
@@ -771,6 +814,11 @@ contract StrategyControllersTest is Test {
             address(0),
             ""
         );
+
+        (uint256 secondAssets, uint64 secondTimestamp,, uint64 secondNonce) = store.snapshots(30_102);
+        assertEq(secondAssets, 200e6);
+        assertEq(secondTimestamp, firstTimestamp - 1);
+        assertEq(secondNonce, 3);
 
         vm.prank(owner);
         store.setPeer(30_102, bytes32(uint256(uint160(newRemoteReporter))));
@@ -780,6 +828,33 @@ contract StrategyControllersTest is Test {
         assertEq(snapshotTimestamp, 0);
         assertEq(receivedAt, 0);
         assertEq(nonce, 0);
+    }
+
+    function testRemotePpsSnapshotStoreRejectsInvalidMessageLength() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
+        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
+        address remoteReporter = makeAddr("remoteReporter");
+
+        vm.prank(owner);
+        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
+
+        vm.expectRevert(abi.encodeWithSelector(RemotePpsSnapshotStore.InvalidMessageLength.selector, uint256(32)));
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
+            bytes32("bad-length"),
+            abi.encode(uint256(123e6)),
+            address(0),
+            ""
+        );
+    }
+
+    function testRemotePpsSnapshotStoreRejectsDuplicateRemoteEids() public {
+        uint32[] memory remoteEids = new uint32[](2);
+        remoteEids[0] = 30_102;
+        remoteEids[1] = 30_102;
+
+        vm.expectRevert(abi.encodeWithSelector(RemotePpsSnapshotStore.DuplicateRemoteEid.selector, 30_102));
+        new RemotePpsSnapshotStore(owner, address(this), remoteEids);
     }
 
     function testRemotePpsSnapshotStoreExcludesStaleSnapshotsFromAssets() public {

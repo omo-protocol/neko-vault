@@ -60,12 +60,14 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
 
         bytes memory composeMsg = message.composeMsg();
         uint256 amountReceived = message.amountLD();
+        if (amountReceived == 0) revert InvalidRequest();
         try this.handleSettlementMessage(composeMsg, amountReceived, guid) returns (uint256 requestId) {
             emit SettlementReceived(requestId, amountReceived, guid, message.srcEid());
         } catch (bytes memory reason) {
             if (pendingSettlements[guid].amountReceived != 0) revert PendingSettlementAlreadyExists();
             (bool decoded, uint256 requestId) = _decodeRequestId(composeMsg);
-            pendingSettlements[guid] = PendingSettlement({requestId: decoded ? requestId : 0, amountReceived: amountReceived});
+            pendingSettlements[guid] =
+                PendingSettlement({requestId: decoded ? requestId : 0, amountReceived: amountReceived});
             _pendingComposeMsgs[guid] = composeMsg;
             emit SettlementPending(requestId, amountReceived, guid, reason);
         }
@@ -88,10 +90,18 @@ contract AsyncWithdrawalSettlementComposer is ILayerZeroComposer {
         bytes memory composeMsg = _pendingComposeMsgs[guid];
         if (composeMsg.length == 0) revert PendingSettlementNotFound();
 
-        this.handleSettlementMessage(composeMsg, pending.amountReceived, guid);
         delete pendingSettlements[guid];
         delete _pendingComposeMsgs[guid];
-        emit SettlementReceived(pending.requestId, pending.amountReceived, guid, 0);
+
+        try this.handleSettlementMessage(composeMsg, pending.amountReceived, guid) returns (uint256 requestId) {
+            emit SettlementReceived(requestId, pending.amountReceived, guid, 0);
+        } catch (bytes memory reason) {
+            pendingSettlements[guid] = pending;
+            _pendingComposeMsgs[guid] = composeMsg;
+            assembly {
+                revert(add(reason, 32), mload(reason))
+            }
+        }
     }
 
     function recoverPendingSettlement(bytes32 guid, address recipient) external {

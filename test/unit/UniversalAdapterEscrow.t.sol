@@ -1247,6 +1247,44 @@ contract UniversalAdapterEscrowTest is Test {
         assertEq(adapter.getIdleAssets(), 200e6, "200e6 profit correctly identified as idle");
     }
 
+    function testExecuteStrategyWithSlippageTracksWithdrawalsWhenMinIncreaseIsZero() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        MockProtocol mockProtocol = new MockProtocol(address(asset));
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 0);
+        adapter.updateWhitelist(address(mockProtocol), bytes4(keccak256("withdraw(uint256)")), true, 0);
+        vm.stopPrank();
+
+        asset.mint(address(adapter), 1_000e6);
+        vm.prank(address(vault));
+        adapter.allocate(
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 1_000e6, bytes4(0), address(0)
+        );
+
+        IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
+        depositCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(asset),
+            data: abi.encodeWithSignature("transfer(address,uint256)", address(mockProtocol), 80e6),
+            value: 0
+        });
+        vm.prank(agent);
+        adapter.executeStrategy(STRATEGY_1, depositCalls);
+
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](1);
+        withdrawCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(mockProtocol),
+            data: abi.encodeWithSignature("withdraw(uint256)", 30e6),
+            value: 0
+        });
+        vm.prank(agent);
+        adapter.executeStrategyWithSlippage(STRATEGY_1, withdrawCalls, 0);
+
+        assertEq(adapter.externalDeposits(STRATEGY_1), 50e6);
+        assertEq(adapter.totalExternalDeposits(), 50e6);
+        assertEq(asset.balanceOf(address(adapter)), 950e6);
+    }
+
     function testExternalDepositTrackingMultipleStrategies() public {
         // CRITICAL FIX: Test tracking with multiple strategies depositing to different protocols
 
@@ -1727,7 +1765,23 @@ contract UniversalAdapterEscrowTest is Test {
         bytes memory deallocData = abi.encode(STRATEGY_1, uint256(2), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
-        adapter.deallocate(deallocData, 100e6, bytes4(0x4b219d16), address(0));
+        adapter.deallocate(deallocData, 100e6, bytes4(keccak256("withdraw(uint256,address,address)")), address(0));
+    }
+
+    function testAutoAllocationRejectsOversizedQuotedCallArray() public {
+        MockAutomationController automationController = new MockAutomationController(address(target), 65);
+
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, address(automationController), "", 1000e6);
+        adapter.updateWhitelist(address(target), bytes4(keccak256("withdraw(uint256)")), true, 0);
+        vm.stopPrank();
+
+        asset.mint(address(adapter), 100e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, uint256(1), new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        adapter.allocate(allocData, 100e6, bytes4(keccak256("allocate(address,bytes,uint256)")), address(0));
     }
 }
 
@@ -1760,6 +1814,17 @@ contract MockAutomationController {
     }
 
     function quoteAutomaticWithdrawal(uint256) external view returns (IUniversalAdapterEscrow.Call[] memory calls) {
+        calls = new IUniversalAdapterEscrow.Call[](callCount);
+        for (uint256 i; i < callCount; i++) {
+            calls[i] = IUniversalAdapterEscrow.Call({
+                target: target,
+                data: abi.encodeWithSignature("withdraw(uint256)", 0),
+                value: 0
+            });
+        }
+    }
+
+    function quoteAutomaticAllocation(uint256) external view returns (IUniversalAdapterEscrow.Call[] memory calls) {
         calls = new IUniversalAdapterEscrow.Call[](callCount);
         for (uint256 i; i < callCount; i++) {
             calls[i] = IUniversalAdapterEscrow.Call({

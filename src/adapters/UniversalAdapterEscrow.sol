@@ -17,6 +17,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
+    bytes4 private constant WITHDRAW_SELECTOR = bytes4(keccak256("withdraw(uint256,address,address)"));
+    bytes4 private constant REDEEM_SELECTOR = bytes4(keccak256("redeem(uint256,address,address)"));
     uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
     uint256 private constant MAX_AUTOMATION_CALLS = 64;
     uint256 private constant AUTO_ALLOCATION_FLAG = 1;
@@ -120,6 +122,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 Call[] memory allocationCalls
             ) {
                 if (allocationCalls.length > 0) {
+                    if (allocationCalls.length > MAX_AUTOMATION_CALLS) revert InvalidData();
                     _executeMulticall(strategyId, allocationCalls, true);
                     uint256 externalAfter = externalDeposits[strategyId];
                     if (externalAfter < externalBefore || externalAfter - externalBefore > assets) {
@@ -136,7 +139,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }
 
-    function deallocate(bytes memory data, uint256 assets, bytes4 caller, address)
+    function deallocate(bytes memory data, uint256 assets, bytes4 caller, address initiator)
         external
         override
         onlyVault
@@ -152,7 +155,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (!strategies[strategyId].active) revert StrategyNotActive();
 
-        if (autoWithdrawalEnabled && caller == IVaultV2.deallocate.selector && assets > adapterBalance) {
+        if (autoWithdrawalEnabled && _shouldAutoWithdraw(caller, initiator) && assets > adapterBalance) {
             _autoWithdraw(strategyId, assets - adapterBalance);
             adapterBalance = IERC20(asset).balanceOf(address(this));
         }
@@ -194,7 +197,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     function realAssets() external view override returns (uint256 assets) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
-        (uint256 allocatedInAdapterBounded,, uint256 trackedAssets) = _trackedAssets(balance);
+        (, uint256 trackedSurplus, uint256 trackedAssets) = _trackedAssets(balance);
 
         (bool hasValue, bool hasStaleData, uint256 totalValue) = _resolveCurrentValuation();
 
@@ -206,17 +209,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             return totalValue;
         }
         if (totalAllocations == 0) {
-            return trackedAssets;
+            return trackedSurplus;
         }
         if (!emergencyMode) {
             revert ValuationUnavailable();
         }
         if (cachedValuationTimestamp != 0 && block.timestamp - cachedValuationTimestamp <= MAX_CACHED_VALUATION_AGE) {
-            uint256 haircuttedBaseline =
-                ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+            uint256 haircuttedBaseline = (trackedAssets * (10000 - EMERGENCY_HAIRCUT)) / 10000;
             return cachedValuation < haircuttedBaseline ? cachedValuation : haircuttedBaseline;
         }
-        return ((allocatedInAdapterBounded + totalExternalDeposits) * (10000 - EMERGENCY_HAIRCUT)) / 10000;
+        return (trackedAssets * (10000 - EMERGENCY_HAIRCUT)) / 10000;
     }
 
     /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
@@ -287,34 +289,34 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         _executeMulticall(strategyId, calls, false);
 
-        if (minBalanceIncrease > 0) {
-            uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-            require(balanceAfter >= balanceBefore + minBalanceIncrease, "Slippage: insufficient balance increase");
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        uint256 withdrawnAmount = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
 
-            if (balanceAfter > balanceBefore) {
-                uint256 withdrawnAmount = balanceAfter - balanceBefore;
-                uint256 oldExtDeposits = externalDeposits[strategyId];
-                uint256 reduction = withdrawnAmount;
+        if (withdrawnAmount > 0) {
+            uint256 oldExtDeposits = externalDeposits[strategyId];
+            uint256 reduction = withdrawnAmount;
 
-                if (reduction > oldExtDeposits) {
-                    reduction = oldExtDeposits;
-                }
-                if (reduction > totalExternalDeposits) {
-                    reduction = totalExternalDeposits;
-                }
-
-                if (reduction > 0) {
-                    externalDeposits[strategyId] = oldExtDeposits - reduction;
-                    totalExternalDeposits -= reduction;
-
-                    emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
-
-                    if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-                        _removeFromActiveStrategies(strategyId);
-                    }
-                }
+            if (reduction > oldExtDeposits) {
+                reduction = oldExtDeposits;
+            }
+            if (reduction > totalExternalDeposits) {
+                reduction = totalExternalDeposits;
             }
 
+            if (reduction > 0) {
+                externalDeposits[strategyId] = oldExtDeposits - reduction;
+                totalExternalDeposits -= reduction;
+
+                emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+
+                if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+                    _removeFromActiveStrategies(strategyId);
+                }
+            }
+        }
+
+        if (minBalanceIncrease > 0) {
+            require(withdrawnAmount >= minBalanceIncrease, "Slippage: insufficient balance increase");
             if (balanceAfter > balanceBefore + minBalanceIncrease) {
                 SafeERC20Lib.safeTransfer(asset, parentVault, balanceAfter - (balanceBefore + minBalanceIncrease));
             }
@@ -447,6 +449,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (reduction == 0) {
             cachedValuationTimestamp = 0;
             if (allocations[strategyId] == 0) {
+                _removeFromActiveStrategies(strategyId);
                 SafeERC20Lib.safeTransfer(asset, parentVault, assetsReceived);
             } else {
                 settlementSurplusAssets += assetsReceived;
@@ -457,6 +460,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         externalDeposits[strategyId] = oldExtDeposits - reduction;
         totalExternalDeposits -= reduction;
+
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
 
         uint256 surplus = assetsReceived - reduction;
         if (allocations[strategyId] == 0) {
@@ -469,10 +476,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
         emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);
-
-        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-            _removeFromActiveStrategies(strategyId);
-        }
     }
 
     /// @notice Manually sync strategy with valuer for drift correction (owner-only)
@@ -639,7 +642,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     function _quoteSnapshotState() internal view returns (uint256 assets, uint64 snapshotTimestamp, bool healthy) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
-        (,, uint256 trackedAssets) = _trackedAssets(balance);
+        (, uint256 trackedSurplus, uint256 trackedAssets) = _trackedAssets(balance);
         (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 valuationTimestamp, bool fromOnchain) =
             _resolveSnapshotValuation();
         uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
@@ -649,11 +652,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         if (!hasValue) {
-            return (trackedAssets, 0, false);
-        }
-
-        if (totalValue > trackedAssets) {
-            totalValue = trackedAssets;
+            return (totalAllocations == 0 ? trackedSurplus : trackedAssets, 0, false);
         }
 
         return (totalValue, valuationTimestamp, !hasStaleData && !emergencyMode && valuationTimestamp != 0);
@@ -692,6 +691,22 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     /* INTERNAL FUNCTIONS */
     function _validateAutomationFlags(uint256 automationFlags) internal pure {
         if (automationFlags > MAX_AUTOMATION_FLAGS) revert InvalidData();
+    }
+
+    function _shouldAutoWithdraw(bytes4 caller, address initiator) internal view returns (bool) {
+        if (caller == WITHDRAW_SELECTOR || caller == REDEEM_SELECTOR) {
+            return true;
+        }
+        return caller == DEALLOCATE_SELECTOR && _isAllocator(initiator);
+    }
+
+    function _isAllocator(address account) internal view returns (bool allocator) {
+        (bool success, bytes memory data) =
+            parentVault.staticcall(abi.encodeWithSignature("isAllocator(address)", account));
+        if (!success || data.length < 32) {
+            return false;
+        }
+        allocator = abi.decode(data, (bool));
     }
 
     function _executeMulticall(bytes32 strategyId, Call[] memory calls, bool bypassCircuitBreaker) internal {
@@ -777,6 +792,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 _removeFromActiveStrategies(strategyId);
             }
         }
+
+        if (withdrawnAmount < shortfallAssets) revert SlippageTooHigh();
     }
 
     function _trackedAssets(uint256 balance)
@@ -828,7 +845,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             if (healthSuccess && healthData.length >= 32) {
                 hasStaleData = !abi.decode(healthData, (bool));
                 (hasValue, totalValue, snapshotTimestamp) = _aggregateActiveStrategyValuesWithTimestamp();
-                return (hasValue, hasStaleData, totalValue, snapshotTimestamp, false);
+                if (hasValue) {
+                    return (hasValue, hasStaleData, totalValue, snapshotTimestamp, false);
+                }
             }
         }
 
@@ -884,7 +903,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     {
         bytes32[] memory strategyIds = activeStrategies.values();
         if (strategyIds.length == 0) {
-            return (true, 0, 0);
+            return (false, 0, 0);
         }
 
         snapshotTimestamp = type(uint64).max;
@@ -953,7 +972,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function _getValuerReportTimestamp(bytes32 strategyId) internal view returns (bool success, uint64 timestamp) {
         bytes memory data;
         (success, data) = valuer.staticcall(abi.encodeWithSignature("getReport(bytes32)", strategyId));
-        if (!success || data.length == 0) {
+        if (!success || data.length < 192) {
             return (false, 0);
         }
 
@@ -1003,4 +1022,5 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 interface ISettlementQueueValidation {
     function vault() external view returns (address);
     function sleeve() external view returns (address);
+    function strategyId() external view returns (bytes32);
 }

@@ -13,13 +13,15 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     error OnlyEndpoint(address caller);
     error OnlyPeer(uint32 srcEid, bytes32 sender);
     error InvalidConfig();
+    error InvalidRemoteEid(uint32 srcEid);
+    error DuplicateRemoteEid(uint32 srcEid);
+    error InvalidMessageLength(uint256 length);
     error InvalidSnapshotOrder(uint32 srcEid, uint64 nonce, uint64 lastNonce);
-    error StaleSnapshotTimestamp(uint32 srcEid, uint64 snapshotTimestamp, uint64 lastSnapshotTimestamp);
     error FutureSnapshotTimestamp(uint32 srcEid, uint64 snapshotTimestamp, uint64 maxAllowedTimestamp);
     error NativeTransferFailed();
 
     event PeerSet(uint32 indexed eid, bytes32 peer);
-    event SnapshotReceived(uint32 indexed srcEid, uint256 assets, uint64 snapshotTimestamp, bytes32 guid);
+    event SnapshotReceived(uint32 indexed srcEid, uint256 assets, uint64 snapshotTimestamp, bool healthy, bytes32 guid);
 
     struct Snapshot {
         uint256 assets;
@@ -36,6 +38,8 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     uint32[] internal _remoteEids;
 
     mapping(uint32 eid => bytes32 peer) public peers;
+    mapping(uint32 eid => bool configured) public isRemoteEid;
+    mapping(uint32 eid => bool healthy) public snapshotHealthy;
     mapping(uint32 eid => Snapshot snapshot) public snapshots;
 
     modifier onlyOwner() {
@@ -48,11 +52,20 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
         owner = owner_;
         endpoint = ILayerZeroEndpointV2(endpoint_);
         _remoteEids = remoteEids_;
+
+        for (uint256 i; i < remoteEids_.length; i++) {
+            uint32 remoteEid = remoteEids_[i];
+            if (remoteEid == 0) revert InvalidRemoteEid(remoteEid);
+            if (isRemoteEid[remoteEid]) revert DuplicateRemoteEid(remoteEid);
+            isRemoteEid[remoteEid] = true;
+        }
     }
 
     function setPeer(uint32 eid, bytes32 peer) external onlyOwner {
+        if (!isRemoteEid[eid]) revert InvalidRemoteEid(eid);
         if (peers[eid] != peer) {
             delete snapshots[eid];
+            delete snapshotHealthy[eid];
         }
         peers[eid] = peer;
         emit PeerSet(eid, peer);
@@ -70,9 +83,10 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
         healthy = true;
 
         for (uint256 i; i < _remoteEids.length; i++) {
-            Snapshot memory snapshot = snapshots[_remoteEids[i]];
+            uint32 remoteEid = _remoteEids[i];
+            Snapshot memory snapshot = snapshots[remoteEid];
             if (
-                snapshot.receivedAt == 0 || snapshot.snapshotTimestamp == 0
+                !snapshotHealthy[remoteEid] || snapshot.receivedAt == 0 || snapshot.snapshotTimestamp == 0
                     || block.timestamp > uint256(snapshot.receivedAt) + MAX_SNAPSHOT_AGE
                     || block.timestamp > uint256(snapshot.snapshotTimestamp) + MAX_SNAPSHOT_AGE
             ) {
@@ -85,7 +99,7 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     }
 
     function allowInitializePath(Origin calldata origin) external view override returns (bool) {
-        return peers[origin.srcEid] == origin.sender;
+        return isRemoteEid[origin.srcEid] && peers[origin.srcEid] == origin.sender;
     }
 
     function nextNonce(uint32, bytes32) external pure override returns (uint64 nonce) {
@@ -98,9 +112,20 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
         override
     {
         if (msg.sender != address(endpoint)) revert OnlyEndpoint(msg.sender);
+        if (!isRemoteEid[origin.srcEid]) revert InvalidRemoteEid(origin.srcEid);
         if (peers[origin.srcEid] != origin.sender) revert OnlyPeer(origin.srcEid, origin.sender);
 
-        (uint256 assets, uint64 snapshotTimestamp) = abi.decode(message, (uint256, uint64));
+        uint256 assets;
+        uint64 snapshotTimestamp;
+        bool healthy;
+        if (message.length == 64) {
+            (assets, snapshotTimestamp) = abi.decode(message, (uint256, uint64));
+            healthy = snapshotTimestamp != 0;
+        } else if (message.length == 96) {
+            (assets, snapshotTimestamp, healthy) = abi.decode(message, (uint256, uint64, bool));
+        } else {
+            revert InvalidMessageLength(message.length);
+        }
         uint64 maxAllowedTimestamp = uint64(block.timestamp + MAX_CLOCK_SKEW);
         if (snapshotTimestamp > maxAllowedTimestamp) {
             revert FutureSnapshotTimestamp(origin.srcEid, snapshotTimestamp, maxAllowedTimestamp);
@@ -110,9 +135,6 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
             if (origin.nonce <= current.nonce) {
                 revert InvalidSnapshotOrder(origin.srcEid, origin.nonce, current.nonce);
             }
-            if (snapshotTimestamp < current.snapshotTimestamp) {
-                revert StaleSnapshotTimestamp(origin.srcEid, snapshotTimestamp, current.snapshotTimestamp);
-            }
         }
 
         snapshots[origin.srcEid] = Snapshot({
@@ -121,8 +143,9 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
             receivedAt: uint64(block.timestamp),
             nonce: origin.nonce
         });
+        snapshotHealthy[origin.srcEid] = healthy;
 
-        emit SnapshotReceived(origin.srcEid, assets, snapshotTimestamp, guid);
+        emit SnapshotReceived(origin.srcEid, assets, snapshotTimestamp, healthy, guid);
     }
 
     function recoverNative(address recipient) external onlyOwner {

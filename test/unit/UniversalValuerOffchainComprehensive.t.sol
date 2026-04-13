@@ -392,6 +392,21 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertTrue(valuer.needsUpdate(STRATEGY_A));
     }
 
+    function testNeedsUpdateUsesEffectiveDefaultsForUnconfiguredStrategy() public {
+        bytes32 strategyId = keccak256("UNCONFIGURED_STRATEGY");
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(strategyId, 1000e18, 90, 1, block.timestamp + 1 hours, signer1Key);
+
+        vm.prank(owner);
+        valuer.updateValue(strategyId, 1000e18, 90, 1, block.timestamp + 1 hours, signatures);
+
+        assertFalse(valuer.needsUpdate(strategyId));
+
+        vm.warp(block.timestamp + MAX_STALENESS + 1);
+
+        assertTrue(valuer.needsUpdate(strategyId));
+    }
+
     /* SIGNER MANAGEMENT TESTS */
 
     function testInitiateSignerChange() public {

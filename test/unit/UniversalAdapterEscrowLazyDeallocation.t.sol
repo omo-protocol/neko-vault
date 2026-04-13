@@ -127,8 +127,11 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
     }
 
-    function test_deallocate_UserExitSelectorDoesNotTriggerAutoWithdrawal() public {
+    function test_deallocate_UserExitSelectorTriggersAutoWithdrawal() public {
         uint256 allocAmount = 100e18;
+        MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
+
+        adapter.setStrategy(STRATEGY_ID, address(controller), "", 0);
 
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
@@ -144,23 +147,54 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
             value: 0
         });
 
-        vm.prank(agent);
+        vm.prank(owner);
         adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
 
         bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
         bytes4 withdrawSelector = bytes4(keccak256("withdraw(uint256,address,address)"));
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 60e18, 80e18)
-        );
         vm.prank(address(vault));
         adapter.deallocate(deallocData, 80e18, withdrawSelector, address(0));
 
-        assertEq(protocol.balanceOf(address(adapter)), 40e18);
-        assertEq(asset.balanceOf(address(adapter)), 60e18);
+        assertEq(protocol.balanceOf(address(adapter)), 20e18);
+        assertEq(asset.balanceOf(address(adapter)), 80e18);
+    }
+
+    function test_deallocate_RedeemSelectorTriggersAutoWithdrawal() public {
+        uint256 allocAmount = 100e18;
+        MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
+
+        adapter.setStrategy(STRATEGY_ID, address(controller), "", 0);
+
+        vm.prank(address(vault));
+        asset.transfer(address(adapter), allocAmount);
+
+        vm.prank(address(vault));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
+
+        IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
+        depositCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(protocol),
+            data: abi.encodeWithSelector(protocol.deposit.selector, 50e18),
+            value: 0
+        });
+
+        vm.prank(owner);
+        adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
+
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
+        bytes4 redeemSelector = bytes4(keccak256("redeem(uint256,address,address)"));
+
+        vm.prank(address(vault));
+        adapter.deallocate(deallocData, 75e18, redeemSelector, address(0));
+
+        assertEq(protocol.balanceOf(address(adapter)), 25e18);
+        assertEq(asset.balanceOf(address(adapter)), 75e18);
     }
 
     /// @notice Test deallocate ignores withdrawCalls (backward compatibility)
+
     function test_deallocate_IgnoresWithdrawCalls() public {
         uint256 allocAmount = 100e18;
         uint256 deallocAmount = 50e18;
@@ -587,5 +621,26 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         assertEq(ids.length, 1);
         assertEq(change, -int256(deallocAmount));
         assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - deallocAmount);
+    }
+}
+
+contract MockAutoWithdrawController {
+    address public immutable protocol;
+
+    constructor(address _protocol) {
+        protocol = _protocol;
+    }
+
+    function quoteAutomaticWithdrawal(uint256 amount)
+        external
+        view
+        returns (IUniversalAdapterEscrow.Call[] memory calls)
+    {
+        calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: protocol,
+            data: abi.encodeWithSelector(MockProtocol.withdraw.selector, amount),
+            value: 0
+        });
     }
 }
