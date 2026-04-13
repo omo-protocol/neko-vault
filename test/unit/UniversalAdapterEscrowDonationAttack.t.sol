@@ -55,7 +55,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 existingAllocation = 1000e18;
         asset.mint(address(adapter), existingAllocation);
 
-        bytes memory allocateData = abi.encode(STRATEGY_1, existingAllocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, existingAllocation, bytes4(0), address(0));
 
@@ -105,7 +105,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 initialAllocation = 900e18;
         asset.mint(address(adapter), initialAllocation);
 
-        bytes memory allocateData = abi.encode(STRATEGY_1, initialAllocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, initialAllocation, bytes4(0), address(0));
 
@@ -122,12 +122,16 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
 
         // Allocator calls deallocate to reduce tracked allocation
         // Attempting to "free up" cap space by using donated balance
-        bytes memory deallocateData = abi.encode(STRATEGY_1, donationAmount, 0, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.deallocate(deallocateData, donationAmount, bytes4(0x4b219d16), address(0));
 
         // Verify allocation was reduced
-        assertEq(adapter.getAllocation(STRATEGY_1), initialAllocation - donationAmount, "Allocation reduced by donation amount");
+        assertEq(
+            adapter.getAllocation(STRATEGY_1),
+            initialAllocation - donationAmount,
+            "Allocation reduced by donation amount"
+        );
 
         // NEW SECURITY MODEL: Off-chain valuer excludes donations from its report
         // After deallocate:
@@ -158,7 +162,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
 
         // Setup: Allocate some amount
         asset.mint(address(adapter), allocation);
-        bytes memory allocateData = abi.encode(STRATEGY_1, allocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
@@ -187,7 +191,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 allocation = 1000e18;
         asset.mint(address(adapter), allocation);
 
-        bytes memory allocateData = abi.encode(STRATEGY_1, allocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
@@ -202,7 +206,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 additionalAllocation = 500e18;
         asset.mint(address(adapter), additionalAllocation);
 
-        bytes memory allocateData2 = abi.encode(STRATEGY_1, additionalAllocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData2 = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData2, additionalAllocation, bytes4(0), address(0));
 
@@ -224,7 +228,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         uint256 allocation = 1000e18;
         asset.mint(address(adapter), allocation);
 
-        bytes memory allocateData = abi.encode(STRATEGY_1, allocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 

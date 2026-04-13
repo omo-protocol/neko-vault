@@ -181,7 +181,7 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.enableEmergencyMode();
 
         // Verify cache was invalidated
-        (, , bool isStaleAfter) = adapter.getCachedValuation();
+        (,, bool isStaleAfter) = adapter.getCachedValuation();
         assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
 
         // In emergency mode, the adapter still reports the conservative tracked-asset fallback.
@@ -294,7 +294,7 @@ contract EmergencyModeSecurityFixTest is Test {
         asset.mint(address(vault), amount);
 
         IUniversalAdapterEscrow.Call[] memory calls;
-        bytes memory data = abi.encode(_strategyId, 0, false, calls);
+        bytes memory data = abi.encode(_strategyId, 0, calls);
 
         vm.prank(address(vault));
         adapter.allocate(data, amount, bytes4(0), address(0));

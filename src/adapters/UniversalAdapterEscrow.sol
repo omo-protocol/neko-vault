@@ -19,6 +19,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
     uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
     uint256 private constant MAX_AUTOMATION_CALLS = 64;
+    uint256 private constant AUTO_ALLOCATION_FLAG = 1;
+    uint256 private constant AUTO_WITHDRAW_FLAG = 2;
+    uint256 private constant MAX_AUTOMATION_FLAGS = AUTO_ALLOCATION_FLAG | AUTO_WITHDRAW_FLAG;
     uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
     /* IMMUTABLES */
@@ -94,10 +97,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     {
         if (data.length == 0) revert InvalidData();
 
-        (bytes32 strategyId, uint256 automationFlags,, Call[] memory calls) =
-            abi.decode(data, (bytes32, uint256, bool, Call[]));
+        (bytes32 strategyId, uint256 automationFlags, Call[] memory calls) =
+            abi.decode(data, (bytes32, uint256, Call[]));
+        _validateAutomationFlags(automationFlags);
         bool autoAllocationEnabled =
-            selector == IVaultV2.allocate.selector && automationFlags <= 3 && (automationFlags & 1) != 0;
+            selector == IVaultV2.allocate.selector && (automationFlags & AUTO_ALLOCATION_FLAG) != 0;
 
         if (!strategies[strategyId].active) revert StrategyNotActive();
         if (assets == 0) revert InvalidAmount();
@@ -141,9 +145,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     {
         if (data.length == 0) revert InvalidData();
 
-        (bytes32 strategyId, uint256 automationFlags, bool autoWithdrawalEnabledLegacy,) =
-            abi.decode(data, (bytes32, uint256, bool, Call[]));
-        bool autoWithdrawalEnabled = autoWithdrawalEnabledLegacy || (automationFlags <= 3 && (automationFlags & 2) != 0);
+        (bytes32 strategyId, uint256 automationFlags,) = abi.decode(data, (bytes32, uint256, Call[]));
+        _validateAutomationFlags(automationFlags);
+        bool autoWithdrawalEnabled = (automationFlags & AUTO_WITHDRAW_FLAG) != 0;
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
 
         if (!strategies[strategyId].active) revert StrategyNotActive();
@@ -686,6 +690,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* INTERNAL FUNCTIONS */
+    function _validateAutomationFlags(uint256 automationFlags) internal pure {
+        if (automationFlags > MAX_AUTOMATION_FLAGS) revert InvalidData();
+    }
+
     function _executeMulticall(bytes32 strategyId, Call[] memory calls, bool bypassCircuitBreaker) internal {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 

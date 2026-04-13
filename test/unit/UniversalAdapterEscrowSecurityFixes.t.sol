@@ -68,16 +68,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup: Allocate 1000 tokens
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Simulate external deposit (80 to protocol, 920 in adapter) - 8% under circuit breaker threshold
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Set protocol to fail on withdrawal
         protocol.setShouldFail(true);
@@ -87,10 +84,11 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // After fix: Returns up to requested amount (90) without reverting
         // Note: Set minAmountOut = 0 to disable slippage check
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(30e18);
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls); // minAmountOut = 0
+        bytes memory deallocateData = abi.encode(strategyId, 0, withdrawCalls); // minAmountOut = 0
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
 
         // Should return requested amount (90) from adapter balance despite protocol failure
         assertEq(uint256(-change), 90e18, "Should return requested amount despite protocol failure");
@@ -104,26 +102,24 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Protocol has funds and will succeed
         protocol.setShouldFail(false);
 
         // Deallocate 90 (minAmountOut = 0 to disable slippage check for this test)
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(30e18);
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, 0, withdrawCalls);
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
 
         // Should return requested amount (90) from available balance when protocol succeeds
         assertEq(uint256(-change), 90e18, "Should return requested amount when protocol succeeds");
@@ -140,15 +136,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup with ghost
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Simulate loss
         // State: balance=920, totalExternalDeposits=80, totalAllocations=1000
@@ -179,15 +172,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup with ghost
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Simulate loss
         valuer.setReturnValue(800e18);
@@ -224,16 +214,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // At this point: externalDeposits[strategyId] = 80, totalExternalDeposits = 80
 
@@ -253,7 +240,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         adapter.executeStrategyWithSlippage(
             strategyId,
             _createWithdrawCall(30e18),
-            30e18  // Expect at least 30e18 balance increase
+            30e18 // Expect at least 30e18 balance increase
         );
 
         // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
@@ -272,16 +259,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Create extreme desync
         vm.store(
@@ -296,7 +280,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         adapter.executeStrategyWithSlippage(
             strategyId,
             _createWithdrawCall(50e18),
-            50e18  // Expect at least 50e18 balance increase
+            50e18 // Expect at least 50e18 balance increase
         );
 
         // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
@@ -321,7 +305,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         uint256 allocation = perStrategy + 200e18;
         asset.mint(address(adapter), allocation);
 
-        bytes memory allocateData = abi.encode(strategyId, allocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
@@ -339,10 +323,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
 
         // Withdraw - should not revert
         vm.prank(owner);
-        try adapter.executeStrategy(
-            strategyId,
-            _createWithdrawCall(withdrawAmount)
-        ) {
+        try adapter.executeStrategy(strategyId, _createWithdrawCall(withdrawAmount)) {
             // Success - verify no underflow occurred
             uint256 totalAfter = adapter.totalExternalDeposits();
             assertLe(totalAfter, totalExternal, "Total should not increase");

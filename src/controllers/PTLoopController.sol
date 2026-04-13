@@ -180,7 +180,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
 
     function liquidityData() public view returns (bytes memory) {
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0);
-        return abi.encode(strategyId, _automationFlags(), _autoUnwindEnabled(), calls);
+        return abi.encode(strategyId, _automationFlags(), calls);
     }
 
     function allocateIdle(uint256 assets) external onlyOwner nonReentrant {
@@ -446,17 +446,8 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         return high;
     }
 
-    function _autoUnwindEnabled() internal pure returns (bool) {
-        return true;
-    }
-
-    function _autoAllocationEnabled() internal pure returns (bool) {
-        return true;
-    }
-
-    function _automationFlags() internal pure returns (uint256 flags) {
-        if (_autoAllocationEnabled()) flags |= 1;
-        if (_autoUnwindEnabled()) flags |= 2;
+    function _automationFlags() internal pure returns (uint256) {
+        return 3;
     }
 
     function _hasRemoteChain() internal view returns (bool hasRemote) {

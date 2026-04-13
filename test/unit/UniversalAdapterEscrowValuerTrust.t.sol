@@ -81,7 +81,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testValuerAlwaysTrusted() public {
         // Setup: Allocate 1000 tokens to strategy
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -116,7 +116,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testRealisticSlippageScenario() public {
         // Setup: Allocate 1000 KHYPE
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -135,7 +135,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testExtremeUndervaluationAccepted() public {
         // Setup
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -156,7 +156,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testValuerReturnsMinimalValueAccepted() public {
         // Setup
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -182,7 +182,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         maliciousValuer.setReturnValue(1000e18);
 
         // Setup - allocate funds
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -206,7 +206,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         adapter.enableEmergencyMode();
 
         // Verify cache was invalidated by enabling emergency mode
-        (, , bool isStale) = adapter.getCachedValuation();
+        (,, bool isStale) = adapter.getCachedValuation();
         assertTrue(isStale, "Cache should be stale after emergency mode enabled");
 
         // Should now use emergency fallback with 5% haircut
@@ -230,7 +230,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testNoToleranceThreshold() public {
         // Setup
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -288,7 +288,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
 
         // Setup
         asset.mint(address(adapter), realValue);
-        bytes memory allocateData = abi.encode(strategyId, realValue, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, realValue, bytes4(0), address(0));
 
