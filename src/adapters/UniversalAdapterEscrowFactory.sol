@@ -45,7 +45,7 @@ contract UniversalAdapterEscrowFactory {
         bytes32 salt
     ) external returns (address adapter) {
         if (parentVault == address(0)) revert InvalidVault();
-        if (valuer == address(0)) revert InvalidValuer();
+        if (useOffchainValuer && valuer == address(0)) revert InvalidValuer();
         if (IVaultV2(parentVault).owner() != msg.sender) revert OnlyVaultOwnerCanDeploy();
 
         adapter = _deploy(parentVault, valuer, useOffchainValuer, salt);

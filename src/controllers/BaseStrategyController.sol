@@ -4,12 +4,14 @@ pragma solidity 0.8.28;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {IRemotePpsSnapshotStore} from "./interfaces/IRemotePpsSnapshotStore.sol";
 import {StrategyKind, StrategySpec, ChainManifest, VenueConfig} from "../strategies/StrategyTypes.sol";
 
 abstract contract BaseStrategyController is ReentrancyGuard {
     uint256 internal constant BPS = 10_000;
 
     error NotOwner();
+    error NotVaultManager();
     error InvalidAddress();
     error InvalidReserveConfig();
     error InvalidChainManifest();
@@ -17,9 +19,10 @@ abstract contract BaseStrategyController is ReentrancyGuard {
     event LiquidityPrepared(uint256 minBalanceIncrease, uint256 deallocatedAssets, bool usedProtocolWithdraw);
 
     address public immutable owner;
+    address public immutable vaultManager;
     IVaultV2 public immutable vault;
     IUniversalAdapterEscrow public immutable sleeve;
-    address public immutable valuer;
+    address public immutable remotePpsSnapshotStore;
     address public immutable asset;
     bytes32 public immutable strategyId;
     StrategyKind public immutable strategyKind;
@@ -38,12 +41,18 @@ abstract contract BaseStrategyController is ReentrancyGuard {
         _;
     }
 
+    modifier onlyVaultManager() {
+        if (msg.sender != vaultManager) revert NotVaultManager();
+        _;
+    }
+
     constructor(
         StrategyKind kind_,
         address owner_,
+        address vaultManager_,
         address vault_,
         address sleeve_,
-        address valuer_,
+        address remotePpsSnapshotStore_,
         bytes32 strategyId_,
         uint256 targetReserveBps_,
         uint256 minReserveBps_,
@@ -51,15 +60,18 @@ abstract contract BaseStrategyController is ReentrancyGuard {
         ChainManifest[] memory chainManifests_
     ) {
         if (
-            owner_ == address(0) || vault_ == address(0) || sleeve_ == address(0) || valuer_ == address(0)
+            owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
-        ) revert InvalidAddress();
+        ) {
+            revert InvalidAddress();
+        }
         if (targetReserveBps_ > BPS || minReserveBps_ > targetReserveBps_) revert InvalidReserveConfig();
 
         owner = owner_;
+        vaultManager = vaultManager_;
         vault = IVaultV2(vault_);
         sleeve = IUniversalAdapterEscrow(sleeve_);
-        valuer = valuer_;
+        remotePpsSnapshotStore = remotePpsSnapshotStore_;
         asset = IVaultV2(vault_).asset();
         strategyId = strategyId_;
         strategyKind = kind_;
@@ -103,6 +115,11 @@ abstract contract BaseStrategyController is ReentrancyGuard {
 
     function reserveTarget(uint256 totalAssets) public view returns (uint256) {
         return totalAssets * targetReserveBps / BPS;
+    }
+
+    function _quoteRemoteAssets() internal view returns (uint256 assets, bool healthy) {
+        if (remotePpsSnapshotStore == address(0)) return (0, true);
+        return IRemotePpsSnapshotStore(remotePpsSnapshotStore).quoteRemoteAssets();
     }
 
     function reserveFloor(uint256 totalAssets) public view returns (uint256) {

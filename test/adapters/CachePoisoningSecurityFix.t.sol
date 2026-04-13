@@ -173,7 +173,7 @@ contract CachePoisoningSecurityFix is Test {
         valuer.setValue(300e18); // 500e18 * 0.8 = 400e18, so 300e18 should fail
         
         // Attempt to refresh should revert
-        vm.expectRevert("Valuation too low - check valuer");
+        vm.expectRevert("Valuation too low");
         adapter.refreshCachedValuation();
     }
     
@@ -190,7 +190,7 @@ contract CachePoisoningSecurityFix is Test {
         valuer.setValue(800e18); // 500e18 * 1.5 = 750e18, so 800e18 should fail
         
         // Attempt to refresh should revert
-        vm.expectRevert("Valuation too high - check valuer");
+        vm.expectRevert("Valuation too high");
         adapter.refreshCachedValuation();
     }
     

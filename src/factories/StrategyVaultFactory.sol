@@ -13,6 +13,7 @@ import {IPendleRouter} from "../controllers/venue_specific/pendle/PendleLib.sol"
 import {WrapperOnlySendAssetsGate} from "../gates/WrapperOnlySendAssetsGate.sol";
 import {AsyncWithdrawalQueue} from "../queues/AsyncWithdrawalQueue.sol";
 import {AsyncWithdrawalSettlementComposer} from "../ovault/AsyncWithdrawalSettlementComposer.sol";
+import {RemotePpsSnapshotStore} from "../ovault/RemotePpsSnapshotStore.sol";
 import {ShareOFTAdapter} from "../ovault/ShareOFTAdapter.sol";
 import {VaultComposerSync} from "../ovault/VaultComposerSync.sol";
 import {IOAppCore} from "@layerzerolabs/oapp-evm/contracts/oapp/interfaces/IOAppCore.sol";
@@ -26,6 +27,8 @@ import {
 import {VaultTimeLockWrapper} from "../VaultTimeLockWrapper.sol";
 
 contract StrategyVaultFactory is ReentrancyGuard {
+    uint256 internal constant DEFAULT_TIMELOCK_FORCE_DEALLOCATE_PENALTY = 0.01e18;
+
     error InvalidAddress();
     error InvalidConfig();
     error InvalidChainManifest();
@@ -38,6 +41,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
     mapping(address vault => address composer) public withdrawalSettlementComposerOf;
     mapping(address vault => address shareAdapter) public shareOFTAdapterOf;
     mapping(address vault => address composer) public vaultComposerSyncOf;
+    mapping(address vault => address store) public remotePpsSnapshotStoreOf;
 
     event StrategyVaultDeployed(
         StrategyKind indexed kind,
@@ -53,6 +57,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
     event OmnichainVaultInfrastructureDeployed(
         address indexed vault, address indexed assetOFT, address indexed shareAdapter, address vaultComposer
     );
+    event RemotePpsSnapshotStoreDeployed(address indexed vault, address indexed store);
 
     constructor(address vaultFactory_, address adapterFactory_) {
         if (vaultFactory_ == address(0) || adapterFactory_ == address(0)) revert InvalidAddress();
@@ -66,7 +71,13 @@ contract StrategyVaultFactory is ReentrancyGuard {
         returns (Deployment memory deployment)
     {
         _validateCommon(
-            params.owner, params.asset, params.valuer, params.strategyIdData, params.absoluteCap, params.relativeCap
+            params.owner,
+            params.asset,
+            params.valuer,
+            params.useOffchainValuer,
+            params.strategyIdData,
+            params.absoluteCap,
+            params.relativeCap
         );
         _validateChainManifests(params.venueConfig.usesLayerZero, params.enableOmnichainVault, params.chainManifests);
 
@@ -76,12 +87,14 @@ contract StrategyVaultFactory is ReentrancyGuard {
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(
             payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
         );
+        address remotePpsStore = _deployRemotePpsSnapshotStore(params.owner, params.venueConfig.usesLayerZero, params.chainManifests);
 
         DeltaNeutralController controller = new DeltaNeutralController(
             params.owner,
+            _finalVaultManager(params.owner, params.vaultManager),
             vaultAddress,
             address(sleeve),
-            params.valuer,
+            remotePpsStore,
             strategyId,
             params.targetReserveBps,
             params.minReserveBps,
@@ -103,6 +116,18 @@ contract StrategyVaultFactory is ReentrancyGuard {
         );
 
         _configureDeltaNeutralWhitelist(sleeve, params.venueConfig.venue);
+        (address queue, address composer) = _deployAsyncWithdrawalQueue(
+            vaultAddress,
+            address(sleeve),
+            address(controller),
+            params.owner,
+            true,
+            params.venueConfig.usesLayerZero,
+            params.chainManifests
+        );
+        if (queue != address(0)) {
+            sleeve.setSettlementQueue(queue);
+        }
         _configureVault(
             IVaultV2(vaultAddress),
             sleeve,
@@ -118,16 +143,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
             params.absoluteCap,
             params.relativeCap,
             address(sleeve),
-            controller.liquidityData()
-        );
-        (address queue, address composer) = _deployAsyncWithdrawalQueue(
-            vaultAddress,
-            address(sleeve),
-            address(controller),
-            params.owner,
-            true,
-            params.venueConfig.usesLayerZero,
-            params.chainManifests
+            controller.liquidityData(),
+            params.enableTimelock
         );
 
         deployment = Deployment({
@@ -143,6 +160,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
         withdrawalSettlementComposerOf[vaultAddress] = composer;
         shareOFTAdapterOf[vaultAddress] = shareAdapter;
         vaultComposerSyncOf[vaultAddress] = vaultComposer;
+        remotePpsSnapshotStoreOf[vaultAddress] = remotePpsStore;
+        if (remotePpsStore != address(0)) emit RemotePpsSnapshotStoreDeployed(vaultAddress, remotePpsStore);
 
         emit StrategyVaultDeployed(
             StrategyKind.DeltaNeutral,
@@ -162,7 +181,13 @@ contract StrategyVaultFactory is ReentrancyGuard {
         returns (Deployment memory deployment)
     {
         _validateCommon(
-            params.owner, params.asset, params.valuer, params.strategyIdData, params.absoluteCap, params.relativeCap
+            params.owner,
+            params.asset,
+            params.valuer,
+            params.useOffchainValuer,
+            params.strategyIdData,
+            params.absoluteCap,
+            params.relativeCap
         );
         _validateChainManifests(params.venueConfig.usesLayerZero, params.enableOmnichainVault, params.chainManifests);
 
@@ -172,12 +197,14 @@ contract StrategyVaultFactory is ReentrancyGuard {
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(
             payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
         );
+        address remotePpsStore = _deployRemotePpsSnapshotStore(params.owner, params.venueConfig.usesLayerZero, params.chainManifests);
 
         PTLoopController controller = new PTLoopController(
             params.owner,
+            _finalVaultManager(params.owner, params.vaultManager),
             vaultAddress,
             address(sleeve),
-            params.valuer,
+            remotePpsStore,
             params.market,
             params.ptToken,
             strategyId,
@@ -199,6 +226,18 @@ contract StrategyVaultFactory is ReentrancyGuard {
         );
 
         _configurePTLoopWhitelist(sleeve, params.asset, params.ptToken, params.venueConfig.venue);
+        (address queue, address composer) = _deployAsyncWithdrawalQueue(
+            vaultAddress,
+            address(sleeve),
+            address(controller),
+            params.owner,
+            params.venueConfig.usesLayerZero,
+            params.venueConfig.usesLayerZero,
+            params.chainManifests
+        );
+        if (queue != address(0)) {
+            sleeve.setSettlementQueue(queue);
+        }
         _configureVault(
             IVaultV2(vaultAddress),
             sleeve,
@@ -214,16 +253,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
             params.absoluteCap,
             params.relativeCap,
             address(sleeve),
-            controller.liquidityData()
-        );
-        (address queue, address composer) = _deployAsyncWithdrawalQueue(
-            vaultAddress,
-            address(sleeve),
-            address(controller),
-            params.owner,
-            params.venueConfig.usesLayerZero,
-            params.venueConfig.usesLayerZero,
-            params.chainManifests
+            controller.liquidityData(),
+            params.enableTimelock
         );
 
         deployment = Deployment({
@@ -239,6 +270,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
         withdrawalSettlementComposerOf[vaultAddress] = composer;
         shareOFTAdapterOf[vaultAddress] = shareAdapter;
         vaultComposerSyncOf[vaultAddress] = vaultComposer;
+        remotePpsSnapshotStoreOf[vaultAddress] = remotePpsStore;
+        if (remotePpsStore != address(0)) emit RemotePpsSnapshotStoreDeployed(vaultAddress, remotePpsStore);
 
         emit StrategyVaultDeployed(
             StrategyKind.PTLoop,
@@ -267,7 +300,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
         uint256 absoluteCap,
         uint256 relativeCap,
         address liquidityAdapter,
-        bytes memory liquidityData
+        bytes memory liquidityData,
+        bool enableTimelock
     ) internal {
         vault.setCurator(address(this));
 
@@ -294,6 +328,14 @@ contract StrategyVaultFactory is ReentrancyGuard {
         if (depositGate != address(0)) {
             vault.submit(abi.encodeCall(IVaultV2.setSendAssetsGate, (depositGate)));
             vault.setSendAssetsGate(depositGate);
+        }
+        if (enableTimelock) {
+            vault.submit(
+                abi.encodeCall(
+                    IVaultV2.setForceDeallocatePenalty, (address(sleeve), DEFAULT_TIMELOCK_FORCE_DEALLOCATE_PENALTY)
+                )
+            );
+            vault.setForceDeallocatePenalty(address(sleeve), DEFAULT_TIMELOCK_FORCE_DEALLOCATE_PENALTY);
         }
 
         if (bytes(name).length != 0) vault.setName(name);
@@ -352,6 +394,32 @@ contract StrategyVaultFactory is ReentrancyGuard {
         emit OmnichainVaultInfrastructureDeployed(vault, homeAssetOFT, shareAdapter, composer);
     }
 
+    function _deployRemotePpsSnapshotStore(address finalOwner, bool usesLayerZero, ChainManifest[] calldata manifests)
+        internal
+        returns (address store)
+    {
+        if (!usesLayerZero) return address(0);
+
+        address homeAssetOFT = _homeAssetOFT(manifests);
+        if (homeAssetOFT == address(0)) revert InvalidChainManifest();
+
+        uint256 remoteCount;
+        for (uint256 i; i < manifests.length; i++) {
+            if (!manifests[i].isHomeChain) remoteCount++;
+        }
+        if (remoteCount == 0) revert InvalidChainManifest();
+
+        uint32[] memory remoteEids = new uint32[](remoteCount);
+        uint256 index;
+        for (uint256 i; i < manifests.length; i++) {
+            if (!manifests[i].isHomeChain) {
+                remoteEids[index++] = manifests[i].lzEid;
+            }
+        }
+
+        store = address(new RemotePpsSnapshotStore(finalOwner, address(IOAppCore(homeAssetOFT).endpoint()), remoteEids));
+    }
+
     function _materializeManifests(ChainManifest[] calldata manifests, address homeSleeve)
         internal
         view
@@ -383,12 +451,19 @@ contract StrategyVaultFactory is ReentrancyGuard {
         address owner,
         address asset,
         address valuer,
+        bool valuerRequired,
         bytes calldata strategyIdData,
         uint256 absoluteCap,
         uint256 relativeCap
     ) internal pure {
-        if (owner == address(0) || asset == address(0) || valuer == address(0)) revert InvalidAddress();
+        if (owner == address(0) || asset == address(0) || (valuerRequired && valuer == address(0))) {
+            revert InvalidAddress();
+        }
         if (strategyIdData.length == 0 || absoluteCap == 0 || relativeCap == 0) revert InvalidConfig();
+    }
+
+    function _finalVaultManager(address owner, address vaultManager) internal pure returns (address) {
+        return vaultManager == address(0) ? owner : vaultManager;
     }
 
     function _validateChainManifests(bool usesLayerZero, bool enableOmnichainVault, ChainManifest[] calldata manifests)

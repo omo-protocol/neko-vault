@@ -82,11 +82,12 @@ abstract contract StrategyLaunchpadScriptBase is Script {
 
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: vm.envOr("VAULT_MANAGER", owner),
             curator: vm.envOr("CURATOR", owner),
             enableTimelock: vm.envOr("ENABLE_TIMELOCK", false),
             enableOmnichainVault: vm.envOr("ENABLE_OMNICHAIN_VAULT", false),
             asset: vm.envAddress("ASSET"),
-            valuer: vm.envAddress("VALUER"),
+            valuer: vm.envOr("VALUER", address(0)),
             name: vm.envString("NAME"),
             symbol: vm.envString("SYMBOL"),
             strategyIdData: bytes(vm.envString("STRATEGY_ID_DATA")),
@@ -116,13 +117,14 @@ abstract contract StrategyLaunchpadScriptBase is Script {
 
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: vm.envOr("VAULT_MANAGER", owner),
             curator: vm.envOr("CURATOR", owner),
             enableTimelock: vm.envOr("ENABLE_TIMELOCK", false),
             enableOmnichainVault: vm.envOr("ENABLE_OMNICHAIN_VAULT", false),
             asset: vm.envAddress("ASSET"),
             market: vm.envAddress("MARKET"),
             ptToken: vm.envAddress("PT_TOKEN"),
-            valuer: vm.envAddress("VALUER"),
+            valuer: vm.envOr("VALUER", address(0)),
             name: vm.envString("NAME"),
             symbol: vm.envString("SYMBOL"),
             strategyIdData: bytes(vm.envString("STRATEGY_ID_DATA")),
@@ -313,5 +315,6 @@ abstract contract StrategyLaunchpadScriptBase is Script {
         console2.log("WithdrawalSettlementComposer:", factory.withdrawalSettlementComposerOf(deployment.vault));
         console2.log("ShareOFTAdapter:", factory.shareOFTAdapterOf(deployment.vault));
         console2.log("VaultComposerSync:", factory.vaultComposerSyncOf(deployment.vault));
+        console2.log("RemotePpsSnapshotStore:", factory.remotePpsSnapshotStoreOf(deployment.vault));
     }
 }

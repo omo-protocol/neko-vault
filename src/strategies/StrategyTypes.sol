@@ -128,6 +128,7 @@ struct Deployment {
 
 struct DeltaNeutralDeploymentParams {
     address owner;
+    address vaultManager;
     address curator;
     bool enableTimelock;
     bool enableOmnichainVault;
@@ -152,6 +153,7 @@ struct DeltaNeutralDeploymentParams {
 
 struct PTLoopDeploymentParams {
     address owner;
+    address vaultManager;
     address curator;
     bool enableTimelock;
     bool enableOmnichainVault;

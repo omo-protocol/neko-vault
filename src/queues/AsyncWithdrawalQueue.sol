@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
+import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IAsyncWithdrawalController} from "../controllers/interfaces/IAsyncWithdrawalController.sol";
 import {WithdrawalRequest, WithdrawalRequestStatus} from "../strategies/StrategyTypes.sol";
 
@@ -35,6 +36,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
     IVaultV2 public immutable vault;
     address public immutable controller;
     address public immutable sleeve;
+    bytes32 public immutable strategyId;
     address public owner;
     address public settlementHook;
     uint256 public nextRequestId = 1;
@@ -60,6 +62,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
         vault = IVaultV2(vault_);
         controller = controller_;
         sleeve = sleeve_;
+        strategyId = IStrategyIdProvider(controller_).strategyId();
         owner = owner_;
     }
 
@@ -120,12 +123,14 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
         if (processedGuids[guid]) revert DuplicateGuid();
 
         WithdrawalRequest storage request = _requests[requestId];
+        if (request.owner == address(0)) revert InvalidRequest();
         if (request.status == WithdrawalRequestStatus.Claimed || request.status == WithdrawalRequestStatus.Cancelled) {
             revert InvalidRequest();
         }
 
         processedGuids[guid] = true;
         request.assetsFunded += assetsReceived;
+        IUniversalAdapterEscrow(sleeve).recordSettlement(strategyId, assetsReceived);
 
         uint256 currentRequirement = vault.previewRedeem(request.sharesEscrowed);
         if (request.reservedLocalAssets + request.assetsFunded >= currentRequirement) {
@@ -234,4 +239,8 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
             return false;
         }
     }
+}
+
+interface IStrategyIdProvider {
+    function strategyId() external view returns (bytes32);
 }

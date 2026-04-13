@@ -6,6 +6,7 @@ import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterE
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IAsyncWithdrawalController} from "./interfaces/IAsyncWithdrawalController.sol";
 import {IAutomatedWithdrawalController} from "./interfaces/IAutomatedWithdrawalController.sol";
+import {IOnchainStrategyValuer} from "./interfaces/IOnchainStrategyValuer.sol";
 import {DeltaNeutralKellyLib} from "./libraries/DeltaNeutralKellyLib.sol";
 import {L1Read} from "./venue_specific/hyperliquid/L1Read.sol";
 import {
@@ -28,7 +29,8 @@ import {
 contract DeltaNeutralController is
     BaseStrategyController,
     IAutomatedWithdrawalController,
-    IAsyncWithdrawalController
+    IAsyncWithdrawalController,
+    IOnchainStrategyValuer
 {
     bytes32 public constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
 
@@ -95,9 +97,10 @@ contract DeltaNeutralController is
 
     constructor(
         address owner_,
+        address vaultManager_,
         address vault_,
         address sleeve_,
-        address valuer_,
+        address remotePpsSnapshotStore_,
         bytes32 strategyId_,
         uint256 targetReserveBps_,
         uint256 minReserveBps_,
@@ -111,9 +114,10 @@ contract DeltaNeutralController is
         BaseStrategyController(
             StrategyKind.DeltaNeutral,
             owner_,
+            vaultManager_,
             vault_,
             sleeve_,
-            valuer_,
+            remotePpsSnapshotStore_,
             strategyId_,
             targetReserveBps_,
             minReserveBps_,
@@ -178,11 +182,16 @@ contract DeltaNeutralController is
         maxMarginUsageBps = automationConfig_.maxMarginUsageBps;
     }
 
-    function sync() external nonReentrant returns (bool executed) {
+    function sync() external onlyVaultManager nonReentrant returns (bool executed) {
         IUniversalAdapterEscrow.Call[] memory calls = _quoteSync(_liveState());
         if (calls.length == 0) return false;
         sleeve.executeStrategyBypassCircuitBreaker(strategyId, calls);
         return true;
+    }
+
+    function syncPPS() external onlyVaultManager nonReentrant returns (uint256 assets) {
+        sleeve.refreshCachedValuation();
+        (assets,,) = sleeve.getCachedValuation();
     }
 
     function initiateAsyncWithdrawal(uint256 shortfallAssets) external nonReentrant returns (bool initiated) {
@@ -202,6 +211,9 @@ contract DeltaNeutralController is
     function quoteAutomaticAllocation(uint256) external view override returns (IUniversalAdapterEscrow.Call[] memory) {
         HyperliquidLiveState memory live = _liveState();
         if (_isRiskDegraded(live)) return new IUniversalAdapterEscrow.Call[](0);
+        uint256 totalAssets = live.spotAssets + live.hedgeCollateralAssets + live.idleAssets;
+        live.idleAssets = availableToAllocate(live.idleAssets, totalAssets);
+        if (live.idleAssets == 0) return new IUniversalAdapterEscrow.Call[](0);
         return _quoteTargetCalls(live);
     }
 
@@ -218,6 +230,17 @@ contract DeltaNeutralController is
         HyperliquidUnwindSizing memory sizing =
             _quoteUnwindExecution(0, shortfallAssets, live.spotAssets, live.hedgeCollateralAssets, false);
         return _buildUnwindCalls(live, sizing);
+    }
+
+    function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
+        HyperliquidLiveState memory live = _liveState();
+        (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
+        uint256 hedgeEquityAssets =
+            live.marginSummary.accountValue > 0 ? uint256(uint64(live.marginSummary.accountValue)) : 0;
+        return (
+            live.idleAssets + live.spotAssets + hedgeEquityAssets + remoteAssets,
+            !_isRiskDegraded(live) && remoteHealthy
+        );
     }
 
     function quoteUnwindExecution(

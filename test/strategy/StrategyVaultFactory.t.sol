@@ -66,6 +66,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreateDeltaNeutralVault() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: false,
@@ -103,6 +104,7 @@ contract StrategyVaultFactoryTest is Test {
 
         assertEq(vault.owner(), owner);
         assertEq(vault.curator(), curator);
+        assertEq(controller.vaultManager(), owner);
         assertTrue(vault.isAdapter(deployment.sleeve));
         assertTrue(vault.isAllocator(deployment.controller));
         assertEq(sleeve.owner(), owner);
@@ -112,6 +114,7 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(childFactory.withdrawalSettlementComposerOf(deployment.vault), address(0));
         assertEq(childFactory.shareOFTAdapterOf(deployment.vault), address(0));
         assertEq(childFactory.vaultComposerSyncOf(deployment.vault), address(0));
+        assertEq(childFactory.remotePpsSnapshotStoreOf(deployment.vault), address(0));
         assertEq(childFactory.depositGateOf(deployment.vault), address(0));
         assertEq(vault.sendAssetsGate(), address(0));
         assertEq(spec.strategyId, deployment.strategyId);
@@ -128,9 +131,45 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(controller.getKellyConfig().asymmetricRebalanceThresholdBps, 7_500);
     }
 
+    function testCreateDeltaNeutralVaultAllowsZeroValuerForSameChainOnchainPricing() public {
+        DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: false,
+            enableOmnichainVault: false,
+            asset: address(asset),
+            valuer: address(0),
+            name: "Delta Neutral Vault",
+            symbol: "ldn",
+            strategyIdData: bytes("hyperliquid-dn-onchain"),
+            spotSideMode: SpotSideMode.Hold,
+            targetReserveBps: 2_000,
+            minReserveBps: 500,
+            maxDeltaBps: 250,
+            kellyConfig: _defaultKellyConfig(),
+            automationConfig: _defaultDeltaAutomationConfig(),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("delta-onchain"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: HYPERLIQUID_VENUE_ID,
+                venue: address(coreWriter),
+                helper: address(l1Read),
+                usesLayerZero: false
+            }),
+            chainManifests: _homeManifest()
+        });
+
+        Deployment memory deployment = childFactory.createDeltaNeutralVault(params);
+        assertTrue(deployment.vault != address(0));
+    }
+
     function testCreateDeltaNeutralVaultWithOptionalTimelock() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: true,
             enableOmnichainVault: false,
@@ -166,11 +205,13 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(childFactory.timeLockWrapperOf(deployment.vault), deployment.wrapper);
         assertEq(childFactory.depositGateOf(deployment.vault), vault.sendAssetsGate());
         assertEq(address(wrapper.vault()), deployment.vault);
+        assertGt(vault.forceDeallocatePenalty(deployment.sleeve), 0);
     }
 
     function testCreateDeltaNeutralVaultWithOmnichainInfrastructure() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: true,
@@ -213,6 +254,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreateDeltaNeutralVaultWithOmnichainInfrastructureRejectsMissingHomeAssetOFT() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: true,
@@ -247,6 +289,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreatePTLoopVault() public {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: false,
@@ -289,15 +332,52 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(IVaultV2(deployment.vault).liquidityAdapter(), deployment.sleeve);
         assertEq(childFactory.shareOFTAdapterOf(deployment.vault), address(0));
         assertEq(childFactory.vaultComposerSyncOf(deployment.vault), address(0));
+        assertTrue(childFactory.remotePpsSnapshotStoreOf(deployment.vault) != address(0));
         assertTrue(homeManifest.isHomeChain);
         assertEq(homeManifest.sleeve, deployment.sleeve);
         assertFalse(remoteManifest.isHomeChain);
         assertEq(remoteManifest.chainId, 56);
     }
 
+    function testCreatePTLoopVaultAllowsZeroValuerForAsyncRemoteSnapshots() public {
+        PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: false,
+            enableOmnichainVault: false,
+            asset: address(asset),
+            market: PENDLE_MARKET,
+            ptToken: PENDLE_PT,
+            valuer: address(0),
+            name: "PT Loop Vault",
+            symbol: "lpt",
+            strategyIdData: bytes("pendle-loop-remote"),
+            targetReserveBps: 1_500,
+            minReserveBps: 500,
+            maxUnwindSlippageBps: 600,
+            automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("pt-loop-no-valuer"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: PENDLE_VENUE_ID,
+                venue: address(0x2001),
+                helper: address(0x2002),
+                usesLayerZero: true
+            }),
+            chainManifests: _homeAndRemoteManifest()
+        });
+
+        Deployment memory deployment = childFactory.createPTLoopVault(params);
+        assertTrue(deployment.vault != address(0));
+    }
+
     function testCreatePTLoopVaultWithOmnichainInfrastructure() public {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: true,
@@ -335,6 +415,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreatePTLoopVaultWithOmnichainInfrastructureRejectsMissingRemoteShareOFT() public {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: true,
@@ -369,6 +450,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreatePTLoopVaultRejectsMissingRemoteManifestWhenLayerZeroEnabled() public {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: false,
@@ -403,6 +485,7 @@ contract StrategyVaultFactoryTest is Test {
     function testCreateDeltaNeutralVaultRejectsWrongVenue() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: curator,
             enableTimelock: false,
             enableOmnichainVault: false,

@@ -5,6 +5,7 @@ import {BaseStrategyController} from "./BaseStrategyController.sol";
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IAutomatedWithdrawalController} from "./interfaces/IAutomatedWithdrawalController.sol";
+import {IOnchainStrategyValuer} from "./interfaces/IOnchainStrategyValuer.sol";
 import {
     PendleLib,
     IPendleStaticQuoter,
@@ -20,7 +21,7 @@ import {
     VenueConfig
 } from "../strategies/StrategyTypes.sol";
 
-contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalController {
+contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalController, IOnchainStrategyValuer {
     uint256 internal constant WAD = 1e18;
 
     bytes32 public constant PENDLE_VENUE_ID = keccak256("PENDLE");
@@ -38,9 +39,10 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
 
     constructor(
         address owner_,
+        address vaultManager_,
         address vault_,
         address sleeve_,
-        address valuer_,
+        address remotePpsSnapshotStore_,
         address market_,
         address ptToken_,
         bytes32 strategyId_,
@@ -54,9 +56,10 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
         BaseStrategyController(
             StrategyKind.PTLoop,
             owner_,
+            vaultManager_,
             vault_,
             sleeve_,
-            valuer_,
+            remotePpsSnapshotStore_,
             strategyId_,
             targetReserveBps_,
             minReserveBps_,
@@ -76,11 +79,16 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
         ptToken = ptToken_;
     }
 
-    function sync() external nonReentrant returns (bool executed) {
+    function sync() external onlyVaultManager nonReentrant returns (bool executed) {
         IUniversalAdapterEscrow.Call[] memory calls = _quoteAutomaticAllocation();
         if (calls.length == 0) return false;
         sleeve.executeStrategyBypassCircuitBreaker(strategyId, calls);
         return true;
+    }
+
+    function syncPPS() external onlyVaultManager nonReentrant returns (uint256 assets) {
+        sleeve.refreshCachedValuation();
+        (assets,,) = sleeve.getCachedValuation();
     }
 
     function quoteAutomaticAllocation(uint256) external view override returns (IUniversalAdapterEscrow.Call[] memory) {
@@ -98,6 +106,25 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
 
         PTLoopUnloopQuote memory quote = quoteUnloopForAssets(shortfallAssets);
         return _buildCloseLoopCalls(_automaticCloseRequest(quote));
+    }
+
+    function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
+        assets = IERC20(asset).balanceOf(address(sleeve));
+        (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
+        uint256 ptBalance = IERC20(ptToken).balanceOf(address(sleeve));
+        if (ptBalance == 0) return (assets + remoteAssets, remoteHealthy);
+
+        try IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, ptBalance, asset) returns (
+            uint256 netTokenOut,
+            uint256,
+            uint256,
+            uint256,
+            uint256
+        ) {
+            return (assets + netTokenOut + remoteAssets, remoteHealthy);
+        } catch {
+            return (assets + remoteAssets, false);
+        }
     }
 
     function quoteUnloopForAssets(uint256 requestedAssets) public view returns (PTLoopUnloopQuote memory quote) {
@@ -217,7 +244,12 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
         uint256 rate = IPendleStaticQuoter(helper).getPtToAssetRate(market);
         if (rate == 0) revert InsufficientLocalLiquidity();
 
-        uint256 expectedPtOut = idleAssets * WAD / rate;
+        uint256 ptBalance = IERC20(ptToken).balanceOf(address(sleeve));
+        uint256 totalAssets = idleAssets + (ptBalance * rate / WAD);
+        uint256 allocatableAssets = availableToAllocate(idleAssets, totalAssets);
+        if (allocatableAssets == 0) return new IUniversalAdapterEscrow.Call[](0);
+
+        uint256 expectedPtOut = allocatableAssets * WAD / rate;
         uint256 minPtOut = expectedPtOut * (BPS - maxEntrySlippageBps) / BPS;
         if (minPtOut == 0) revert InsufficientLocalLiquidity();
 
@@ -227,7 +259,7 @@ contract PTLoopController is BaseStrategyController, IAutomatedWithdrawalControl
             market: market,
             minPtOut: minPtOut,
             guessPtOut: PendleLib.createDefaultApproxParams(),
-            input: PendleLib.createTokenInputSimple(asset, idleAssets),
+            input: PendleLib.createTokenInputSimple(asset, allocatableAssets),
             limit: PendleLib.createEmptyLimitOrderData()
         });
 

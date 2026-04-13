@@ -233,6 +233,24 @@ contract UniversalValuerOffchainStaleness is Test {
 
     /* ADAPTER INTEGRATION TESTS */
 
+    function testRealAssetsUsesPerStrategyAggregationWithoutEscrowTotalReport() public {
+        _submitValue(STRATEGY_A, 100e18, 95, 1);
+
+        assertEq(adapter.realAssets(), 100e18, "Should aggregate fresh strategy values directly");
+    }
+
+    function testRealAssetsCapsStaleAggregatedValuationToTrackedAssets() public {
+        _submitValue(STRATEGY_A, 100e18, 95, 1);
+
+        vm.prank(owner);
+        valuer.setFallbackValue(STRATEGY_A, 200e18);
+
+        vm.warp(block.timestamp + MAX_STALENESS + 1);
+
+        uint256 staleAssets = adapter.realAssets();
+        assertEq(staleAssets, 95e18, "Should haircut a tracked-assets-capped stale valuation");
+    }
+
     /// @notice Test realAssets applies haircut when valuation is unhealthy
     /// @dev SKIPPED: Depends on getValue(ESCROW_TOTAL_ID) feature not yet implemented
     function skip_testRealAssetsAppliesHaircutWhenUnhealthy() public {

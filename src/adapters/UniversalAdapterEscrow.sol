@@ -7,6 +7,7 @@ import {IAdapter} from "../interfaces/IAdapter.sol";
 import {IUniversalAdapterEscrow} from "./interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
 import {IAutomatedWithdrawalController} from "../controllers/interfaces/IAutomatedWithdrawalController.sol";
+import {IOnchainStrategyValuer} from "../controllers/interfaces/IOnchainStrategyValuer.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
@@ -36,6 +37,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
     bool public paused;
     address public owner;
+    address public settlementQueue;
     bool public emergencyMode;
     uint256 public emergencyModeActivatedAt;
 
@@ -47,6 +49,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotAuthorized();
+        _;
+    }
+
+    modifier onlySettlementQueue() {
+        if (msg.sender != settlementQueue) revert NotAuthorized();
         _;
     }
 
@@ -77,7 +84,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     /* EXTERNAL FUNCTIONS */
-    function allocate(bytes memory data, uint256 assets, bytes4, address)
+    function allocate(bytes memory data, uint256 assets, bytes4 selector, address)
         external
         override
         onlyVault
@@ -88,7 +95,8 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         (bytes32 strategyId, uint256 automationFlags,, Call[] memory calls) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
-        bool autoAllocationEnabled = automationFlags <= 3 && (automationFlags & 1) != 0;
+        bool autoAllocationEnabled =
+            selector == IVaultV2.allocate.selector && automationFlags <= 3 && (automationFlags & 1) != 0;
 
         if (!strategies[strategyId].active) revert StrategyNotActive();
         if (assets == 0) revert InvalidAmount();
@@ -102,11 +110,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         activeStrategies.add(strategyId);
 
         if (autoAllocationEnabled) {
-            Call[] memory allocationCalls =
-                IAutomatedWithdrawalController(strategies[strategyId].agent).quoteAutomaticAllocation(assets);
-            if (allocationCalls.length > 0) {
-                _executeMulticall(strategyId, allocationCalls, true);
-            }
+            try IAutomatedWithdrawalController(strategies[strategyId].agent).quoteAutomaticAllocation(assets) returns (
+                Call[] memory allocationCalls
+            ) {
+                if (allocationCalls.length > 0) {
+                    _executeMulticall(strategyId, allocationCalls, true);
+                }
+            } catch {}
         }
 
         ids = new bytes32[](1);
@@ -127,9 +137,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         (bytes32 strategyId, uint256 automationFlags, bool autoWithdrawalEnabledLegacy,) =
             abi.decode(data, (bytes32, uint256, bool, Call[]));
-        bool autoWithdrawalEnabled =
-            autoWithdrawalEnabledLegacy || (automationFlags <= 3 && (automationFlags & 2) != 0);
+        bool autoWithdrawalEnabled = autoWithdrawalEnabledLegacy || (automationFlags <= 3 && (automationFlags & 2) != 0);
         uint256 adapterBalance = IERC20(asset).balanceOf(address(this));
+
+        if (!strategies[strategyId].active) revert StrategyNotActive();
 
         if (autoWithdrawalEnabled && caller != FORCE_DEALLOCATE_SELECTOR && assets > adapterBalance) {
             _autoWithdraw(strategyId, assets - adapterBalance);
@@ -183,27 +194,21 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
 
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+        (bool hasValue, bool hasStaleData, bool needsTrackedAssetCap, uint256 totalValue) = _resolveCurrentValuation();
 
-        bool hasStaleData = false;
-        (bool healthSuccess, bytes memory healthData) =
-            valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
-        if (healthSuccess && healthData.length >= 32) {
-            bool isHealthy = abi.decode(healthData, (bool));
-            hasStaleData = !isHealthy;
-        }
-
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
-
-        if (success && data.length >= 32) {
-            uint256 totalValue = abi.decode(data, (uint256));
-
-            if (totalValue > 0) {
-                if (hasStaleData || emergencyMode) {
-                    return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
+        if (hasValue && totalValue > 0) {
+            if (needsTrackedAssetCap && (hasStaleData || emergencyMode)) {
+                uint256 trackedAssets = allocatedInAdapterBounded + totalExternalDeposits;
+                if (totalValue > trackedAssets) {
+                    totalValue = trackedAssets;
                 }
-                return totalValue;
             }
+
+            if (hasStaleData || emergencyMode) {
+                return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
+            }
+
+            return totalValue;
         }
         if (totalAllocations == 0) {
             return 0; // Legitimate 0 value when nothing allocated
@@ -418,10 +423,44 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         owner = newOwner;
     }
 
+    function setSettlementQueue(address settlementQueue_) external onlyOwner {
+        if (settlementQueue_ == address(0)) revert InvalidAmount();
+        settlementQueue = settlementQueue_;
+        emit SettlementQueueSet(settlementQueue_);
+    }
+
+    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue {
+        if (!strategies[strategyId].active) revert StrategyNotActive();
+        if (assetsReceived == 0) revert InvalidAmount();
+
+        uint256 oldExtDeposits = externalDeposits[strategyId];
+        uint256 reduction = assetsReceived > oldExtDeposits ? oldExtDeposits : assetsReceived;
+        if (reduction > totalExternalDeposits) {
+            reduction = totalExternalDeposits;
+        }
+
+        if (reduction == 0) {
+            emit SettlementRecorded(strategyId, assetsReceived, oldExtDeposits);
+            return;
+        }
+
+        externalDeposits[strategyId] = oldExtDeposits - reduction;
+        totalExternalDeposits -= reduction;
+
+        emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+        emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);
+
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
+    }
+
     /// @notice Manually sync strategy with valuer for drift correction (owner-only)
+    /// @dev Optional maintenance hook for deployments that still use an external valuer.
     /// @param strategyId Strategy to sync with valuer
     function syncStrategyWithValuer(bytes32 strategyId) external onlyOwner {
         if (!strategies[strategyId].active) revert StrategyNotActive();
+        if (!_hasExternalValuer()) revert ValuationUnavailable();
 
         (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyId));
 
@@ -500,25 +539,27 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
 
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
+        if (_hasExternalValuer()) {
+            (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
 
-        if (success && data.length >= 32) {
-            uint256 valuerValue = abi.decode(data, (uint256));
+            if (success && data.length >= 32) {
+                uint256 valuerValue = abi.decode(data, (uint256));
 
-            uint256 minExpected = (newMinKnown * 8000) / 10000;
-            uint256 maxExpected = (newMinKnown * 12000) / 10000;
+                uint256 minExpected = (newMinKnown * 8000) / 10000;
+                uint256 maxExpected = (newMinKnown * 12000) / 10000;
 
-            if (valuerValue < minExpected || valuerValue > maxExpected) {
-                uint256 deviation;
-                if (valuerValue > newMinKnown) {
-                    deviation = valuerValue - newMinKnown;
-                } else {
-                    deviation = newMinKnown - valuerValue;
+                if (valuerValue < minExpected || valuerValue > maxExpected) {
+                    uint256 deviation;
+                    if (valuerValue > newMinKnown) {
+                        deviation = valuerValue - newMinKnown;
+                    } else {
+                        deviation = newMinKnown - valuerValue;
+                    }
+
+                    uint256 deviationBps = newMinKnown == 0 ? 0 : (deviation * 10000) / newMinKnown; // basis points
+
+                    emit SyncDeviationWarning(newMinKnown, valuerValue, deviation, deviationBps);
                 }
-
-                uint256 deviationBps = newMinKnown == 0 ? 0 : (deviation * 10000) / newMinKnown; // basis points
-
-                emit SyncDeviationWarning(newMinKnown, valuerValue, deviation, deviationBps);
             }
         }
 
@@ -550,27 +591,23 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit ExternalDepositsReduced(strategyId, current, newPerStrategy, delta);
     }
 
-    /// @notice Refresh cached valuation from current valuer state
+    /// @notice Refresh cached valuation from the active valuation source
     function refreshCachedValuation() external {
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+        (bool hasValue,,, uint256 totalValue) = _resolveCurrentValuation();
 
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
+        if (!hasValue) {
+            revert("Valuation unavailable");
+        }
 
-        if (success && data.length >= 32) {
-            uint256 totalValue = abi.decode(data, (uint256));
+        if (totalAllocations > 0) {
+            require(totalValue >= (totalAllocations * 75) / 100, "Valuation too low");
+            require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high");
+        }
 
-            if (totalAllocations > 0) {
-                require(totalValue >= (totalAllocations * 75) / 100, "Valuation too low - check valuer");
-                require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high - check valuer");
-            }
-
-            if (totalValue > 0) {
-                cachedValuation = totalValue;
-                cachedValuationTimestamp = block.timestamp;
-                emit CachedValuationRefreshed(totalValue, block.timestamp);
-            }
-        } else {
-            revert("Valuer call failed");
+        if (totalValue > 0) {
+            cachedValuation = totalValue;
+            cachedValuationTimestamp = block.timestamp;
+            emit CachedValuationRefreshed(totalValue, block.timestamp);
         }
     }
 
@@ -654,8 +691,13 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function _autoWithdraw(bytes32 strategyId, uint256 shortfallAssets) internal {
         if (shortfallAssets == 0) return;
 
-        Call[] memory withdrawCalls =
-            IAutomatedWithdrawalController(strategies[strategyId].agent).quoteAutomaticWithdrawal(shortfallAssets);
+        Call[] memory withdrawCalls;
+        try IAutomatedWithdrawalController(strategies[strategyId].agent).quoteAutomaticWithdrawal(shortfallAssets)
+        returns (Call[] memory quotedCalls) {
+            withdrawCalls = quotedCalls;
+        } catch {
+            revert InvalidData();
+        }
         if (withdrawCalls.length == 0) revert InvalidData();
 
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
@@ -683,114 +725,75 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
     }
 
-    function _syncExternalDepositsWithValuer(bytes32 strategyId, uint256 withdrawnAmount, uint256 requestedAssets)
+    function _resolveCurrentValuation()
         internal
+        view
+        returns (bool hasValue, bool hasStaleData, bool needsTrackedAssetCap, uint256 totalValue)
     {
-        uint256 trackedValue = externalDeposits[strategyId];
+        (bool onchainSuccess, bool onchainHealthy, uint256 onchainValue) = _aggregateOnchainStrategyValue();
+        if (onchainSuccess) {
+            return (true, !onchainHealthy, false, onchainValue);
+        }
 
-        if (trackedValue == 0) return;
+        if (!_hasExternalValuer()) {
+            return (false, false, false, 0);
+        }
 
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyId));
+        (bool healthSuccess, bytes memory healthData) =
+            valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
+
+        if (healthSuccess && healthData.length >= 32) {
+            hasStaleData = !abi.decode(healthData, (bool));
+            needsTrackedAssetCap = true;
+            (hasValue, totalValue) = _aggregateActiveStrategyValues();
+            return (hasValue, hasStaleData, needsTrackedAssetCap, totalValue);
+        }
+
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
 
         if (success && data.length >= 32) {
-            uint256 actualValue = abi.decode(data, (uint256));
-
-            bool valuerConfigured = (actualValue > 0 || trackedValue == 0);
-
-            if (valuerConfigured && actualValue != trackedValue) {
-                int256 delta;
-
-                if (actualValue < trackedValue) {
-                    uint256 decrease = trackedValue - actualValue;
-
-                    uint256 expectedMin = (withdrawnAmount * 80) / 100;
-                    uint256 expectedMax = (withdrawnAmount * 120) / 100;
-
-                    if (decrease < expectedMin || decrease > expectedMax) {
-                        emit UnexpectedValueChange(
-                            strategyId,
-                            withdrawnAmount,
-                            decrease,
-                            withdrawnAmount,
-                            "Value decrease outside expected range"
-                        );
-                    }
-
-                    externalDeposits[strategyId] = actualValue;
-
-                    if (decrease > totalExternalDeposits) {
-                        emit AccountingDesyncDetected(strategyId, decrease, totalExternalDeposits);
-                        totalExternalDeposits = 0;
-                    } else {
-                        totalExternalDeposits -= decrease;
-                    }
-
-                    delta = -int256(decrease);
-                } else {
-                    uint256 increase = actualValue - trackedValue;
-
-                    externalDeposits[strategyId] = actualValue;
-                    totalExternalDeposits += increase;
-
-                    emit YieldAccrued(strategyId, increase);
-
-                    delta = int256(increase);
-                }
-
-                emit ExternalDepositsValuerSynced(strategyId, trackedValue, actualValue, delta);
-            } else {
-                _applyConservativeReduction(strategyId, trackedValue, withdrawnAmount, false);
-            }
-        } else {
-            bool cacheStale = block.timestamp - cachedValuationTimestamp >= MAX_CACHED_VALUATION_AGE;
-            _applyConservativeReduction(strategyId, trackedValue, withdrawnAmount, cacheStale);
+            return (true, false, false, abi.decode(data, (uint256)));
         }
+
+        return (false, false, false, 0);
     }
 
-    function _applyConservativeReduction(
-        bytes32 strategyId,
-        uint256 trackedValue,
-        uint256 withdrawnAmount,
-        bool emitWarning
-    ) internal {
-        uint256 conservativeReduction = withdrawnAmount;
-
-        uint256 maxReduction = trackedValue < totalExternalDeposits ? trackedValue : totalExternalDeposits;
-        if (conservativeReduction > maxReduction) {
-            conservativeReduction = maxReduction;
+    function _aggregateOnchainStrategyValue() internal view returns (bool success, bool healthy, uint256 totalValue) {
+        bytes32[] memory strategyIds = activeStrategies.values();
+        if (strategyIds.length != 1) {
+            return (false, false, 0);
         }
 
-        if (conservativeReduction > 0) {
-            externalDeposits[strategyId] = trackedValue - conservativeReduction;
-            totalExternalDeposits -= conservativeReduction;
-
-            if (emitWarning) {
-                emit UnexpectedValueChange(
-                    strategyId,
-                    withdrawnAmount,
-                    conservativeReduction,
-                    withdrawnAmount,
-                    "Valuer unavailable - using conservative estimate"
-                );
-            } else {
-                emit ExternalDepositsValuerSynced(
-                    strategyId, trackedValue, trackedValue - conservativeReduction, -int256(conservativeReduction)
-                );
-            }
+        address agent = strategies[strategyIds[0]].agent;
+        (bool valuationSuccess, bytes memory data) =
+            agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
+        if (!valuationSuccess || data.length < 64) {
+            return (false, false, 0);
         }
+
+        (totalValue, healthy) = abi.decode(data, (uint256, bool));
+        return (true, healthy, totalValue);
     }
 
-    function _getStrategyValue(bytes32 strategyId) internal view returns (uint256 value) {
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyId));
+    function _hasExternalValuer() internal view returns (bool) {
+        return valuer != address(0) && valuer.code.length > 0;
+    }
 
-        if (success && data.length >= 32) {
-            value = abi.decode(data, (uint256));
-            if (value == 0) {
-                value = allocations[strategyId];
+    function _aggregateActiveStrategyValues() internal view returns (bool success, uint256 totalValue) {
+        bytes32[] memory strategyIds = activeStrategies.values();
+
+        for (uint256 i = 0; i < strategyIds.length; i++) {
+            (bool valueSuccess, bytes memory data) =
+                valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyIds[i]));
+            if (!valueSuccess || data.length < 32) {
+                return (false, 0);
             }
-        } else {
-            value = allocations[strategyId];
+
+            totalValue += abi.decode(data, (uint256));
         }
+
+        return (true, totalValue);
     }
 
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale) {
@@ -814,12 +817,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function disableEmergencyMode() external onlyOwner {
         if (!emergencyMode) revert EmergencyModeNotEnabled();
 
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
+        (bool hasValue,,, uint256 totalValue) = _resolveCurrentValuation();
 
-        if (!success || data.length < 32) revert ValuerStillUnavailable();
-
-        uint256 totalValue = abi.decode(data, (uint256));
+        if (!hasValue) revert ValuerStillUnavailable();
 
         if (totalAllocations > 0 && totalValue == 0) revert ValuerStillUnavailable();
 

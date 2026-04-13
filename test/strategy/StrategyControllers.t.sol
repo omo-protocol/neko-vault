@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {IVaultV2} from "../../src/interfaces/IVaultV2.sol";
+import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {VaultV2Factory} from "../../src/VaultV2Factory.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {UniversalAdapterEscrowFactory} from "../../src/adapters/UniversalAdapterEscrowFactory.sol";
@@ -30,6 +31,7 @@ import {
 import {StrategyVaultFactory} from "../../src/factories/StrategyVaultFactory.sol";
 import {AsyncWithdrawalQueue} from "../../src/queues/AsyncWithdrawalQueue.sol";
 import {AsyncWithdrawalSettlementComposer} from "../../src/ovault/AsyncWithdrawalSettlementComposer.sol";
+import {RemotePpsSnapshotStore} from "../../src/ovault/RemotePpsSnapshotStore.sol";
 import {VaultTimeLockWrapper} from "../../src/VaultTimeLockWrapper.sol";
 import {
     ChainManifest,
@@ -53,6 +55,7 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
+import {Origin} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 
 contract StrategyControllersTest is Test {
     bytes32 internal constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
@@ -99,7 +102,7 @@ contract StrategyControllersTest is Test {
         childFactory = new StrategyVaultFactory(address(vaultFactory), address(adapterFactory));
     }
 
-    function testDeltaNeutralControllerAutomaticallyAllocatesAndPermissionlesslySyncs() public {
+    function testDeltaNeutralControllerDefersDepositAllocationUntilPermissionlessSync() public {
         Deployment memory deployment = _deployDeltaNeutral(false);
         DeltaNeutralController controller = DeltaNeutralController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -121,9 +124,8 @@ contract StrategyControllersTest is Test {
                 if (found == 2) break;
             }
         }
-        assertEq(found, 2);
-        assertTrue(rawActions[0].length > 0);
-        assertTrue(rawActions[1].length > 0);
+        assertEq(found, 0);
+        assertEq(asset.balanceOf(deployment.sleeve), 1_000e6);
 
         DeltaNeutralUnwindPlan memory plan = controller.planWithdrawal(200e6, 500e6, 800e6, 800e6, false);
         assertEq(plan.shortfallAssets, 300e6);
@@ -138,6 +140,7 @@ contract StrategyControllersTest is Test {
             deployment.sleeve, 100_000_000, 100_000_000, -5_000_000, 500_000_000, 0, 100_000_000, 90_000_000
         );
         vm.recordLogs();
+        vm.prank(owner);
         assertTrue(controller.sync());
         entries = vm.getRecordedLogs();
         found = 0;
@@ -166,6 +169,61 @@ contract StrategyControllersTest is Test {
         assertEq(sizing.perpSizeToClose, 1_369_864);
         assertFalse(sizing.requiresLayerZero);
         assertFalse(sizing.requiresEmergencyExit);
+    }
+
+    function testDeltaNeutralVaultCanPriceOnchainWithoutValuer() public {
+        Deployment memory deployment = _deployDeltaNeutralWithValuer(false, address(0));
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        address sink = makeAddr("sink");
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(IVaultV2(deployment.vault)), type(uint256).max);
+        IVaultV2(deployment.vault).deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(deployment.sleeve);
+        asset.transfer(sink, 1_000e6);
+
+        _mockCustomHyperliquidReads(
+            deployment.sleeve, 100_000_000, 100_000_000, -5_000_000, 5_000_000, 500_000_000, 500_000_000, 100_000_000
+        );
+
+        assertEq(sleeve.realAssets(), 1_000e6);
+    }
+
+    function testDeltaNeutralValuationUsesMarginAccountEquityNotWithdrawableOnly() public {
+        Deployment memory deployment = _deployDeltaNeutralWithValuer(false, address(0));
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        address sink = makeAddr("sink");
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(IVaultV2(deployment.vault)), type(uint256).max);
+        IVaultV2(deployment.vault).deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(deployment.sleeve);
+        asset.transfer(sink, 1_000e6);
+
+        _mockCustomHyperliquidReads(
+            deployment.sleeve, 100_000_000, 100_000_000, -5_000_000, 5_000_000, 300_000_000, 500_000_000, 100_000_000
+        );
+
+        assertEq(sleeve.realAssets(), 1_000e6);
+    }
+
+    function testDeltaNeutralSyncFunctionsAreManagerOnly() public {
+        Deployment memory deployment = _deployDeltaNeutral(false);
+        DeltaNeutralController controller = DeltaNeutralController(deployment.controller);
+
+        vm.prank(user);
+        vm.expectRevert();
+        controller.sync();
+
+        vm.prank(user);
+        vm.expectRevert();
+        controller.syncPPS();
     }
 
     function testDeltaNeutralControllerKellyOptimizerMatchesKeeperDefaults() public {
@@ -225,6 +283,32 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(receiver), 100e6);
     }
 
+    function testTimelockWrapperCanUnwrapToSharesForAsyncQueueFlows() public {
+        Deployment memory deployment = _deployDeltaNeutral(true);
+        VaultTimeLockWrapper wrapper = VaultTimeLockWrapper(deployment.wrapper);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+
+        _mockCustomHyperliquidReads(deployment.sleeve, 100_000_000, 100_000_000, 0, 0, 0, 1_000_000_000, 100_000_000);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(wrapper), type(uint256).max);
+        wrapper.deposit(1_000e6);
+        vm.warp(block.timestamp + wrapper.LOCK_PERIOD());
+
+        uint256 unlockedShares = wrapper.balanceOf(user);
+        wrapper.unwrap(unlockedShares, user, user);
+        vault.approve(address(queue), unlockedShares);
+        uint256 requestId = queue.requestRedeem(unlockedShares / 2, user);
+        vm.stopPrank();
+
+        WithdrawalRequest memory request = queue.getRequest(requestId);
+        assertEq(vault.balanceOf(user), unlockedShares / 2);
+        assertEq(request.owner, user);
+        assertEq(request.sharesEscrowed, unlockedShares / 2);
+    }
+
     function testDeltaNeutralSameChainWithdrawUsesAsyncQueue() public {
         Deployment memory deployment = _deployDeltaNeutral(false);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -275,8 +359,9 @@ contract StrategyControllersTest is Test {
         assertEq(vault.balanceOf(address(queue)), 0);
     }
 
-    function testPTLoopAutomaticallyLoopsOnDepositAndUnwindsOnWithdraw() public {
+    function testPTLoopDefersDepositLoopingUntilSyncAndStillUnwindsOnWithdraw() public {
         Deployment memory deployment = _deployPTLoop(false);
+        PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
 
         asset.mint(user, 1_000e6);
@@ -286,30 +371,101 @@ contract StrategyControllersTest is Test {
         vm.stopPrank();
 
         assertEq(vault.liquidityAdapter(), deployment.sleeve);
-        assertEq(asset.balanceOf(deployment.sleeve), 0);
-        assertEq(ptAsset.balanceOf(deployment.sleeve), 950e6);
+        assertEq(asset.balanceOf(deployment.sleeve), 1_000e6);
+        assertEq(ptAsset.balanceOf(deployment.sleeve), 0);
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+        assertEq(asset.balanceOf(deployment.sleeve), 150e6);
+        assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
 
         vm.prank(user);
         vault.withdraw(700e6, user, user);
 
         assertEq(asset.balanceOf(user), 700e6);
-        assertLt(ptAsset.balanceOf(deployment.sleeve), 950e6);
+        assertLt(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
         assertEq(asset.balanceOf(address(vault)), 0);
         assertGt(asset.balanceOf(deployment.sleeve), 0);
     }
 
-    function testCrossChainWithdrawalQueueEscrowsSharesAndClaimsAfterSettlement() public {
-        Deployment memory deployment = _deployPTLoop(true);
+    function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
-        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
 
         asset.mint(user, 1_000e6);
         vm.startPrank(user);
         asset.approve(address(vault), type(uint256).max);
         vault.deposit(1_000e6, user);
         vm.stopPrank();
+
+        assertEq(sleeve.realAssets(), 1_000e6);
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+        assertEq(sleeve.realAssets(), 957_500_000);
+    }
+
+    function testPTLoopValuationUsesStaticQuoterOutput() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        pendleRouter.setStaticRedeemBps(9_000);
+        assertEq(sleeve.realAssets(), 876_750_000);
+    }
+
+    function testSyncPPSRefreshesCachedValuationFromOnchainState() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        uint256 cachedAssets = controller.syncPPS();
+
+        assertEq(cachedAssets, 1_000e6);
+        (uint256 value,, bool isStale) = sleeve.getCachedValuation();
+        assertEq(value, 1_000e6);
+        assertFalse(isStale);
+    }
+
+    function testCrossChainWithdrawalQueueEscrowsSharesAndClaimsAfterSettlement() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        PTLoopController controller = PTLoopController(deployment.controller);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        uint256 externalBefore = sleeve.externalDeposits(deployment.strategyId);
 
         vm.startPrank(user);
         uint256 sharesNeeded = vault.previewWithdraw(700e6);
@@ -319,7 +475,7 @@ contract StrategyControllersTest is Test {
 
         WithdrawalRequest memory request = queue.getRequest(requestId);
         assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Pending));
-        assertEq(request.reservedLocalAssets, 0);
+        assertEq(request.reservedLocalAssets, 150e6);
         assertEq(vault.balanceOf(address(queue)), sharesNeeded);
 
         vm.expectRevert(AsyncWithdrawalQueue.RequestNotClaimable.selector);
@@ -335,11 +491,72 @@ contract StrategyControllersTest is Test {
         request = queue.getRequest(requestId);
         assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Claimable));
         assertEq(request.assetsFunded, 700e6);
-        assertEq(asset.balanceOf(deployment.sleeve), 700e6);
+        assertEq(asset.balanceOf(deployment.sleeve), 850e6);
+        assertLt(sleeve.externalDeposits(deployment.strategyId), externalBefore);
 
         queue.claim(requestId);
 
         assertEq(vault.balanceOf(address(queue)), 0);
+        assertEq(asset.balanceOf(user), 700e6);
+    }
+
+    function testCrossChainPpsSnapshotPropagatesToHomeSyncPps() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
+        address remoteReporter = makeAddr("remoteReporter");
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        vm.prank(owner);
+        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
+
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
+            bytes32("pps"),
+            abi.encode(uint256(300e6), uint64(block.timestamp)),
+            address(0),
+            ""
+        );
+
+        vm.prank(owner);
+        uint256 cachedAssets = controller.syncPPS();
+
+        assertEq(cachedAssets, 1_257_500_000);
+        assertEq(sleeve.realAssets(), 1_257_500_000);
+    }
+
+    function testCrossChainSettlementComposerStoresRecoverablePendingSettlement() public {
+        Deployment memory deployment = _deployPTLoop(true);
+        AsyncWithdrawalSettlementComposer composer =
+            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
+
+        asset.mint(address(composer), 700e6);
+        bytes32 guid = bytes32("bad-request");
+        bytes memory message = OFTComposeMsgCodec.encode(
+            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(999))
+        );
+
+        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+
+        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
+        assertEq(requestId, 999);
+        assertEq(amountReceived, 700e6);
+
+        vm.prank(owner);
+        composer.recoverPendingSettlement(guid, user);
+
+        (, amountReceived) = composer.pendingSettlements(guid);
+        assertEq(amountReceived, 0);
         assertEq(asset.balanceOf(user), 700e6);
     }
 
@@ -362,13 +579,21 @@ contract StrategyControllersTest is Test {
     }
 
     function _deployDeltaNeutral(bool enableTimelock) internal returns (Deployment memory) {
+        return _deployDeltaNeutralWithValuer(enableTimelock, address(valuer));
+    }
+
+    function _deployDeltaNeutralWithValuer(bool enableTimelock, address valuerAddress)
+        internal
+        returns (Deployment memory)
+    {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: owner,
             enableTimelock: enableTimelock,
             enableOmnichainVault: false,
             asset: address(asset),
-            valuer: address(valuer),
+            valuer: valuerAddress,
             name: "Delta Neutral Vault",
             symbol: "ldn",
             strategyIdData: bytes("hyperliquid-dn"),
@@ -440,15 +665,20 @@ contract StrategyControllersTest is Test {
     }
 
     function _deployPTLoop(bool usesLayerZero) internal returns (Deployment memory) {
+        return _deployPTLoopWithValuer(usesLayerZero, address(valuer));
+    }
+
+    function _deployPTLoopWithValuer(bool usesLayerZero, address valuerAddress) internal returns (Deployment memory) {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
+            vaultManager: owner,
             curator: owner,
             enableTimelock: false,
             enableOmnichainVault: false,
             asset: address(asset),
             market: PENDLE_MARKET,
             ptToken: address(ptAsset),
-            valuer: address(valuer),
+            valuer: valuerAddress,
             name: "PT Loop Vault",
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
@@ -588,10 +818,15 @@ contract StrategyControllersTest is Test {
 contract MockPendleRouter is IPendleRouter, IPendleStaticQuoter {
     MockERC20 public immutable asset;
     MockERC20 public immutable pt;
+    uint256 public staticRedeemBps = 10_000;
 
     constructor(address asset_, address pt_) {
         asset = MockERC20(asset_);
         pt = MockERC20(pt_);
+    }
+
+    function setStaticRedeemBps(uint256 newStaticRedeemBps) external {
+        staticRedeemBps = newStaticRedeemBps;
     }
 
     function swapExactTokenForPt(
@@ -636,7 +871,7 @@ contract MockPendleRouter is IPendleRouter, IPendleStaticQuoter {
 
     function swapExactPtForTokenStatic(address, uint256 exactPtIn, address)
         external
-        pure
+        view
         returns (
             uint256 netTokenOut,
             uint256 netSyToRedeem,
@@ -645,7 +880,7 @@ contract MockPendleRouter is IPendleRouter, IPendleStaticQuoter {
             uint256 exchangeRateAfter
         )
     {
-        netTokenOut = exactPtIn;
+        netTokenOut = exactPtIn * staticRedeemBps / 10_000;
         netSyToRedeem = 0;
         netSyFee = 0;
         priceImpact = 0;

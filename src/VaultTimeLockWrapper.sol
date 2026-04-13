@@ -75,7 +75,14 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     // ============================================
 
     event Deposit(address indexed caller, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
-    event Withdraw(address indexed caller, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
+    event Withdraw(
+        address indexed caller,
+        address indexed receiver,
+        address indexed onBehalf,
+        uint256 assets,
+        uint256 shares,
+        uint256 vTokens
+    );
     event EmergencyExit(address indexed user, address indexed adapter, uint256 assets, uint256 penaltyShares);
     event ApprovalForDeposit(address indexed owner, address indexed operator, bool approved);
 
@@ -146,12 +153,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Pull assets from caller
-        SafeERC20Lib.safeTransferFrom(
-            address(asset),
-            from,
-            address(this),
-            assets
-        );
+        SafeERC20Lib.safeTransferFrom(address(asset), from, address(this), assets);
 
         // Approve and deposit to vault
         SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
@@ -164,10 +166,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         vTokens = shares;
 
         // Create new deposit batch
-        userDeposits[to].push(DepositBatch({
-            amount: vTokens,
-            depositTime: block.timestamp
-        }));
+        userDeposits[to].push(DepositBatch({amount: vTokens, depositTime: block.timestamp}));
 
         // Mint receipt tokens
         _mint(to, vTokens);
@@ -188,21 +187,13 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         assets = vault.previewMint(shares);
 
         // Pull assets and deposit
-         SafeERC20Lib.safeTransferFrom(
-            address(asset),
-            msg.sender,
-            address(this),
-            assets
-        );
+        SafeERC20Lib.safeTransferFrom(address(asset), msg.sender, address(this), assets);
 
         SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
         vault.mint(shares, address(this));
 
         // Create deposit batch and mint vTokens
-        userDeposits[msg.sender].push(DepositBatch({
-            amount: shares,
-            depositTime: block.timestamp
-        }));
+        userDeposits[msg.sender].push(DepositBatch({amount: shares, depositTime: block.timestamp}));
 
         _mint(msg.sender, shares);
 
@@ -293,6 +284,31 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     }
 
     /**
+     * @notice Burn unlocked vTokens and receive the underlying VaultV2 shares directly.
+     * @dev Enables async withdrawal queues, omnichain share bridging, and any other share-based flow after lock expiry.
+     */
+    function unwrap(uint256 vTokens, address receiver, address onBehalf)
+        external
+        nonReentrant
+        returns (uint256 sharesOut)
+    {
+        if (receiver == address(0)) revert ZeroAddress();
+        if (vTokens == 0) revert ZeroAmount();
+
+        if (msg.sender != onBehalf) {
+            uint256 allowed = allowance[onBehalf][msg.sender];
+            if (allowed < vTokens) revert InsufficientAllowance();
+            if (allowed != type(uint256).max) {
+                allowance[onBehalf][msg.sender] = allowed - vTokens;
+            }
+        }
+
+        _burnWithLockupCheck(onBehalf, vTokens);
+        SafeERC20Lib.safeTransfer(address(vault), receiver, vTokens);
+        return vTokens;
+    }
+
+    /**
      * @dev SECURITY FIX: Per-batch lock enforcement with proper FIFO removal
      * Burns vTokens from oldest deposits first, checking EACH batch for lockup
      */
@@ -365,11 +381,11 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
      * @param assets Amount of assets to deallocate
      * @return penaltyShares Shares burned as penalty
      */
-    function emergencyWithdraw(
-        address adapter,
-        bytes memory data,
-        uint256 assets
-    ) external nonReentrant returns (uint256 penaltyShares) {
+    function emergencyWithdraw(address adapter, bytes memory data, uint256 assets)
+        external
+        nonReentrant
+        returns (uint256 penaltyShares)
+    {
         if (balanceOf[msg.sender] == 0) revert InsufficientBalance();
 
         // SECURITY FIX: Approve vault for penalty shares before forceDeallocate
@@ -491,9 +507,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         while (remaining > 0 && batchesConsumed < fromDeposits.length) {
             DepositBatch storage sourceBatch = fromDeposits[batchesConsumed];
 
-            uint256 transferAmount = sourceBatch.amount <= remaining
-                ? sourceBatch.amount
-                : remaining;
+            uint256 transferAmount = sourceBatch.amount <= remaining ? sourceBatch.amount : remaining;
 
             // SECURITY FIX: Merge batches with same depositTime to prevent transfer spam DoS
             // Without this fix, an attacker could fill a victim's batch array (max 100)
@@ -511,10 +525,12 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
                 // SECURITY FIX: Check batch limit only when creating NEW batch
                 if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
-                toDeposits.push(DepositBatch({
-                    amount: transferAmount,
-                    depositTime: sourceBatch.depositTime // Preserve original deposit time
-                }));
+                toDeposits.push(
+                    DepositBatch({
+                        amount: transferAmount,
+                        depositTime: sourceBatch.depositTime // Preserve original deposit time
+                    })
+                );
             }
 
             if (sourceBatch.amount <= remaining) {
@@ -611,12 +627,11 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     /**
      * @notice Get details of a specific deposit batch
      */
-    function getDeposit(address user, uint256 index) external view returns (
-        uint256 amount,
-        uint256 depositTime,
-        uint256 unlockTime,
-        bool unlocked
-    ) {
+    function getDeposit(address user, uint256 index)
+        external
+        view
+        returns (uint256 amount, uint256 depositTime, uint256 unlockTime, bool unlocked)
+    {
         require(index < userDeposits[user].length, "Index out of bounds");
 
         DepositBatch storage batch = userDeposits[user][index];
