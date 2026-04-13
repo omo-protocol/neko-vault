@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {AssetOFT} from "../../src/ovault/AssetOFT.sol";
+import {RemotePpsSnapshotSender} from "../../src/ovault/RemotePpsSnapshotSender.sol";
 import {ShareOFT} from "../../src/ovault/ShareOFT.sol";
 import {StrategyVaultFactory} from "../../src/factories/StrategyVaultFactory.sol";
 import {
@@ -166,6 +167,18 @@ abstract contract StrategyLaunchpadScriptBase is Script {
         vm.stopBroadcast();
     }
 
+    function _deployRemotePpsReporterAction() internal returns (address reporter) {
+        uint256 privateKey = vm.envUint("PRIVATE_KEY");
+        address owner = vm.envAddress("OWNER");
+        address vaultManager = vm.envOr("VAULT_MANAGER", owner);
+        address sleeve = vm.envAddress("SLEEVE");
+        address endpoint = vm.envAddress("LZ_ENDPOINT");
+
+        vm.startBroadcast(privateKey);
+        reporter = address(new RemotePpsSnapshotSender(owner, vaultManager, sleeve, endpoint));
+        vm.stopBroadcast();
+    }
+
     function _configureOmnichainAction() internal {
         uint256 privateKey = vm.envUint("PRIVATE_KEY");
         address localAssetOFT = vm.envAddress("LOCAL_ASSET_OFT");
@@ -209,6 +222,22 @@ abstract contract StrategyLaunchpadScriptBase is Script {
             _setOptions(localShareOFT, remoteEids, sendOptions, sendAndCallOptions);
         }
 
+        vm.stopBroadcast();
+    }
+
+    function _configureRemotePpsPeersAction() internal {
+        if (!vm.envExists("LOCAL_REMOTE_PPS_SYNC") || !vm.envExists("REMOTE_REMOTE_PPS_SYNCS")) return;
+
+        uint256 privateKey = vm.envUint("PRIVATE_KEY");
+        address localRemotePpsSync = vm.envAddress("LOCAL_REMOTE_PPS_SYNC");
+        uint32[] memory remoteEids = _loadUint32Array("REMOTE_EIDS");
+        address[] memory remoteRemotePpsSyncs = vm.envAddress("REMOTE_REMOTE_PPS_SYNCS", ",");
+        if (remoteEids.length == 0 || remoteRemotePpsSyncs.length != remoteEids.length) revert InvalidPeerConfig();
+
+        vm.startBroadcast(privateKey);
+        for (uint256 i; i < remoteEids.length; i++) {
+            IOAppCore(localRemotePpsSync).setPeer(remoteEids[i], bytes32(uint256(uint160(remoteRemotePpsSyncs[i]))));
+        }
         vm.stopBroadcast();
     }
 
@@ -302,7 +331,7 @@ abstract contract StrategyLaunchpadScriptBase is Script {
     function _logNextPhaseHint() internal pure {
         console2.log("Next rollout step suggestion:");
         console2.log(
-            "Set ROLLOUT_ACTION to 1 for spoke OFT deployment or 2 for peer/options wiring on the active chain."
+            "Set ROLLOUT_ACTION to 1 for spoke OFT deployment, 2 for peer/options wiring, or 3 for remote PPS reporter deployment."
         );
     }
 

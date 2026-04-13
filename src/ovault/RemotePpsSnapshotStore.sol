@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
-import {IRemotePpsSnapshotStore} from "../controllers/interfaces/IRemotePpsSnapshotStore.sol";
+import {IRemotePpsSnapshotStore} from "../controllers/StrategyControllerInterfaces.sol";
 import {ILayerZeroReceiver} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroReceiver.sol";
 import {ILayerZeroEndpointV2, Origin} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 

@@ -6,8 +6,7 @@ import {IERC20} from "../interfaces/IERC20.sol";
 import {IAdapter} from "../interfaces/IAdapter.sol";
 import {IUniversalAdapterEscrow} from "./interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
-import {IAutomatedWithdrawalController} from "../controllers/interfaces/IAutomatedWithdrawalController.sol";
-import {IOnchainStrategyValuer} from "../controllers/interfaces/IOnchainStrategyValuer.sol";
+import {IAutomatedWithdrawalController, IOnchainStrategyValuer} from "../controllers/StrategyControllerInterfaces.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 

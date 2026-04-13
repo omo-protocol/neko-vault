@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
-import {IAsyncWithdrawalController} from "../controllers/interfaces/IAsyncWithdrawalController.sol";
+import {IAsyncWithdrawalController} from "../controllers/StrategyControllerInterfaces.sol";
 import {WithdrawalRequest, WithdrawalRequestStatus} from "../strategies/StrategyTypes.sol";
 
 contract AsyncWithdrawalQueue is ReentrancyGuard {

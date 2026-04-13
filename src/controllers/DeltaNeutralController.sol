@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
-import {BaseStrategyController} from "./BaseStrategyController.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
-import {IAsyncWithdrawalController} from "./interfaces/IAsyncWithdrawalController.sol";
-import {IAutomatedWithdrawalController} from "./interfaces/IAutomatedWithdrawalController.sol";
-import {IOnchainStrategyValuer} from "./interfaces/IOnchainStrategyValuer.sol";
+import {
+    IAsyncWithdrawalController,
+    IAutomatedWithdrawalController,
+    IOnchainStrategyValuer,
+    IRemotePpsSnapshotStore
+} from "./StrategyControllerInterfaces.sol";
 import {DeltaNeutralKellyLib} from "./libraries/DeltaNeutralKellyLib.sol";
 import {L1Read} from "./venue_specific/hyperliquid/L1Read.sol";
 import {
@@ -16,6 +20,7 @@ import {
 } from "./venue_specific/hyperliquid/HyperliquidLib.sol";
 import {
     StrategyKind,
+    StrategySpec,
     SpotSideMode,
     DeltaNeutralKellyConfig,
     DeltaNeutralAutomationConfig,
@@ -26,19 +31,22 @@ import {
     VenueConfig
 } from "../strategies/StrategyTypes.sol";
 
-contract DeltaNeutralController is
-    BaseStrategyController,
-    IAutomatedWithdrawalController,
-    IAsyncWithdrawalController,
-    IOnchainStrategyValuer
-{
+contract DeltaNeutralController is ReentrancyGuard, IAutomatedWithdrawalController, IAsyncWithdrawalController, IOnchainStrategyValuer {
     bytes32 public constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
+    uint256 internal constant BPS = 10_000;
 
+    error NotOwner();
+    error NotVaultManager();
+    error InvalidAddress();
+    error InvalidReserveConfig();
+    error InvalidChainManifest();
     error InvalidVenue();
     error InvalidDeltaConfig();
     error InvalidKellyConfig();
     error InvalidAutomationConfig();
     error AutomaticSyncUnavailable();
+
+    event LiquidityPrepared(uint256 minBalanceIncrease, uint256 deallocatedAssets, bool usedProtocolWithdraw);
 
     struct HyperliquidLiveState {
         uint64 oraclePx;
@@ -51,6 +59,32 @@ contract DeltaNeutralController is
         uint256 spotBaseUnits;
         uint256 perpBaseUnits;
         L1Read.AccountMarginSummary marginSummary;
+    }
+
+    address public immutable owner;
+    address public immutable vaultManager;
+    IVaultV2 public immutable vault;
+    IUniversalAdapterEscrow public immutable sleeve;
+    address public immutable remotePpsSnapshotStore;
+    address public immutable asset;
+    bytes32 public immutable strategyId;
+    uint256 public immutable targetReserveBps;
+    uint256 public immutable minReserveBps;
+    bytes32 public immutable venueId;
+    address public immutable venue;
+    address public immutable helper;
+    bool public immutable venueUsesLayerZero;
+
+    ChainManifest[] internal _chainManifests;
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier onlyVaultManager() {
+        if (msg.sender != vaultManager) revert NotVaultManager();
+        _;
     }
 
     SpotSideMode public immutable spotSideMode;
@@ -111,20 +145,12 @@ contract DeltaNeutralController is
         DeltaNeutralKellyConfig memory kellyConfig_,
         DeltaNeutralAutomationConfig memory automationConfig_
     )
-        BaseStrategyController(
-            StrategyKind.DeltaNeutral,
-            owner_,
-            vaultManager_,
-            vault_,
-            sleeve_,
-            remotePpsSnapshotStore_,
-            strategyId_,
-            targetReserveBps_,
-            minReserveBps_,
-            venueConfig_,
-            chainManifests_
-        )
     {
+        if (
+            owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
+                || strategyId_ == bytes32(0)
+        ) revert InvalidAddress();
+        if (targetReserveBps_ > BPS || minReserveBps_ > targetReserveBps_) revert InvalidReserveConfig();
         if (
             venueConfig_.venueId != HYPERLIQUID_VENUE_ID || venueConfig_.venue == address(0)
                 || venueConfig_.helper == address(0)
@@ -138,6 +164,21 @@ contract DeltaNeutralController is
         ) revert InvalidAutomationConfig();
 
         KellyLinearState memory derivedKellyState = DeltaNeutralKellyLib.deriveState(kellyConfig_);
+
+        owner = owner_;
+        vaultManager = vaultManager_;
+        vault = IVaultV2(vault_);
+        sleeve = IUniversalAdapterEscrow(sleeve_);
+        remotePpsSnapshotStore = remotePpsSnapshotStore_;
+        asset = IVaultV2(vault_).asset();
+        strategyId = strategyId_;
+        targetReserveBps = targetReserveBps_;
+        minReserveBps = minReserveBps_;
+        venueId = venueConfig_.venueId;
+        venue = venueConfig_.venue;
+        helper = venueConfig_.helper;
+        venueUsesLayerZero = venueConfig_.usesLayerZero;
+        _storeChainManifests(chainManifests_, sleeve_);
 
         spotSideMode = spotSideMode_;
         maxDeltaBps = maxDeltaBps_;
@@ -180,6 +221,97 @@ contract DeltaNeutralController is
         maxOrderSlippageBps = automationConfig_.maxOrderSlippageBps;
         maxOracleDivergenceBps = automationConfig_.maxOracleDivergenceBps;
         maxMarginUsageBps = automationConfig_.maxMarginUsageBps;
+    }
+
+    function getStrategySpec() external view returns (StrategySpec memory) {
+        return StrategySpec({
+            kind: StrategyKind.DeltaNeutral,
+            asset: asset,
+            strategyId: strategyId,
+            targetReserveBps: targetReserveBps,
+            minReserveBps: minReserveBps
+        });
+    }
+
+    function getVenueConfig() external view returns (VenueConfig memory) {
+        return VenueConfig({venueId: venueId, venue: venue, helper: helper, usesLayerZero: venueUsesLayerZero});
+    }
+
+    function chainManifestCount() external view returns (uint256) {
+        return _chainManifests.length;
+    }
+
+    function getChainManifest(uint256 index) external view returns (ChainManifest memory) {
+        return _chainManifests[index];
+    }
+
+    function remoteChainCount() external view returns (uint256 count) {
+        for (uint256 i; i < _chainManifests.length; i++) {
+            if (!_chainManifests[i].isHomeChain) count++;
+        }
+    }
+
+    function reserveTarget(uint256 totalAssets) public view returns (uint256) {
+        return totalAssets * targetReserveBps / BPS;
+    }
+
+    function reserveFloor(uint256 totalAssets) public view returns (uint256) {
+        return totalAssets * minReserveBps / BPS;
+    }
+
+    function availableToAllocate(uint256 idleAssets, uint256 totalAssets) public view returns (uint256) {
+        uint256 targetReserve = reserveTarget(totalAssets);
+        if (idleAssets <= targetReserve) return 0;
+        return idleAssets - targetReserve;
+    }
+
+    function liquidityData() public view returns (bytes memory) {
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](0);
+        return abi.encode(strategyId, _automationFlags(), _autoUnwindEnabled(), calls);
+    }
+
+    function allocateIdle(uint256 assets) external onlyOwner nonReentrant {
+        vault.allocate(address(sleeve), liquidityData(), assets);
+    }
+
+    function deallocateToVault(uint256 assets) external onlyOwner nonReentrant {
+        vault.deallocate(address(sleeve), liquidityData(), assets);
+    }
+
+    function executeStrategy(IUniversalAdapterEscrow.Call[] calldata calls) external onlyOwner nonReentrant {
+        sleeve.executeStrategy(strategyId, calls);
+    }
+
+    function executeStrategyBypassCircuitBreaker(IUniversalAdapterEscrow.Call[] calldata calls)
+        external
+        onlyOwner
+        nonReentrant
+    {
+        sleeve.executeStrategyBypassCircuitBreaker(strategyId, calls);
+    }
+
+    function prepareWithdrawal(
+        IUniversalAdapterEscrow.Call[] calldata withdrawCalls,
+        uint256 minBalanceIncrease,
+        uint256 deallocatedAssets
+    ) external onlyOwner nonReentrant {
+        bool usedProtocolWithdraw = withdrawCalls.length > 0;
+        if (usedProtocolWithdraw) {
+            sleeve.withdrawFromStrategy(strategyId, withdrawCalls, minBalanceIncrease);
+        }
+        if (deallocatedAssets > 0) {
+            vault.deallocate(address(sleeve), liquidityData(), deallocatedAssets);
+        }
+
+        emit LiquidityPrepared(minBalanceIncrease, deallocatedAssets, usedProtocolWithdraw);
+    }
+
+    function configureLiquidityAdapter() external onlyOwner nonReentrant {
+        vault.setLiquidityAdapterAndData(address(sleeve), liquidityData());
+    }
+
+    function clearLiquidityAdapter() external onlyOwner nonReentrant {
+        vault.setLiquidityAdapterAndData(address(0), "");
     }
 
     function sync() external onlyVaultManager nonReentrant returns (bool executed) {
@@ -588,16 +720,60 @@ contract DeltaNeutralController is
         }
     }
 
+    function _quoteRemoteAssets() internal view returns (uint256 assets, bool healthy) {
+        if (remotePpsSnapshotStore == address(0)) return (0, true);
+        return IRemotePpsSnapshotStore(remotePpsSnapshotStore).quoteRemoteAssets();
+    }
+
     function _orderCloid(uint128 salt) internal view returns (uint128) {
         return uint128(uint256(keccak256(abi.encodePacked(strategyId, salt))));
     }
 
-    function _autoAllocationEnabled() internal pure override returns (bool) {
+    function _autoAllocationEnabled() internal pure returns (bool) {
         return true;
     }
 
-    function _autoUnwindEnabled() internal pure override returns (bool) {
+    function _autoUnwindEnabled() internal pure returns (bool) {
         return false;
+    }
+
+    function _automationFlags() internal pure returns (uint256 flags) {
+        if (_autoAllocationEnabled()) flags |= 1;
+        if (_autoUnwindEnabled()) flags |= 2;
+    }
+
+    function _storeChainManifests(ChainManifest[] memory manifests, address homeSleeve) internal {
+        if (manifests.length == 0) {
+            if (venueUsesLayerZero) revert InvalidChainManifest();
+            _chainManifests.push(
+                ChainManifest({
+                    chainId: block.chainid,
+                    lzEid: 0,
+                    sleeve: homeSleeve,
+                    assetOFT: address(0),
+                    shareOFT: address(0),
+                    isHomeChain: true
+                })
+            );
+            return;
+        }
+
+        bool seenHomeChain;
+        bool seenRemoteChain;
+        for (uint256 i; i < manifests.length; i++) {
+            if (manifests[i].isHomeChain) {
+                if (seenHomeChain) revert InvalidChainManifest();
+                seenHomeChain = true;
+                manifests[i].sleeve = homeSleeve;
+            } else {
+                if (manifests[i].sleeve == address(0) || manifests[i].lzEid == 0) revert InvalidChainManifest();
+                seenRemoteChain = true;
+            }
+            _chainManifests.push(manifests[i]);
+        }
+
+        if (!seenHomeChain) revert InvalidChainManifest();
+        if (venueUsesLayerZero && !seenRemoteChain) revert InvalidChainManifest();
     }
 
     function _mulDivUp(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256) {

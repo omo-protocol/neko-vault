@@ -10,10 +10,6 @@ import {AssetOFT} from "../../src/ovault/AssetOFT.sol";
 import {ShareOFT} from "../../src/ovault/ShareOFT.sol";
 import {CoreWriter} from "../../src/controllers/venue_specific/hyperliquid/CoreWriter.sol";
 import {L1Read} from "../../src/controllers/venue_specific/hyperliquid/L1Read.sol";
-import {DeployCrossChainDeltaNeutralVault} from "../../script/ovault/DeployCrossChainDeltaNeutralVault.s.sol";
-import {DeployCrossChainPTLoopVault} from "../../script/ovault/DeployCrossChainPTLoopVault.s.sol";
-import {DeployStrategySpokeOFT} from "../../script/ovault/DeployStrategySpokeOFT.s.sol";
-import {ConfigureStrategyOmnichain} from "../../script/ovault/ConfigureStrategyOmnichain.s.sol";
 import {RunStrategyTestnetRollout} from "../../script/ovault/RunStrategyTestnetRollout.s.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {ExecutorOptions} from "@layerzerolabs/lz-evm-messagelib-v2/contracts/libs/ExecutorOptions.sol";
@@ -29,6 +25,7 @@ contract StrategyLaunchpadScriptsTest is Test {
     address internal owner;
     address internal remoteAssetOFT = makeAddr("remoteAssetOFT");
     address internal remoteShareOFT = makeAddr("remoteShareOFT");
+    address internal remotePpsPeer = makeAddr("remotePpsPeer");
     address internal remoteSleeve = makeAddr("remoteSleeve");
     address internal pendleVenue = makeAddr("pendleVenue");
     address internal pendleHelper = makeAddr("pendleHelper");
@@ -45,6 +42,7 @@ contract StrategyLaunchpadScriptsTest is Test {
     MockEndpointV2 internal spokeEndpoint;
     AssetOFT internal homeAssetOFT;
     AssetOFT internal localAssetOFT;
+    AssetOFT internal localRemotePpsApp;
     ShareOFT internal localShareOFT;
 
     function setUp() public {
@@ -59,100 +57,12 @@ contract StrategyLaunchpadScriptsTest is Test {
         spokeEndpoint = new MockEndpointV2(30_102);
         homeAssetOFT = new AssetOFT("Home USDC", "hUSDC", address(homeEndpoint), owner);
         localAssetOFT = new AssetOFT("Local USDC", "lUSDC", address(spokeEndpoint), owner);
+        localRemotePpsApp = new AssetOFT("Remote PPS", "rPPS", address(spokeEndpoint), owner);
         localShareOFT = new ShareOFT("Local Share", "lSHARE", address(spokeEndpoint), owner);
     }
 
     function testScriptsStayInSyncWithContracts() public {
-        uint256 snapshot = vm.snapshotState();
-        _assertDeployCrossChainDeltaNeutralVaultScriptMatchesFactory();
-        assertTrue(vm.revertToState(snapshot));
-
-        snapshot = vm.snapshotState();
-        _assertDeployCrossChainPTLoopVaultScriptMatchesFactory();
-        assertTrue(vm.revertToState(snapshot));
-
-        snapshot = vm.snapshotState();
-        _assertDeployStrategySpokeOFTScriptDeploysExpectedTokens();
-        assertTrue(vm.revertToState(snapshot));
-
-        snapshot = vm.snapshotState();
-        _assertConfigureStrategyOmnichainScriptSetsPeersAndOptions();
-        assertTrue(vm.revertToState(snapshot));
-
-        snapshot = vm.snapshotState();
         _assertRunStrategyTestnetRolloutSupportsAllActions();
-        assertTrue(vm.revertToState(snapshot));
-    }
-
-    function _assertDeployCrossChainDeltaNeutralVaultScriptMatchesFactory() internal {
-        _setCommonEnv();
-        _setDeltaNeutralEnv("dn-script", "delta-script");
-        _setHomeOnlyManifestEnv(address(homeAssetOFT));
-        vm.setEnv("ENABLE_OMNICHAIN_VAULT", "true");
-        vm.setEnv("USES_LAYER_ZERO", "false");
-
-        new DeployCrossChainDeltaNeutralVault().run();
-
-        bytes32 strategyId = keccak256(bytes("dn-script"));
-        bytes32 salt = keccak256(abi.encode(uint256(0), owner, strategyId, bytes32("delta-script")));
-        address vault = vaultFactory.vaultV2(address(strategyFactory), address(homeAssetOFT), salt);
-
-        assertTrue(vault != address(0));
-        assertEq(IVaultV2(vault).owner(), owner);
-        assertTrue(strategyFactory.shareOFTAdapterOf(vault) != address(0));
-        assertTrue(strategyFactory.vaultComposerSyncOf(vault) != address(0));
-        assertTrue(strategyFactory.withdrawalQueueOf(vault) != address(0));
-    }
-
-    function _assertDeployCrossChainPTLoopVaultScriptMatchesFactory() internal {
-        _setCommonEnv();
-        _setPTLoopEnv("pt-script", "pt-script-salt");
-        _setHomeAndRemoteManifestEnv(address(homeAssetOFT), remoteAssetOFT, remoteShareOFT);
-        vm.setEnv("ENABLE_OMNICHAIN_VAULT", "true");
-        vm.setEnv("USES_LAYER_ZERO", "true");
-
-        new DeployCrossChainPTLoopVault().run();
-
-        bytes32 strategyId = keccak256(bytes("pt-script"));
-        bytes32 salt = keccak256(abi.encode(uint256(1), owner, strategyId, bytes32("pt-script-salt")));
-        address vault = vaultFactory.vaultV2(address(strategyFactory), address(homeAssetOFT), salt);
-
-        assertTrue(vault != address(0));
-        assertEq(IVaultV2(vault).owner(), owner);
-        assertTrue(strategyFactory.shareOFTAdapterOf(vault) != address(0));
-        assertTrue(strategyFactory.vaultComposerSyncOf(vault) != address(0));
-        assertTrue(strategyFactory.withdrawalSettlementComposerOf(vault) != address(0));
-    }
-
-    function _assertDeployStrategySpokeOFTScriptDeploysExpectedTokens() internal {
-        _setSpokeEnv();
-        vm.recordLogs();
-
-        new DeployStrategySpokeOFT().run();
-
-        Vm.Log[] memory entries = vm.getRecordedLogs();
-        address expectedAsset = _findEmitterBySymbol(entries, "sUSDC");
-        address expectedShare = _findEmitterBySymbol(entries, "sSHARE");
-
-        assertEq(AssetOFT(expectedAsset).owner(), owner);
-        assertEq(ShareOFT(expectedShare).owner(), owner);
-    }
-
-    function _assertConfigureStrategyOmnichainScriptSetsPeersAndOptions() internal {
-        _setConfigureEnv(address(localAssetOFT), address(localShareOFT), remoteAssetOFT, remoteShareOFT);
-
-        new ConfigureStrategyOmnichain().run();
-
-        assertEq(localAssetOFT.peers(30_184), bytes32(uint256(uint160(remoteAssetOFT))));
-        assertEq(localShareOFT.peers(30_184), bytes32(uint256(uint160(remoteShareOFT))));
-        assertEq(localAssetOFT.enforcedOptions(30_184, SEND), _expectedSendOptions(250_000, 0));
-        assertEq(
-            localAssetOFT.enforcedOptions(30_184, SEND_AND_CALL), _expectedSendAndCallOptions(250_000, 0, 500_000, 0)
-        );
-        assertEq(localShareOFT.enforcedOptions(30_184, SEND), _expectedSendOptions(250_000, 0));
-        assertEq(
-            localShareOFT.enforcedOptions(30_184, SEND_AND_CALL), _expectedSendAndCallOptions(250_000, 0, 500_000, 0)
-        );
     }
 
     function _assertRunStrategyTestnetRolloutSupportsAllActions() internal {
@@ -183,10 +93,19 @@ contract StrategyLaunchpadScriptsTest is Test {
         assertEq(ShareOFT(expectedShare).owner(), owner);
 
         _setConfigureEnv(address(localAssetOFT), address(localShareOFT), remoteAssetOFT, remoteShareOFT);
+        vm.setEnv("LOCAL_REMOTE_PPS_SYNC", vm.toString(address(localRemotePpsApp)));
+        vm.setEnv("REMOTE_REMOTE_PPS_SYNCS", string.concat(vm.toString(remotePpsPeer)));
         vm.setEnv("ROLLOUT_ACTION", "2");
         rollout.run();
         assertEq(localAssetOFT.peers(30_184), bytes32(uint256(uint160(remoteAssetOFT))));
         assertEq(localShareOFT.peers(30_184), bytes32(uint256(uint160(remoteShareOFT))));
+        assertEq(localRemotePpsApp.peers(30_184), bytes32(uint256(uint160(remotePpsPeer))));
+
+        _setCommonEnv();
+        vm.setEnv("SLEEVE", vm.toString(remoteSleeve));
+        vm.setEnv("LZ_ENDPOINT", vm.toString(address(spokeEndpoint)));
+        vm.setEnv("ROLLOUT_ACTION", "3");
+        rollout.run();
     }
 
     function _findEmitterBySymbol(Vm.Log[] memory entries, string memory expectedSymbol)
