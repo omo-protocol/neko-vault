@@ -54,12 +54,14 @@ contract UniversalAdapterEscrowTest is Test {
         // Deploy adapter via factory (must be called by vault owner)
         vm.startPrank(owner);
         adapter = UniversalAdapterEscrow(
-            payable(factory.deployAdapter(
-                address(vault),
-                address(valuer),
-                false, // use onchain valuer
-                keccak256("test-salt")
-            ))
+            payable(
+                factory.deployAdapter(
+                    address(vault),
+                    address(valuer),
+                    false, // use onchain valuer
+                    keccak256("test-salt")
+                )
+            )
         );
 
         // Setup initial state
@@ -309,11 +311,7 @@ contract UniversalAdapterEscrowTest is Test {
         feeToken.setTransferFeePercent(100); // 1% fee
 
         MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
-        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(
-            address(feeVault),
-            address(valuer),
-            false
-        );
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault), address(valuer), false);
 
         vm.prank(owner);
         feeVault.addAdapter(address(feeAdapter));
@@ -358,11 +356,7 @@ contract UniversalAdapterEscrowTest is Test {
         feeToken.setTransferFeePercent(200); // 2% fee
 
         MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
-        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(
-            address(feeVault),
-            address(valuer),
-            false
-        );
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault), address(valuer), false);
 
         vm.prank(owner);
         feeVault.addAdapter(address(feeAdapter));
@@ -381,7 +375,9 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(feeVault));
         feeAdapter.allocate(
             abi.encode(STRATEGY_1, firstIntended, false, new IUniversalAdapterEscrow.Call[](0)),
-            firstIntended, bytes4(0), address(0)
+            firstIntended,
+            bytes4(0),
+            address(0)
         );
 
         // Second allocation: 50 intended, 49 received
@@ -393,7 +389,9 @@ contract UniversalAdapterEscrowTest is Test {
         vm.prank(address(feeVault));
         feeAdapter.allocate(
             abi.encode(STRATEGY_2, secondIntended, false, new IUniversalAdapterEscrow.Call[](0)),
-            secondIntended, bytes4(0), address(0)
+            secondIntended,
+            bytes4(0),
+            address(0)
         );
 
         // Show the mismatch problem
@@ -501,7 +499,8 @@ contract UniversalAdapterEscrowTest is Test {
         // NOTE: Circuit breaker prevents >10% balance loss per operation
         vm.startPrank(owner);
         adapter.setStrategy(STRATEGY_1, agent, "", 1000e6); // Daily limit value is ignored
-        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 5e6); // Per-call limit value is ignored
+        adapter.updateWhitelist(address(asset), bytes4(keccak256("transfer(address,uint256)")), true, 5e6); // Per-call
+            // limit value is ignored
         vm.stopPrank();
 
         asset.mint(address(adapter), 100e6);
@@ -957,7 +956,8 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Allocate 600e6 to strategy
         uint256 allocatedAmount = 600e6;
-        bytes memory allocateData = abi.encode(STRATEGY_1, allocatedAmount, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData =
+            abi.encode(STRATEGY_1, allocatedAmount, false, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocatedAmount, bytes4(0), address(0));
 
@@ -1313,7 +1313,8 @@ contract UniversalAdapterEscrowTest is Test {
         // State: adapter has 920e6, protocol has 80e6, externalDeposits[STRATEGY_1] = 80e6
 
         // Deallocate 400e6 - has enough in adapter balance (no protocol withdrawal needed)
-        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](0); // Empty - use adapter balance
+        IUniversalAdapterEscrow.Call[] memory withdrawCalls = new IUniversalAdapterEscrow.Call[](0); // Empty - use
+            // adapter balance
         bytes memory deallocData = abi.encode(STRATEGY_1, 400e6, false, withdrawCalls);
 
         vm.prank(address(vault));
@@ -1399,8 +1400,7 @@ contract UniversalAdapterEscrowTest is Test {
         asset.mint(address(adapter), 800e6);
         vm.prank(address(vault));
         adapter.allocate(
-            abi.encode(STRATEGY_1, 800e6, false, new IUniversalAdapterEscrow.Call[](0)),
-            800e6, bytes4(0), address(0)
+            abi.encode(STRATEGY_1, 800e6, false, new IUniversalAdapterEscrow.Call[](0)), 800e6, bytes4(0), address(0)
         );
         assertEq(adapter.getIdleAssets(), 0, "Step 1: No idle after allocation");
 
@@ -1421,8 +1421,7 @@ contract UniversalAdapterEscrowTest is Test {
         asset.mint(address(adapter), 400e6);
         vm.prank(address(vault));
         adapter.allocate(
-            abi.encode(STRATEGY_1, 400e6, false, new IUniversalAdapterEscrow.Call[](0)),
-            400e6, bytes4(0), address(0)
+            abi.encode(STRATEGY_1, 400e6, false, new IUniversalAdapterEscrow.Call[](0)), 400e6, bytes4(0), address(0)
         );
         // Now: totalAllocations = 1200, externalDeposits = 70, balance = 1130
         assertEq(adapter.totalAllocations(), 1200e6, "Step 3: 1200e6 total allocated");
@@ -1498,12 +1497,8 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Should use adapter balance without external calls
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocateData,
-            deallocateAmount,
-            bytes4(0),
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, deallocateAmount, bytes4(0), address(0));
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
         assertEq(change, -int256(deallocateAmount), "Should report correct change");
@@ -1572,12 +1567,8 @@ contract UniversalAdapterEscrowTest is Test {
         bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocateData,
-            deallocateAmount,
-            bytes4(0),
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, deallocateAmount, bytes4(0), address(0));
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
         assertEq(change, -int256(deallocateAmount), "Should report correct change");
@@ -1615,12 +1606,8 @@ contract UniversalAdapterEscrowTest is Test {
         bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocateData,
-            deallocateWithProfits,
-            bytes4(0),
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, deallocateWithProfits, bytes4(0), address(0));
 
         assertEq(ids[0], strategyId, "Should return correct strategy ID");
         // SECURITY FIX: change capped at allocation (500e6), not requested (600e6)
@@ -1647,21 +1634,11 @@ contract UniversalAdapterEscrowTest is Test {
         // Attacker tries to deploy adapter for the vault
         vm.prank(attacker);
         vm.expectRevert(UniversalAdapterEscrowFactory.OnlyVaultOwnerCanDeploy.selector);
-        newFactory.deployAdapter(
-            address(vault),
-            address(valuer),
-            false,
-            keccak256("attacker-salt")
-        );
+        newFactory.deployAdapter(address(vault), address(valuer), false, keccak256("attacker-salt"));
 
         // Owner can successfully deploy
         vm.prank(owner);
-        address deployed = newFactory.deployAdapter(
-            address(vault),
-            address(valuer),
-            false,
-            keccak256("owner-salt")
-        );
+        address deployed = newFactory.deployAdapter(address(vault), address(valuer), false, keccak256("owner-salt"));
         assertTrue(deployed != address(0), "Owner should be able to deploy");
     }
 
@@ -1698,6 +1675,41 @@ contract UniversalAdapterEscrowTest is Test {
         assertTrue(config.active, "Strategy should be active");
         assertEq(config.agent, agent, "Agent should be set correctly");
     }
+
+    function testExecuteStrategyRejectsShortCalldata() public {
+        vm.startPrank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+        adapter.updateWhitelist(address(target), bytes4(0), true, type(uint256).max);
+        vm.stopPrank();
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({target: address(target), data: hex"01", value: 0});
+
+        vm.prank(agent);
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        adapter.executeStrategy(STRATEGY_1, calls);
+    }
+
+    function testAutoWithdrawRejectsOversizedQuotedCallArray() public {
+        MockAutomationController automationController = new MockAutomationController(address(target), 65);
+
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, address(automationController), "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, uint256(0), false, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(this), 100e6);
+        asset.transfer(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        vm.prank(address(adapter));
+        asset.transfer(attacker, 100e6);
+
+        bytes memory deallocData = abi.encode(STRATEGY_1, uint256(2), false, new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        adapter.deallocate(deallocData, 100e6, bytes4(0x4b219d16), address(0));
+    }
 }
 
 // Mock protocol for testing withdrawals and deposits
@@ -1716,5 +1728,26 @@ contract MockProtocol {
     function withdraw(uint256 amount) external {
         // Transfer tokens from protocol back to sender (adapter)
         IERC20(asset).transfer(msg.sender, amount);
+    }
+}
+
+contract MockAutomationController {
+    address public immutable target;
+    uint256 public immutable callCount;
+
+    constructor(address _target, uint256 _callCount) {
+        target = _target;
+        callCount = _callCount;
+    }
+
+    function quoteAutomaticWithdrawal(uint256) external view returns (IUniversalAdapterEscrow.Call[] memory calls) {
+        calls = new IUniversalAdapterEscrow.Call[](callCount);
+        for (uint256 i; i < callCount; i++) {
+            calls[i] = IUniversalAdapterEscrow.Call({
+                target: target,
+                data: abi.encodeWithSignature("withdraw(uint256)", 0),
+                value: 0
+            });
+        }
     }
 }

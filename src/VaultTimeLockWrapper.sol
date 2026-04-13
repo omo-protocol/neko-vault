@@ -309,6 +309,37 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     }
 
     /**
+     * @notice Burn unlocked vTokens and approve a spender to pull the underlying VaultV2 shares.
+     * @dev Supports pull-based integrations that cannot receive pushed shares directly during unwrap.
+     */
+    function unwrapToApproval(uint256 vTokens, address spender, address onBehalf)
+        external
+        nonReentrant
+        returns (uint256 sharesOut)
+    {
+        if (spender == address(0)) revert ZeroAddress();
+        if (vTokens == 0) revert ZeroAmount();
+
+        if (msg.sender != onBehalf) {
+            uint256 allowed = allowance[onBehalf][msg.sender];
+            if (allowed < vTokens) revert InsufficientAllowance();
+            if (allowed != type(uint256).max) {
+                allowance[onBehalf][msg.sender] = allowed - vTokens;
+            }
+        }
+
+        _burnWithLockupCheck(onBehalf, vTokens);
+
+        uint256 currentAllowance = IERC20(address(vault)).allowance(address(this), spender);
+        uint256 updatedAllowance = currentAllowance + vTokens;
+        if (currentAllowance != 0) {
+            SafeERC20Lib.safeApprove(address(vault), spender, 0);
+        }
+        SafeERC20Lib.safeApprove(address(vault), spender, updatedAllowance);
+        return vTokens;
+    }
+
+    /**
      * @dev SECURITY FIX: Per-batch lock enforcement with proper FIFO removal
      * Burns vTokens from oldest deposits first, checking EACH batch for lockup
      */

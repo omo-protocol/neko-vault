@@ -39,11 +39,13 @@ contract VaultTimeLockWrapperTest is Test {
 
         // Deploy vault via factory
         VaultV2Factory factory = new VaultV2Factory();
-        vault = IVaultV2(factory.createVaultV2(
-            owner,              // owner
-            address(asset),     // asset
-            bytes32(uint256(1)) // salt
-        ));
+        vault = IVaultV2(
+            factory.createVaultV2(
+                owner, // owner
+                address(asset), // asset
+                bytes32(uint256(1)) // salt
+            )
+        );
 
         // Deploy secure wrapper
         wrapper = new VaultTimeLockWrapper(address(vault));
@@ -692,6 +694,26 @@ contract VaultTimeLockWrapperTest is Test {
         vm.stopPrank();
     }
 
+    function test_unwrapToApproval_supportsPullBasedIntegrations() public {
+        vm.startPrank(alice);
+        asset.approve(address(wrapper), INITIAL_DEPOSIT);
+        uint256 vTokens = wrapper.deposit(INITIAL_DEPOSIT);
+
+        uint256 depositTime = block.timestamp;
+        vm.warp(depositTime + LOCK_PERIOD);
+
+        wrapper.unwrapToApproval(vTokens, bob, alice);
+        vm.stopPrank();
+
+        assertEq(wrapper.balanceOf(alice), 0, "vTokens burned");
+        assertEq(IERC20(address(vault)).allowance(address(wrapper), bob), vTokens, "shares approved for pull");
+
+        vm.prank(bob);
+        IERC20(address(vault)).transferFrom(address(wrapper), bob, vTokens);
+
+        assertEq(IERC20(address(vault)).balanceOf(bob), vTokens, "spender pulled wrapped shares");
+    }
+
     function test_transfer_preservesOriginalDepositTime() public {
         vm.startPrank(alice);
         asset.approve(address(wrapper), INITIAL_DEPOSIT);
@@ -882,11 +904,7 @@ contract VaultTimeLockWrapperTest is Test {
         MockERC20 usdcLike = new MockERC20("Mock USDC", "USDC", 6);
 
         VaultV2Factory factory = new VaultV2Factory();
-        IVaultV2 usdcVault = IVaultV2(factory.createVaultV2(
-            owner,
-            address(usdcLike),
-            bytes32(uint256(2))
-        ));
+        IVaultV2 usdcVault = IVaultV2(factory.createVaultV2(owner, address(usdcLike), bytes32(uint256(2))));
 
         VaultTimeLockWrapper usdcWrapper = new VaultTimeLockWrapper(address(usdcVault));
 

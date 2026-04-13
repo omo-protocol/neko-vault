@@ -3,7 +3,10 @@ pragma solidity 0.8.28;
 
 import {IRemotePpsSnapshotStore} from "../controllers/StrategyControllerInterfaces.sol";
 import {ILayerZeroReceiver} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroReceiver.sol";
-import {ILayerZeroEndpointV2, Origin} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+import {
+    ILayerZeroEndpointV2,
+    Origin
+} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 
 contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
     error NotOwner();
@@ -68,15 +71,16 @@ contract RemotePpsSnapshotStore is ILayerZeroReceiver, IRemotePpsSnapshotStore {
 
         for (uint256 i; i < _remoteEids.length; i++) {
             Snapshot memory snapshot = snapshots[_remoteEids[i]];
-            assets += snapshot.assets;
-
             if (
                 snapshot.receivedAt == 0 || snapshot.snapshotTimestamp == 0
                     || block.timestamp > uint256(snapshot.receivedAt) + MAX_SNAPSHOT_AGE
                     || block.timestamp > uint256(snapshot.snapshotTimestamp) + MAX_SNAPSHOT_AGE
             ) {
                 healthy = false;
+                continue;
             }
+
+            assets += snapshot.assets;
         }
     }
 

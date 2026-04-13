@@ -26,6 +26,7 @@ library ErrorsLib {
     error NotInAdapterRegistry();
     error PenaltyTooHigh();
     error PermitDeadlineExpired();
+    error Reentrancy();
     error RelativeCapAboveOne();
     error RelativeCapExceeded();
     error RelativeCapNotDecreasing();

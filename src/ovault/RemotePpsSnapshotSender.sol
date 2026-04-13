@@ -2,7 +2,12 @@
 pragma solidity 0.8.28;
 
 import {IAdapter} from "../interfaces/IAdapter.sol";
-import {ILayerZeroEndpointV2, MessagingParams, MessagingFee, MessagingReceipt} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+import {
+    ILayerZeroEndpointV2,
+    MessagingParams,
+    MessagingFee,
+    MessagingReceipt
+} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 
 contract RemotePpsSnapshotSender {
     error NotOwner();
@@ -106,9 +111,6 @@ contract RemotePpsSnapshotSender {
         if (cachedSnapshotTimestamp != 0) {
             return (cachedSnapshotAssets, cachedSnapshotTimestamp);
         }
-        if (success) {
-            return (liveAssets, liveTimestamp);
-        }
         return (0, 0);
     }
 
@@ -122,13 +124,14 @@ contract RemotePpsSnapshotSender {
         if (cachedSnapshotTimestamp != 0) {
             return (cachedSnapshotAssets, cachedSnapshotTimestamp);
         }
-        if (success) {
-            return (liveAssets, liveTimestamp);
-        }
         return (0, 0);
     }
 
-    function _readSnapshot() internal view returns (bool success, uint256 assets, uint64 snapshotTimestamp, bool healthy) {
+    function _readSnapshot()
+        internal
+        view
+        returns (bool success, uint256 assets, uint64 snapshotTimestamp, bool healthy)
+    {
         bytes memory data;
         (success, data) = sleeve.staticcall(abi.encodeWithSignature("quoteSnapshotState()"));
         if (success && data.length >= 96) {

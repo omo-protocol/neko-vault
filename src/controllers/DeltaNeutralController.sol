@@ -32,7 +32,12 @@ import {
     VenueConfig
 } from "../strategies/StrategyTypes.sol";
 
-contract DeltaNeutralController is ReentrancyGuard, IAutomatedWithdrawalController, IAsyncWithdrawalController, IOnchainStrategyValuer {
+contract DeltaNeutralController is
+    ReentrancyGuard,
+    IAutomatedWithdrawalController,
+    IAsyncWithdrawalController,
+    IOnchainStrategyValuer
+{
     bytes32 public constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
     uint256 internal constant BPS = 10_000;
 
@@ -141,8 +146,7 @@ contract DeltaNeutralController is ReentrancyGuard, IAutomatedWithdrawalControll
         uint256 maxDeltaBps_,
         DeltaNeutralKellyConfig memory kellyConfig_,
         DeltaNeutralAutomationConfig memory automationConfig_
-    )
-    {
+    ) {
         if (
             owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
@@ -357,6 +361,9 @@ contract DeltaNeutralController is ReentrancyGuard, IAutomatedWithdrawalControll
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         HyperliquidLiveState memory live = _liveState();
         (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
+        if (!remoteHealthy) {
+            return (0, false);
+        }
         uint256 hedgeEquityAssets =
             live.marginSummary.accountValue > 0 ? uint256(uint64(live.marginSummary.accountValue)) : 0;
         return (

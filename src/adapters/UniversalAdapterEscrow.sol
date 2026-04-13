@@ -18,6 +18,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
     bytes4 private constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8; // forceDeallocate(address,bytes,uint256,address)
     uint256 private constant MAX_BALANCE_LOSS_BPS = 1000;
+    uint256 private constant MAX_AUTOMATION_CALLS = 64;
     uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
     /* IMMUTABLES */
@@ -117,7 +118,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                 if (allocationCalls.length > 0) {
                     _executeMulticall(strategyId, allocationCalls, true);
                     uint256 externalAfter = externalDeposits[strategyId];
-                    if (externalAfter < externalBefore || externalAfter - externalBefore > assets) revert InvalidAmount();
+                    if (externalAfter < externalBefore || externalAfter - externalBefore > assets) {
+                        revert InvalidAmount();
+                    }
                 }
             } catch {}
         }
@@ -191,7 +194,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         (bool hasValue, bool hasStaleData, uint256 totalValue) = _resolveCurrentValuation();
 
-        if (hasValue && totalValue > 0) {
+        if (hasValue) {
             if (hasStaleData || emergencyMode) {
                 return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
             }
@@ -407,8 +410,16 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     function setSettlementQueue(address settlementQueue_) external onlyOwner {
-        if (settlementQueue_ == address(0)) revert InvalidAmount();
-        if (settlementQueue != address(0) && settlementQueue != settlementQueue_) revert InvalidData();
+        if (settlementQueue_ == address(0)) {
+            if (settlementQueue == address(0)) revert InvalidAmount();
+            if (_queueProtectedAssets(settlementQueue) != 0) revert InvalidData();
+            settlementQueue = address(0);
+            emit SettlementQueueSet(address(0));
+            return;
+        }
+        if (settlementQueue != address(0) && settlementQueue != settlementQueue_) {
+            if (_queueProtectedAssets(settlementQueue) != 0) revert InvalidData();
+        }
         if (
             ISettlementQueueValidation(settlementQueue_).vault() != parentVault
                 || ISettlementQueueValidation(settlementQueue_).sleeve() != address(this)
@@ -419,7 +430,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         emit SettlementQueueSet(settlementQueue_);
     }
 
-    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue {
+    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue notPaused {
         if (!strategies[strategyId].active) revert StrategyNotActive();
         if (assetsReceived == 0) revert InvalidAmount();
 
@@ -624,8 +635,14 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     function _quoteSnapshotState() internal view returns (uint256 assets, uint64 snapshotTimestamp, bool healthy) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
-        (, , uint256 trackedAssets) = _trackedAssets(balance);
-        (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 valuationTimestamp) = _resolveSnapshotValuation();
+        (,, uint256 trackedAssets) = _trackedAssets(balance);
+        (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 valuationTimestamp, bool fromOnchain) =
+            _resolveSnapshotValuation();
+        uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
+
+        if (fromOnchain && !_withinLiveValuationBounds(totalValue, valuationBase)) {
+            return (trackedAssets, 0, false);
+        }
 
         if (!hasValue) {
             return (trackedAssets, 0, false);
@@ -674,6 +691,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         for (uint256 i = 0; i < calls.length; i++) {
             Call memory call = calls[i];
+            if (call.data.length < 4) revert InvalidData();
 
             bytes4 selector = bytes4(call.data);
 
@@ -726,6 +744,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             revert InvalidData();
         }
         if (withdrawCalls.length == 0) revert InvalidData();
+        if (withdrawCalls.length > MAX_AUTOMATION_CALLS) revert InvalidData();
 
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
         _executeMulticall(strategyId, withdrawCalls, false);
@@ -767,50 +786,51 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         trackedAssets = allocatedInAdapterBounded + totalExternalDeposits + trackedSurplus;
     }
 
-    function _resolveCurrentValuation()
-        internal
-        view
-        returns (bool hasValue, bool hasStaleData, uint256 totalValue)
-    {
-        (hasValue, hasStaleData, totalValue,) = _resolveSnapshotValuation();
+    function _resolveCurrentValuation() internal view returns (bool hasValue, bool hasStaleData, uint256 totalValue) {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        (,, uint256 trackedAssets) = _trackedAssets(balance);
+        bool fromOnchain;
+        (hasValue, hasStaleData, totalValue,, fromOnchain) = _resolveSnapshotValuation();
+        uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
+        if (fromOnchain && !_withinLiveValuationBounds(totalValue, valuationBase)) {
+            return (false, false, 0);
+        }
     }
 
     function _resolveSnapshotValuation()
         internal
         view
-        returns (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 snapshotTimestamp)
+        returns (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 snapshotTimestamp, bool fromOnchain)
     {
+        if (_hasExternalValuer()) {
+            (bool healthSuccess, bytes memory healthData) =
+                valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
+
+            bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
+            (bool totalSuccess, uint256 totalAssets, uint64 totalTimestamp) = _readValuerTotalValue(totalId);
+
+            if (totalSuccess) {
+                bool totalHealthy = true;
+                if (healthSuccess && healthData.length >= 32) {
+                    totalHealthy = abi.decode(healthData, (bool));
+                }
+                return (true, !totalHealthy, totalAssets, totalTimestamp, false);
+            }
+
+            if (healthSuccess && healthData.length >= 32) {
+                hasStaleData = !abi.decode(healthData, (bool));
+                (hasValue, totalValue, snapshotTimestamp) = _aggregateActiveStrategyValuesWithTimestamp();
+                return (hasValue, hasStaleData, totalValue, snapshotTimestamp, false);
+            }
+        }
+
         (bool onchainSuccess, bool onchainHealthy, uint256 onchainValue, uint64 onchainTimestamp) =
             _aggregateOnchainStrategySnapshot();
         if (onchainSuccess) {
-            return (true, !onchainHealthy, onchainValue, onchainTimestamp);
+            return (true, !onchainHealthy, onchainValue, onchainTimestamp, true);
         }
 
-        if (!_hasExternalValuer()) {
-            return (false, false, 0, 0);
-        }
-
-        (bool healthSuccess, bytes memory healthData) =
-            valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
-
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-        (bool totalSuccess, uint256 totalAssets, uint64 totalTimestamp) = _readValuerTotalValue(totalId);
-
-        if (totalSuccess) {
-            bool totalHealthy = true;
-            if (healthSuccess && healthData.length >= 32) {
-                totalHealthy = abi.decode(healthData, (bool));
-            }
-            return (true, !totalHealthy, totalAssets, totalTimestamp);
-        }
-
-        if (healthSuccess && healthData.length >= 32) {
-            hasStaleData = !abi.decode(healthData, (bool));
-            (hasValue, totalValue, snapshotTimestamp) = _aggregateActiveStrategyValuesWithTimestamp();
-            return (hasValue, hasStaleData, totalValue, snapshotTimestamp);
-        }
-
-        return (false, false, 0, 0);
+        return (false, false, 0, 0, false);
     }
 
     function _aggregateOnchainStrategyValue() internal view returns (bool success, bool healthy, uint256 totalValue) {
@@ -835,7 +855,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         (totalValue, healthy) = abi.decode(data, (uint256, bool));
-        return (true, healthy, totalValue, uint64(block.timestamp));
+        if (!healthy) {
+            return (false, false, 0, 0);
+        }
+        return (true, true, totalValue, uint64(block.timestamp));
     }
 
     function _hasExternalValuer() internal view returns (bool) {
@@ -879,7 +902,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         return (true, totalValue, snapshotTimestamp);
     }
 
-    function _readValuerTotalValue(bytes32 totalId) internal view returns (bool success, uint256 totalValue, uint64 timestamp) {
+    function _readValuerTotalValue(bytes32 totalId)
+        internal
+        view
+        returns (bool success, uint256 totalValue, uint64 timestamp)
+    {
         bytes memory data;
         (success, data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
         if (!success || data.length < 32) {
@@ -889,10 +916,30 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         totalValue = abi.decode(data, (uint256));
         (bool timestampSuccess, uint64 reportTimestamp) = _getValuerReportTimestamp(totalId);
         if (!timestampSuccess) {
+            if (totalValue == 0) {
+                return (false, 0, 0);
+            }
             return (true, totalValue, 0);
         }
 
         return (true, totalValue, reportTimestamp);
+    }
+
+    function _withinLiveValuationBounds(uint256 totalValue, uint256 trackedAssets) internal pure returns (bool) {
+        if (trackedAssets == 0) return totalValue == 0;
+
+        uint256 minExpected = (trackedAssets * 75) / 100;
+        uint256 maxExpected = (trackedAssets * 150) / 100;
+        return totalValue >= minExpected && totalValue <= maxExpected;
+    }
+
+    function _queueProtectedAssets(address queue) internal view returns (uint256 protectedAssets) {
+        (bool success, bytes memory result) = queue.staticcall(abi.encodeWithSignature("totalProtectedAssets()"));
+        if (!success || result.length < 32) {
+            return type(uint256).max;
+        }
+
+        protectedAssets = abi.decode(result, (uint256));
     }
 
     function _getValuerReportTimestamp(bytes32 strategyId) internal view returns (bool success, uint64 timestamp) {

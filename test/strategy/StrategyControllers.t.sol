@@ -443,7 +443,7 @@ contract StrategyControllersTest is Test {
         assertEq(sleeve.realAssets(), 957_500_000);
     }
 
-    function testPTLoopValuationUsesStaticQuoterOutput() public {
+    function testPTLoopValuationIgnoresConservativeStaticRedeemQuote() public {
         Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
@@ -459,7 +459,30 @@ contract StrategyControllersTest is Test {
         assertTrue(controller.sync());
 
         pendleRouter.setStaticRedeemBps(9_000);
-        assertEq(sleeve.realAssets(), 876_750_000);
+        assertEq(sleeve.realAssets(), 957_500_000);
+    }
+
+    function testValuerSnapshotOverridesOnchainQuoteWhenConfigured() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(false, address(valuer));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        pendleRouter.setStaticRedeemBps(9_000);
+
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", deployment.sleeve));
+        valuer.setValue(totalId, 1_100e6);
+
+        assertEq(sleeve.realAssets(), 1_100e6);
     }
 
     function testSyncPPSRefreshesCachedValuationFromOnchainState() public {
@@ -645,8 +668,9 @@ contract StrategyControllersTest is Test {
 
         asset.mint(address(composer), 700e6);
         bytes32 guid = bytes32("decode-fail");
-        bytes memory message =
-            OFTComposeMsgCodec.encode(1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), hex"1234"));
+        bytes memory message = OFTComposeMsgCodec.encode(
+            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), hex"1234")
+        );
 
         composer.lzCompose(address(assetOFT), guid, message, address(0), "");
 
@@ -736,7 +760,9 @@ contract StrategyControllersTest is Test {
         );
 
         vm.expectRevert(
-            abi.encodeWithSelector(RemotePpsSnapshotStore.StaleSnapshotTimestamp.selector, 30_102, firstTimestamp - 1, firstTimestamp)
+            abi.encodeWithSelector(
+                RemotePpsSnapshotStore.StaleSnapshotTimestamp.selector, 30_102, firstTimestamp - 1, firstTimestamp
+            )
         );
         store.lzReceive(
             Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 3}),
@@ -754,6 +780,33 @@ contract StrategyControllersTest is Test {
         assertEq(snapshotTimestamp, 0);
         assertEq(receivedAt, 0);
         assertEq(nonce, 0);
+    }
+
+    function testRemotePpsSnapshotStoreExcludesStaleSnapshotsFromAssets() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
+        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
+        address remoteReporter = makeAddr("remoteReporter");
+
+        vm.prank(owner);
+        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
+
+        store.lzReceive(
+            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
+            bytes32("pps"),
+            abi.encode(uint256(300e6), uint64(block.timestamp)),
+            address(0),
+            ""
+        );
+
+        (uint256 freshAssets, bool freshHealthy) = store.quoteRemoteAssets();
+        assertEq(freshAssets, 300e6);
+        assertTrue(freshHealthy);
+
+        vm.warp(block.timestamp + store.MAX_SNAPSHOT_AGE() + 1);
+
+        (uint256 staleAssets, bool staleHealthy) = store.quoteRemoteAssets();
+        assertEq(staleAssets, 0);
+        assertFalse(staleHealthy);
     }
 
     function testPTLoopControllerSupportsCrossChainPlanning() public {

@@ -90,8 +90,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         ChainManifest[] memory chainManifests_,
         PTLoopAutomationConfig memory automationConfig_,
         uint256 maxUnwindSlippageBps_
-    )
-    {
+    ) {
         if (
             owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
@@ -256,20 +255,16 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         assets = IERC20(asset).balanceOf(address(sleeve));
         (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
+        if (!remoteHealthy) return (0, false);
+
         uint256 ptBalance = IERC20(ptToken).balanceOf(address(sleeve));
         if (ptBalance == 0) return (assets + remoteAssets, remoteHealthy);
 
-        try IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, ptBalance, asset) returns (
-            uint256 netTokenOut,
-            uint256,
-            uint256,
-            uint256,
-            uint256
-        ) {
-            return (assets + netTokenOut + remoteAssets, remoteHealthy);
-        } catch {
-            return (assets + remoteAssets, false);
-        }
+        uint256 rate = IPendleStaticQuoter(helper).getPtToAssetRate(market);
+        if (rate == 0) return (0, false);
+
+        uint256 ptAssets = ptBalance * rate / WAD;
+        return (assets + ptAssets + remoteAssets, true);
     }
 
     function quoteUnloopForAssets(uint256 requestedAssets) public view returns (PTLoopUnloopQuote memory quote) {
