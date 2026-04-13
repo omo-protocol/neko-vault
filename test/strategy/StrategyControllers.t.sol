@@ -394,7 +394,7 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
-    function testPTLoopDefersDepositLoopingUntilSyncAndRejectsDirectUserExitUnwinds() public {
+    function testPTLoopAutomatesLoopingAndRejectsDirectUserExitUnwinds() public {
         Deployment memory deployment = _deployPTLoop(false);
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);

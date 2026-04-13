@@ -354,32 +354,11 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         uint256 rate = IPendleStaticQuoter(helper).getPtToAssetRate(market);
         if (rate == 0) revert InsufficientLocalLiquidity();
 
-        uint256 high = _mulDivUp(grossAssetTarget, WAD, rate);
-        if (high == 0) high = 1;
-        if (high > ptBalance) high = ptBalance;
+        uint256 initialGuess = _mulDivUp(grossAssetTarget, WAD, rate);
+        if (initialGuess == 0) initialGuess = 1;
+        if (initialGuess > ptBalance) initialGuess = ptBalance;
 
-        while (high < ptBalance) {
-            (uint256 netTokenOut,,,,) = IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, high, asset);
-            if (netTokenOut >= grossAssetTarget) break;
-            uint256 nextHigh = high * 2;
-            high = nextHigh > ptBalance ? ptBalance : nextHigh;
-        }
-
-        (uint256 maxTokenOut,,,,) = IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, high, asset);
-        if (maxTokenOut < grossAssetTarget) revert InsufficientLocalLiquidity();
-
-        uint256 low;
-        while (low < high) {
-            uint256 mid = low + (high - low) / 2;
-            (uint256 netTokenOut,,,,) = IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, mid, asset);
-            if (netTokenOut >= grossAssetTarget) {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-
-        return low;
+        return _quotePtInForTargetAssetOut(grossAssetTarget, initialGuess, ptBalance);
     }
 
     function _quoteAutomaticAllocation() internal view returns (IUniversalAdapterEscrow.Call[] memory) {
@@ -394,8 +373,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         uint256 allocatableAssets = availableToAllocate(idleAssets, totalAssets);
         if (allocatableAssets == 0) return new IUniversalAdapterEscrow.Call[](0);
 
-        uint256 expectedPtOut = allocatableAssets * WAD / rate;
-        uint256 minPtOut = expectedPtOut * (BPS - maxEntrySlippageBps) / BPS;
+        uint256 minPtOut = _quoteConservativeMinPtOut(allocatableAssets, rate);
         if (minPtOut == 0) revert InsufficientLocalLiquidity();
 
         PTLoopOpenRequest memory request = PTLoopOpenRequest({
@@ -428,6 +406,49 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         returns (IUniversalAdapterEscrow.Call[] memory)
     {
         return PendleLib.buildCloseLoopCalls(venue, request);
+    }
+
+    function _quoteConservativeMinPtOut(uint256 assetIn, uint256 rate) internal view returns (uint256 minPtOut) {
+        uint256 targetAssetOut = assetIn * (BPS - maxEntrySlippageBps) / BPS;
+        if (targetAssetOut == 0) revert InsufficientLocalLiquidity();
+
+        uint256 initialGuess = _mulDivUp(targetAssetOut, WAD, rate);
+        if (initialGuess == 0) initialGuess = 1;
+
+        return _quotePtInForTargetAssetOut(targetAssetOut, initialGuess, type(uint256).max);
+    }
+
+    function _quotePtInForTargetAssetOut(uint256 targetAssetOut, uint256 initialGuess, uint256 maxPtIn)
+        internal
+        view
+        returns (uint256 ptIn)
+    {
+        uint256 low;
+        uint256 high = initialGuess;
+
+        while (true) {
+            (uint256 netTokenOut,,,,) = IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, high, asset);
+            if (netTokenOut >= targetAssetOut) break;
+
+            low = high;
+            if (high == maxPtIn) revert InsufficientLocalLiquidity();
+
+            uint256 nextHigh = high * 2;
+            if (nextHigh <= high) revert InsufficientLocalLiquidity();
+            high = nextHigh > maxPtIn ? maxPtIn : nextHigh;
+        }
+
+        while (low + 1 < high) {
+            uint256 mid = low + (high - low) / 2;
+            (uint256 netTokenOut,,,,) = IPendleStaticQuoter(helper).swapExactPtForTokenStatic(market, mid, asset);
+            if (netTokenOut >= targetAssetOut) {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+
+        return high;
     }
 
     function _autoUnwindEnabled() internal pure returns (bool) {

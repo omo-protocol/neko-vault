@@ -239,7 +239,7 @@ contract UniversalValuerOffchainStaleness is Test {
         assertEq(adapter.realAssets(), 100e18, "Should aggregate fresh strategy values directly");
     }
 
-    function testRealAssetsCapsStaleAggregatedValuationToTrackedAssets() public {
+    function testRealAssetsUsesHaircuttedStaleAggregatedValuation() public {
         _submitValue(STRATEGY_A, 100e18, 95, 1);
 
         vm.prank(owner);
@@ -248,7 +248,7 @@ contract UniversalValuerOffchainStaleness is Test {
         vm.warp(block.timestamp + MAX_STALENESS + 1);
 
         uint256 staleAssets = adapter.realAssets();
-        assertEq(staleAssets, 95e18, "Should haircut a tracked-assets-capped stale valuation");
+        assertEq(staleAssets, 190e18, "Should haircut the stale aggregated valuation without principal capping");
     }
 
     /// @notice Test realAssets applies haircut when valuation is unhealthy

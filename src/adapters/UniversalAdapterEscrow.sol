@@ -190,15 +190,9 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         uint256 balance = IERC20(asset).balanceOf(address(this));
         (uint256 allocatedInAdapterBounded,, uint256 trackedAssets) = _trackedAssets(balance);
 
-        (bool hasValue, bool hasStaleData, bool needsTrackedAssetCap, uint256 totalValue) = _resolveCurrentValuation();
+        (bool hasValue, bool hasStaleData, uint256 totalValue) = _resolveCurrentValuation();
 
         if (hasValue && totalValue > 0) {
-            if (needsTrackedAssetCap && (hasStaleData || emergencyMode)) {
-                if (totalValue > trackedAssets) {
-                    totalValue = trackedAssets;
-                }
-            }
-
             if (hasStaleData || emergencyMode) {
                 return totalValue * (10000 - EMERGENCY_HAIRCUT) / 10000;
             }
@@ -614,7 +608,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
     /// @notice Refresh cached valuation from the active valuation source
     function refreshCachedValuation() external {
-        (bool hasValue,,, uint256 totalValue) = _resolveCurrentValuation();
+        (bool hasValue,, uint256 totalValue) = _resolveCurrentValuation();
 
         if (!hasValue) {
             revert("Valuation unavailable");
@@ -633,7 +627,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function quoteSnapshotAssets() external view returns (uint256 assets, bool healthy) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
         (, , uint256 trackedAssets) = _trackedAssets(balance);
-        (bool hasValue, bool hasStaleData,, uint256 totalValue) = _resolveCurrentValuation();
+        (bool hasValue, bool hasStaleData, uint256 totalValue) = _resolveCurrentValuation();
 
         if (!hasValue) {
             return (trackedAssets, false);
@@ -778,15 +772,15 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function _resolveCurrentValuation()
         internal
         view
-        returns (bool hasValue, bool hasStaleData, bool needsTrackedAssetCap, uint256 totalValue)
+        returns (bool hasValue, bool hasStaleData, uint256 totalValue)
     {
         (bool onchainSuccess, bool onchainHealthy, uint256 onchainValue) = _aggregateOnchainStrategyValue();
         if (onchainSuccess) {
-            return (true, !onchainHealthy, false, onchainValue);
+            return (true, !onchainHealthy, onchainValue);
         }
 
         if (!_hasExternalValuer()) {
-            return (false, false, false, 0);
+            return (false, false, 0);
         }
 
         (bool healthSuccess, bytes memory healthData) =
@@ -794,19 +788,18 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         if (healthSuccess && healthData.length >= 32) {
             hasStaleData = !abi.decode(healthData, (bool));
-            needsTrackedAssetCap = true;
             (hasValue, totalValue) = _aggregateActiveStrategyValues();
-            return (hasValue, hasStaleData, needsTrackedAssetCap, totalValue);
+            return (hasValue, hasStaleData, totalValue);
         }
 
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
         (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
 
         if (success && data.length >= 32) {
-            return (true, false, false, abi.decode(data, (uint256)));
+            return (true, false, abi.decode(data, (uint256)));
         }
 
-        return (false, false, false, 0);
+        return (false, false, 0);
     }
 
     function _aggregateOnchainStrategyValue() internal view returns (bool success, bool healthy, uint256 totalValue) {
@@ -867,7 +860,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     function disableEmergencyMode() external onlyOwner {
         if (!emergencyMode) revert EmergencyModeNotEnabled();
 
-        (bool hasValue,,, uint256 totalValue) = _resolveCurrentValuation();
+        (bool hasValue,, uint256 totalValue) = _resolveCurrentValuation();
 
         if (!hasValue) revert ValuerStillUnavailable();
 
