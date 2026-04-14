@@ -29,10 +29,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     uint256 private constant MAX_AUTOMATION_FLAGS = AUTO_ALLOCATION_FLAG | AUTO_WITHDRAW_FLAG;
     uint256 private constant MAX_CACHED_VALUATION_AGE = 4 hours;
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
-    /* IMMUTABLES */
-    address public immutable parentVault;
-    address public immutable asset;
-    address public immutable valuer;
+    address public parentVault;
+    address public asset;
+    address public valuer;
+    bool private _initialized;
     /* STORAGE */
     mapping(bytes32 => StrategyConfig) public strategies;
     mapping(bytes32 => uint256) public allocations;
@@ -80,6 +80,22 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     constructor(address _parentVault, address _valuer, bool _useOffchainValuer) {
+        if (_parentVault == address(0) && _valuer == address(0) && !_useOffchainValuer) {
+            _initialized = true;
+            return;
+        }
+        _initialize(_parentVault, _valuer, _useOffchainValuer);
+    }
+
+    function initialize(address _parentVault, address _valuer, bool _useOffchainValuer) external {
+        _initialize(_parentVault, _valuer, _useOffchainValuer);
+    }
+
+    function _initialize(address _parentVault, address _valuer, bool _useOffchainValuer) internal {
+        if (_initialized) revert NotAuthorized();
+        if (_parentVault == address(0) || (_useOffchainValuer && _valuer == address(0))) revert InvalidData();
+
+        _initialized = true;
         parentVault = _parentVault;
         valuer = _valuer;
         asset = IVaultV2(_parentVault).asset();
@@ -878,7 +894,11 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
         if (success && data.length >= 64) return true;
 
-        return agent.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector);
+        if (agent.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector)) return true;
+
+        address implementation = agent.cloneImplementation();
+        return implementation != address(0)
+            && implementation.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector);
     }
 
     function _aggregateActiveStrategyValues() internal view returns (bool success, uint256 totalValue) {
@@ -964,6 +984,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         return (true, uint64(report.timestamp));
     }
+
     function _validateWhitelistedCall(Call memory call) internal view {
         if (call.data.length < 4) revert InvalidData();
 

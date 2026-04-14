@@ -630,6 +630,80 @@ contract StrategyVaultFactoryTest is Test {
         childFactory.createPTLoopVault(params);
     }
 
+    function testCreatePTLoopVaultRejectsNonHubHomeManifest() public {
+        ChainManifest[] memory manifests = _homeAndRemoteManifest();
+        manifests[0].chainId = 137;
+
+        PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: false,
+            enableOmnichainVault: false,
+            asset: address(asset),
+            market: PENDLE_MARKET,
+            ptToken: address(ptAsset),
+            valuer: address(0),
+            name: "PT Loop Vault",
+            symbol: "lpt",
+            strategyIdData: bytes("pt-loop-non-hub"),
+            targetReserveBps: 1_500,
+            maxUnwindSlippageBps: 600,
+            automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("pt-loop-non-hub"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: PENDLE_VENUE_ID,
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
+                usesLayerZero: true
+            }),
+            chainManifests: manifests
+        });
+
+        vm.expectRevert(StrategyVaultFactory.InvalidChainManifest.selector);
+        childFactory.createPTLoopVault(params);
+    }
+
+    function testCreatePTLoopVaultRejectsRemoteManifestOnHubChainId() public {
+        ChainManifest[] memory manifests = _homeAndRemoteManifest();
+        manifests[1].chainId = block.chainid;
+
+        PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
+            owner: owner,
+            vaultManager: owner,
+            curator: curator,
+            enableTimelock: false,
+            enableOmnichainVault: false,
+            asset: address(asset),
+            market: PENDLE_MARKET,
+            ptToken: address(ptAsset),
+            valuer: address(0),
+            name: "PT Loop Vault",
+            symbol: "lpt",
+            strategyIdData: bytes("pt-loop-bad-remote-chain"),
+            targetReserveBps: 1_500,
+            maxUnwindSlippageBps: 600,
+            automationConfig: PTLoopAutomationConfig({maxEntrySlippageBps: 600}),
+            absoluteCap: 1_000_000e6,
+            relativeCap: 1e18,
+            salt: bytes32("pt-loop-bad-remote-chain"),
+            useOffchainValuer: false,
+            venueConfig: VenueConfig({
+                venueId: PENDLE_VENUE_ID,
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
+                usesLayerZero: true
+            }),
+            chainManifests: manifests
+        });
+
+        vm.expectRevert(StrategyVaultFactory.InvalidChainManifest.selector);
+        childFactory.createPTLoopVault(params);
+    }
+
     function testCreateDeltaNeutralVaultRejectsWrongVenue() public {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,

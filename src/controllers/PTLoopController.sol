@@ -47,23 +47,24 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
 
     event LiquidityPrepared(uint256 minBalanceIncrease, uint256 deallocatedAssets, bool usedProtocolWithdraw);
 
-    address public immutable owner;
-    address public immutable vaultManager;
-    IVaultV2 public immutable vault;
-    IUniversalAdapterEscrow public immutable sleeve;
-    address public immutable remotePpsSnapshotStore;
-    address public immutable asset;
-    bytes32 public immutable strategyId;
-    uint256 public immutable targetReserveBps;
-    bytes32 public immutable venueId;
-    address public immutable venue;
-    address public immutable helper;
-    bool public immutable venueUsesLayerZero;
+    address public owner;
+    address public vaultManager;
+    IVaultV2 public vault;
+    IUniversalAdapterEscrow public sleeve;
+    address public remotePpsSnapshotStore;
+    address public asset;
+    bytes32 public strategyId;
+    uint256 public targetReserveBps;
+    bytes32 public venueId;
+    address public venue;
+    address public helper;
+    bool public venueUsesLayerZero;
 
-    uint256 public immutable maxEntrySlippageBps;
-    uint256 public immutable maxUnwindSlippageBps;
-    address public immutable market;
-    address public immutable ptToken;
+    uint256 public maxEntrySlippageBps;
+    uint256 public maxUnwindSlippageBps;
+    address public market;
+    address public ptToken;
+    bool private _initialized;
 
     ChainManifest[] internal _chainManifests;
 
@@ -93,6 +94,79 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         uint256 maxUnwindSlippageBps_
     ) {
         if (
+            owner_ == address(0) && vaultManager_ == address(0) && vault_ == address(0) && sleeve_ == address(0)
+                && remotePpsSnapshotStore_ == address(0) && market_ == address(0) && ptToken_ == address(0)
+                && strategyId_ == bytes32(0)
+        ) {
+            _initialized = true;
+            return;
+        }
+        _initialize(
+            owner_,
+            vaultManager_,
+            vault_,
+            sleeve_,
+            remotePpsSnapshotStore_,
+            market_,
+            ptToken_,
+            strategyId_,
+            targetReserveBps_,
+            venueConfig_,
+            chainManifests_,
+            automationConfig_,
+            maxUnwindSlippageBps_
+        );
+    }
+
+    function initialize(
+        address owner_,
+        address vaultManager_,
+        address vault_,
+        address sleeve_,
+        address remotePpsSnapshotStore_,
+        address market_,
+        address ptToken_,
+        bytes32 strategyId_,
+        uint256 targetReserveBps_,
+        VenueConfig memory venueConfig_,
+        ChainManifest[] memory chainManifests_,
+        PTLoopAutomationConfig memory automationConfig_,
+        uint256 maxUnwindSlippageBps_
+    ) external {
+        _initialize(
+            owner_,
+            vaultManager_,
+            vault_,
+            sleeve_,
+            remotePpsSnapshotStore_,
+            market_,
+            ptToken_,
+            strategyId_,
+            targetReserveBps_,
+            venueConfig_,
+            chainManifests_,
+            automationConfig_,
+            maxUnwindSlippageBps_
+        );
+    }
+
+    function _initialize(
+        address owner_,
+        address vaultManager_,
+        address vault_,
+        address sleeve_,
+        address remotePpsSnapshotStore_,
+        address market_,
+        address ptToken_,
+        bytes32 strategyId_,
+        uint256 targetReserveBps_,
+        VenueConfig memory venueConfig_,
+        ChainManifest[] memory chainManifests_,
+        PTLoopAutomationConfig memory automationConfig_,
+        uint256 maxUnwindSlippageBps_
+    ) internal {
+        if (_initialized) revert NotOwner();
+        if (
             owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
         ) revert InvalidAddress();
@@ -103,6 +177,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
             revert InvalidMarketConfig();
         }
 
+        _initialized = true;
         owner = owner_;
         vaultManager = vaultManager_;
         vault = IVaultV2(vault_);

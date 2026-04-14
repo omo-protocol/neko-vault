@@ -66,18 +66,18 @@ contract DeltaNeutralController is
         L1Read.AccountMarginSummary marginSummary;
     }
 
-    address public immutable owner;
-    address public immutable vaultManager;
-    IVaultV2 public immutable vault;
-    IUniversalAdapterEscrow public immutable sleeve;
-    address public immutable remotePpsSnapshotStore;
-    address public immutable asset;
-    bytes32 public immutable strategyId;
-    uint256 public immutable targetReserveBps;
-    bytes32 public immutable venueId;
-    address public immutable venue;
-    address public immutable helper;
-    bool public immutable venueUsesLayerZero;
+    address public owner;
+    address public vaultManager;
+    IVaultV2 public vault;
+    IUniversalAdapterEscrow public sleeve;
+    address public remotePpsSnapshotStore;
+    address public asset;
+    bytes32 public strategyId;
+    uint256 public targetReserveBps;
+    bytes32 public venueId;
+    address public venue;
+    address public helper;
+    bool public venueUsesLayerZero;
 
     ChainManifest[] internal _chainManifests;
 
@@ -91,47 +91,48 @@ contract DeltaNeutralController is
         _;
     }
 
-    SpotSideMode public immutable spotSideMode;
-    uint256 public immutable maxDeltaBps;
-    uint256 public immutable kellySpotYieldWad;
-    uint256 public immutable kellyMarginYieldWad;
-    uint256 public immutable kellyBaseFundingRateWad;
-    uint256 public immutable kellyEthVolatilityWad;
-    uint256 public immutable kellyLiquidationLossWad;
-    uint256 public immutable kellyRebalanceThresholdWad;
-    uint256 public immutable kellyMinBenefitWad;
-    uint256 public immutable kellyShortTakerFeeWad;
-    uint256 public immutable kellyEntrySlippageWad;
-    uint256 public immutable kellyExitSlippageWad;
-    uint256 public immutable kellyShortSlippageWad;
-    uint256 public immutable kellyBridgeSlippageWad;
-    uint256 public immutable kellySizeImpactThresholdAssets;
-    uint256 public immutable kellySizeImpactMultiplierWad;
-    uint256 public immutable kellyBridgeFeeAssets;
-    uint256 public immutable kellyGasSpotActionAssets;
-    uint256 public immutable kellyGasShortActionAssets;
-    uint256 public immutable kellyFixedRebalanceCostAssets;
-    uint256 public immutable kellyTimeYearsWad;
-    uint256 public immutable kellyPeriodVolWad;
-    uint256 public immutable kellySpotToPerpCostWad;
-    uint256 public immutable kellySpotToPerpCostHighWad;
-    uint256 public immutable kellyPerpToSpotCostWad;
-    uint256 public immutable kellyPerpToSpotCostHighWad;
-    uint32 public immutable kellyTimeHorizonDays;
-    uint16 public immutable kellyFundingDivisor;
-    uint16 public immutable kellyAsymmetricRebalanceThresholdBps;
-    int256 public immutable kellyLogLiquidationLossWad;
-    uint32 public immutable spotAssetIndex;
-    uint32 public immutable perpAssetIndex;
-    uint32 public immutable spotPriceIndex;
-    uint32 public immutable perpDexIndex;
-    uint64 public immutable spotToken;
-    uint8 public immutable spotTokenDecimals;
-    uint8 public immutable orderTif;
-    address public immutable hyperCoreVault;
-    uint16 public immutable maxOrderSlippageBps;
-    uint16 public immutable maxOracleDivergenceBps;
-    uint16 public immutable maxMarginUsageBps;
+    SpotSideMode public spotSideMode;
+    uint256 public maxDeltaBps;
+    uint256 public kellySpotYieldWad;
+    uint256 public kellyMarginYieldWad;
+    uint256 public kellyBaseFundingRateWad;
+    uint256 public kellyEthVolatilityWad;
+    uint256 public kellyLiquidationLossWad;
+    uint256 public kellyRebalanceThresholdWad;
+    uint256 public kellyMinBenefitWad;
+    uint256 public kellyShortTakerFeeWad;
+    uint256 public kellyEntrySlippageWad;
+    uint256 public kellyExitSlippageWad;
+    uint256 public kellyShortSlippageWad;
+    uint256 public kellyBridgeSlippageWad;
+    uint256 public kellySizeImpactThresholdAssets;
+    uint256 public kellySizeImpactMultiplierWad;
+    uint256 public kellyBridgeFeeAssets;
+    uint256 public kellyGasSpotActionAssets;
+    uint256 public kellyGasShortActionAssets;
+    uint256 public kellyFixedRebalanceCostAssets;
+    uint256 public kellyTimeYearsWad;
+    uint256 public kellyPeriodVolWad;
+    uint256 public kellySpotToPerpCostWad;
+    uint256 public kellySpotToPerpCostHighWad;
+    uint256 public kellyPerpToSpotCostWad;
+    uint256 public kellyPerpToSpotCostHighWad;
+    uint32 public kellyTimeHorizonDays;
+    uint16 public kellyFundingDivisor;
+    uint16 public kellyAsymmetricRebalanceThresholdBps;
+    int256 public kellyLogLiquidationLossWad;
+    uint32 public spotAssetIndex;
+    uint32 public perpAssetIndex;
+    uint32 public spotPriceIndex;
+    uint32 public perpDexIndex;
+    uint64 public spotToken;
+    uint8 public spotTokenDecimals;
+    uint8 public orderTif;
+    address public hyperCoreVault;
+    uint16 public maxOrderSlippageBps;
+    uint16 public maxOracleDivergenceBps;
+    uint16 public maxMarginUsageBps;
+    bool private _initialized;
 
     constructor(
         address owner_,
@@ -149,6 +150,78 @@ contract DeltaNeutralController is
         DeltaNeutralAutomationConfig memory automationConfig_
     ) {
         if (
+            owner_ == address(0) && vaultManager_ == address(0) && vault_ == address(0) && sleeve_ == address(0)
+                && remotePpsSnapshotStore_ == address(0) && strategyId_ == bytes32(0)
+        ) {
+            _initialized = true;
+            return;
+        }
+        _initialize(
+            owner_,
+            vaultManager_,
+            vault_,
+            sleeve_,
+            remotePpsSnapshotStore_,
+            strategyId_,
+            targetReserveBps_,
+            venueConfig_,
+            chainManifests_,
+            spotSideMode_,
+            maxDeltaBps_,
+            kellyConfig_,
+            automationConfig_
+        );
+    }
+
+    function initialize(
+        address owner_,
+        address vaultManager_,
+        address vault_,
+        address sleeve_,
+        address remotePpsSnapshotStore_,
+        bytes32 strategyId_,
+        uint256 targetReserveBps_,
+        VenueConfig memory venueConfig_,
+        ChainManifest[] memory chainManifests_,
+        SpotSideMode spotSideMode_,
+        uint256 maxDeltaBps_,
+        DeltaNeutralKellyConfig memory kellyConfig_,
+        DeltaNeutralAutomationConfig memory automationConfig_
+    ) external {
+        _initialize(
+            owner_,
+            vaultManager_,
+            vault_,
+            sleeve_,
+            remotePpsSnapshotStore_,
+            strategyId_,
+            targetReserveBps_,
+            venueConfig_,
+            chainManifests_,
+            spotSideMode_,
+            maxDeltaBps_,
+            kellyConfig_,
+            automationConfig_
+        );
+    }
+
+    function _initialize(
+        address owner_,
+        address vaultManager_,
+        address vault_,
+        address sleeve_,
+        address remotePpsSnapshotStore_,
+        bytes32 strategyId_,
+        uint256 targetReserveBps_,
+        VenueConfig memory venueConfig_,
+        ChainManifest[] memory chainManifests_,
+        SpotSideMode spotSideMode_,
+        uint256 maxDeltaBps_,
+        DeltaNeutralKellyConfig memory kellyConfig_,
+        DeltaNeutralAutomationConfig memory automationConfig_
+    ) internal {
+        if (_initialized) revert NotOwner();
+        if (
             owner_ == address(0) || vaultManager_ == address(0) || vault_ == address(0) || sleeve_ == address(0)
                 || strategyId_ == bytes32(0)
         ) revert InvalidAddress();
@@ -165,6 +238,7 @@ contract DeltaNeutralController is
                 || automationConfig_.maxMarginUsageBps == 0 || automationConfig_.maxMarginUsageBps > BPS
         ) revert InvalidAutomationConfig();
 
+        _initialized = true;
         KellyLinearState memory derivedKellyState = DeltaNeutralKellyLib.deriveState(kellyConfig_);
 
         owner = owner_;

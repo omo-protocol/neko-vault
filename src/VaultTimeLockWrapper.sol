@@ -35,16 +35,17 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     // STATE VARIABLES
     // ============================================
 
-    IVaultV2 public immutable vault;
-    IERC20 public immutable asset;
+    IVaultV2 public vault;
+    IERC20 public asset;
     uint256 public constant LOCK_PERIOD = 7 days;
     uint256 public constant MAX_BATCHES_PER_USER = 100; // Prevent DoS via batch spam
 
     // ERC20 Receipt Token State
     string public constant name = "Vault TimeLock Token";
     string public constant symbol = "vTLT";
-    uint8 public immutable decimals; // SECURITY FIX: Use vault's actual decimals instead of hardcoding 18
+    uint8 public decimals; // SECURITY FIX: Use vault's actual decimals instead of hardcoding 18
     uint256 public totalSupply;
+    bool private _initialized;
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -108,11 +109,24 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     // ============================================
 
     constructor(address _vault) {
+        if (_vault == address(0)) {
+            _initialized = true;
+            return;
+        }
+        _initialize(_vault);
+    }
+
+    function initialize(address _vault) external {
+        _initialize(_vault);
+    }
+
+    function _initialize(address _vault) internal {
+        require(!_initialized, "initialized");
+        require(_vault != address(0), "invalid vault");
+
+        _initialized = true;
         vault = IVaultV2(_vault);
         asset = IERC20(vault.asset());
-        // SECURITY FIX: Use vault's decimals to prevent decimal mismatch
-        // VaultV2 uses max(asset.decimals, 18) for shares, so we match that here
-        // This ensures wrapper tokens have the same decimal precision as vault shares
         decimals = vault.decimals();
     }
 
@@ -285,7 +299,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
 
     /**
      * @notice Burn unlocked vTokens and receive the underlying VaultV2 shares directly.
-     * @dev Enables async withdrawal queues, omnichain share bridging, and any other share-based flow after lock expiry.
+     * @dev Enables async withdrawal queues and other share-based flows after lock expiry.
      */
     function unwrap(uint256 vTokens, address receiver, address onBehalf)
         external

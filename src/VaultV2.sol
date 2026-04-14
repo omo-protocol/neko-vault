@@ -188,11 +188,11 @@ contract VaultV2 is IVaultV2 {
     using MathLib for uint128;
     using MathLib for int256;
 
-    /* IMMUTABLE */
+    address public asset;
+    uint8 public decimals;
+    uint256 public virtualShares;
 
-    address public immutable asset;
-    uint8 public immutable decimals;
-    uint256 public immutable virtualShares;
+    bool private _initialized;
 
     /* ROLES STORAGE */
 
@@ -294,6 +294,22 @@ contract VaultV2 is IVaultV2 {
     /* CONSTRUCTOR */
 
     constructor(address _owner, address _asset) {
+        if (_owner == address(0) && _asset == address(0)) {
+            _initialized = true;
+            return;
+        }
+        _initialize(_owner, _asset);
+    }
+
+    function initialize(address _owner, address _asset) external {
+        _initialize(_owner, _asset);
+    }
+
+    function _initialize(address _owner, address _asset) internal {
+        require(!_initialized, ErrorsLib.Unauthorized());
+        require(_owner != address(0) && _asset != address(0), ErrorsLib.ZeroAddress());
+
+        _initialized = true;
         asset = _asset;
         owner = _owner;
         lastUpdate = uint64(block.timestamp);
