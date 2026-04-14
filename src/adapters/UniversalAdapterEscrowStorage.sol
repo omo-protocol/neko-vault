@@ -5,7 +5,6 @@ import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IAdapter} from "../interfaces/IAdapter.sol";
 import {IUniversalAdapterEscrow} from "./interfaces/IUniversalAdapterEscrow.sol";
-import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
 import {IAutomatedWithdrawalController, IOnchainStrategyValuer} from "../controllers/StrategyControllerInterfaces.sol";
 import {AdapterAccountingLib} from "./libraries/AdapterAccountingLib.sol";
 import {ContractCodeCheckerLib} from "./libraries/ContractCodeCheckerLib.sol";
@@ -31,8 +30,6 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     uint256 public constant EMERGENCY_HAIRCUT = 500; // 5% in basis points
     address public parentVault;
     address public asset;
-    address public valuer;
-    bool public useOffchainValuer;
     bool private _initialized;
     /* STORAGE */
     mapping(bytes32 => StrategyConfig) public strategies;
@@ -42,7 +39,6 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     mapping(bytes32 => uint256) public externalDeposits;
     uint256 public totalExternalDeposits;
     uint256 public settlementSurplusAssets;
-    uint64 public minExternalValuationTimestamp;
     uint256 internal cachedValuation;
     uint256 internal cachedValuationTimestamp;
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
@@ -81,35 +77,28 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
         _;
     }
 
-    constructor(address _parentVault, address _valuer, bool _useOffchainValuer) {
-        if (_parentVault == address(0) && _valuer == address(0) && !_useOffchainValuer) {
+    constructor(address _parentVault) {
+        if (_parentVault == address(0)) {
             _initialized = true;
             return;
         }
-        _initialize(_parentVault, _valuer, _useOffchainValuer);
+        _initialize(_parentVault);
     }
 
-    function initialize(address _parentVault, address _valuer, bool _useOffchainValuer) external {
-        _initialize(_parentVault, _valuer, _useOffchainValuer);
+    function initialize(address _parentVault) external {
+        _initialize(_parentVault);
     }
 
-    function _initialize(address _parentVault, address _valuer, bool _useOffchainValuer) internal {
+    function _initialize(address _parentVault) internal {
         if (_initialized) revert NotAuthorized();
-        if (_parentVault == address(0) || (_useOffchainValuer && _valuer == address(0))) revert InvalidData();
+        if (_parentVault == address(0)) revert InvalidData();
 
         _initialized = true;
         parentVault = _parentVault;
-        valuer = _valuer;
-        useOffchainValuer = _useOffchainValuer;
         asset = IVaultV2(_parentVault).asset();
         owner = IVaultV2(_parentVault).owner();
 
         SafeERC20Lib.safeApprove(asset, _parentVault, type(uint256).max);
-
-        if (_useOffchainValuer && _valuer != address(0)) {
-            bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-            try IUniversalValuerOffchain(_valuer).registerEscrowTotal(escrowTotalId) {} catch {}
-        }
     }
 }
 

@@ -121,7 +121,6 @@ struct DeltaNeutralDeploymentParams {
     address curator;
     bool enableTimelock;
     address asset;
-    address valuer;
     string name;
     string symbol;
     bytes strategyIdData;
@@ -133,7 +132,6 @@ struct DeltaNeutralDeploymentParams {
     uint256 absoluteCap;
     uint256 relativeCap;
     bytes32 salt;
-    bool useOffchainValuer;
     VenueConfig venueConfig;
 }
 
@@ -145,7 +143,6 @@ struct PTLoopDeploymentParams {
     address asset;
     address market;
     address ptToken;
-    address valuer;
     string name;
     string symbol;
     bytes strategyIdData;
@@ -155,7 +152,6 @@ struct PTLoopDeploymentParams {
     uint256 absoluteCap;
     uint256 relativeCap;
     bytes32 salt;
-    bool useOffchainValuer;
     VenueConfig venueConfig;
 }
 

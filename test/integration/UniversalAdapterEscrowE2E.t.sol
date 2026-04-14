@@ -9,6 +9,7 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title UniversalAdapterEscrowE2E
 /// @notice End-to-end integration tests for the UniversalAdapterEscrow
@@ -23,13 +24,16 @@ contract UniversalAdapterEscrowE2E is Test {
     MockTarget defiProtocol;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
     address user = address(0x3);
 
     bytes32 constant LENDING_STRATEGY = keccak256("LENDING_STRATEGY");
     bytes32 constant YIELD_STRATEGY = keccak256("YIELD_STRATEGY");
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy infrastructure
         asset = new MockERC20("USDC", "USDC", 6);
         rewardToken = new MockERC20("REWARD", "RWD", 18);
@@ -43,7 +47,7 @@ contract UniversalAdapterEscrowE2E is Test {
         factory = new UniversalAdapterEscrowFactory();
         vm.startPrank(owner);
         adapter = UniversalAdapterEscrow(
-            payable(factory.deployAdapter(address(vault), address(valuer), false, keccak256("production")))
+            payable(factory.deployAdapter(address(vault), keccak256("production")))
         );
 
         // Setup vault
@@ -327,17 +331,25 @@ contract UniversalAdapterEscrowE2E is Test {
     }
 
     function testRealAssetsValuation() public {
-        // Set valuation
-        valuer.setValue(address(adapter), 10000e6);
+        // Need an active strategy for agent-based valuation
+        vm.prank(owner);
+        adapter.setStrategy(LENDING_STRATEGY, agent, "", 10000e6);
 
-        // Check real assets
+        bytes memory allocData = abi.encode(LENDING_STRATEGY, 0, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Agent reports valuation via quoteCurrentAssets
+        MockAgent(agent).setAssets(10000e6);
+
         uint256 realAssets = adapter.realAssets();
         assertEq(realAssets, 10000e6);
     }
 
     function testFactoryDeploysAdapterClone() public {
         vm.prank(owner);
-        address deployed = factory.deployAdapter(address(vault), address(valuer), false, keccak256("test-deployment"));
+        address deployed = factory.deployAdapter(address(vault), keccak256("test-deployment"));
 
         assertLt(deployed.code.length, factory.adapterImplementation().code.length);
     }

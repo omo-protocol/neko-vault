@@ -47,9 +47,7 @@ interface IUniversalAdapterEscrow is IAdapter {
         bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta
     );
     event ExternalDepositsSyncedBatch(address indexed syncer, uint256 totalDelta, uint256 newTotalValue);
-    event SyncDeviationWarning(uint256 newMinKnown, uint256 valuerValue, uint256 deviation, uint256 deviationBps);
     event CachedValuationRefreshed(uint256 newValue, uint256 timestamp);
-    event ExternalDepositsValuerSynced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, int256 delta);
     event YieldAccrued(bytes32 indexed strategyId, uint256 yieldAmount);
     event EmergencyModeEnabled(uint256 timestamp, string reason);
     event EmergencyModeDisabled(uint256 timestamp, uint256 duration);
@@ -76,10 +74,8 @@ interface IUniversalAdapterEscrow is IAdapter {
     error ValuationUnavailable();
     error EmergencyModeAlreadyEnabled();
     error EmergencyModeNotEnabled();
-    error ValuerStillUnavailable();
     error LiquidityDataMustHaveEmptyCalls();
     error InsufficientAdapterBalance(uint256 available, uint256 requested);
-    error StrategyIdCollisionWithEscrowTotal(); // SECURITY FIX: strategyId cannot equal ESCROW_TOTAL ID
 
     /* EXTERNAL FUNCTIONS */
 
@@ -147,12 +143,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @notice Reduce tracked external deposits when async settlement returns assets to the adapter.
     function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external;
 
-    /// @notice Manually sync strategy with valuer for drift correction (owner-only)
-    /// @dev Simple manual sync when drift accumulates from fees/slippage/yield
-    /// @param strategyId Strategy to sync with valuer
-    function syncStrategyWithValuer(bytes32 strategyId) external;
-
-    /// @notice Refresh cached valuation from the current onchain/offchain valuation source.
+    /// @notice Refresh cached valuation from the current onchain valuation source.
     function refreshCachedValuation() external;
 
     /* VIEW FUNCTIONS */
@@ -189,10 +180,6 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return The asset address
     function asset() external view returns (address);
 
-    /// @notice Get the valuer address
-    /// @return The valuer address
-    function valuer() external view returns (address);
-
     /// @notice Get the owner address
     /// @return The owner address
     function owner() external view returns (address);
@@ -207,12 +194,11 @@ interface IUniversalAdapterEscrow is IAdapter {
     /// @return isStale Whether the cached value is too old (>1 hour)
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale);
 
-    /// @notice Enable emergency mode when valuer is unavailable
-    /// @dev Applies conservative haircut to prevent arbitrage during valuer downtime
+    /// @notice Enable emergency mode when valuation is unavailable
+    /// @dev Applies conservative haircut to prevent arbitrage during valuation downtime
     function enableEmergencyMode() external;
 
-    /// @notice Disable emergency mode when valuer is restored
-    /// @dev Requires valuer to be working before disabling
+    /// @notice Disable emergency mode when live valuation is restored
     function disableEmergencyMode() external;
 
     /// @notice Check if emergency mode is active

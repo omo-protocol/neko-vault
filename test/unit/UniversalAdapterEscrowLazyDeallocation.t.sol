@@ -8,6 +8,7 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {MockProtocol} from "../mocks/MockProtocol.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title UniversalAdapterEscrowLazyDeallocationTest
 /// @notice Tests for the lazy deallocation pattern (unbounded gas fix)
@@ -19,7 +20,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
     MockProtocol public protocol;
 
     address public owner = address(this);
-    address public agent = address(0x1);
+    address public agent;
     address public user = address(0x2);
 
     bytes32 public constant STRATEGY_ID = keccak256("STRATEGY_1");
@@ -33,6 +34,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
     event StrategyWithdrawn(bytes32 indexed strategyId, uint256 amount, address indexed executor);
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy mocks
         asset = new MockERC20("Test Asset", "TST", 18);
         vault = new MockVaultV2(address(asset), owner);
@@ -40,11 +44,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         protocol = new MockProtocol(address(asset));
 
         // Deploy adapter
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy
         adapter.setStrategy(STRATEGY_ID, agent, "", 0);
@@ -635,6 +635,10 @@ contract MockAutoWithdrawController {
 
     constructor(address _protocol) {
         protocol = _protocol;
+    }
+
+    function quoteCurrentAssets() external pure returns (uint256 assets, bool healthy) {
+        return (0, true);
     }
 
     function quoteAutomaticWithdrawal(uint256 amount)

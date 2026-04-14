@@ -37,7 +37,6 @@ import {
     WithdrawalRequestStatus
 } from "../../src/strategies/StrategyTypes.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockValuer} from "../mocks/MockValuer.sol";
 
 contract StrategyControllersTest is Test {
     bytes32 internal constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
@@ -58,7 +57,6 @@ contract StrategyControllersTest is Test {
 
     MockERC20 internal asset;
     MockERC20 internal ptAsset;
-    MockValuer internal valuer;
     MockPendleRouter internal pendleRouter;
     CoreWriter internal coreWriter;
     L1Read internal l1Read;
@@ -69,7 +67,6 @@ contract StrategyControllersTest is Test {
     function setUp() public {
         asset = new MockERC20("USD Coin", "USDC", 6);
         ptAsset = new MockERC20("Pendle PT", "PT", 6);
-        valuer = new MockValuer();
         pendleRouter = new MockPendleRouter(address(asset), address(ptAsset));
         coreWriter = new CoreWriter();
         l1Read = new L1Read();
@@ -140,7 +137,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testDeltaNeutralVaultCanPriceOnchainWithoutValuer() public {
-        Deployment memory deployment = _deployDeltaNeutralWithValuer(false, address(0));
+        Deployment memory deployment = _deployDeltaNeutral(false);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         address sink = makeAddr("sink");
 
@@ -161,7 +158,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testDeltaNeutralValuationUsesMarginAccountEquityNotWithdrawableOnly() public {
-        Deployment memory deployment = _deployDeltaNeutralWithValuer(false, address(0));
+        Deployment memory deployment = _deployDeltaNeutral(false);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         address sink = makeAddr("sink");
 
@@ -418,7 +415,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
+        Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -437,7 +434,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopOnchainSnapshotStateDoesNotMintFreshTimestamp() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
+        Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -458,7 +455,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopValuationIgnoresConservativeStaticRedeemQuote() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
+        Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -476,31 +473,8 @@ contract StrategyControllersTest is Test {
         assertEq(sleeve.realAssets(), 957_500_000);
     }
 
-    function testValuerSnapshotOverridesOnchainQuoteWhenConfigured() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(valuer), true);
-        PTLoopController controller = PTLoopController(deployment.controller);
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
-        IVaultV2 vault = IVaultV2(deployment.vault);
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        pendleRouter.setStaticRedeemBps(9_000);
-
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", deployment.sleeve));
-        valuer.setValue(totalId, 1_100e6);
-
-        assertEq(sleeve.realAssets(), 1_100e6);
-    }
-
     function testSyncPPSRefreshesCachedValuationFromOnchainState() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
+        Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -521,20 +495,12 @@ contract StrategyControllersTest is Test {
     }
 
     function _deployDeltaNeutral(bool enableTimelock) internal returns (Deployment memory) {
-        return _deployDeltaNeutralWithValuer(enableTimelock, address(valuer));
-    }
-
-    function _deployDeltaNeutralWithValuer(bool enableTimelock, address valuerAddress)
-        internal
-        returns (Deployment memory)
-    {
         DeltaNeutralDeploymentParams memory params = DeltaNeutralDeploymentParams({
             owner: owner,
             vaultManager: owner,
             curator: owner,
             enableTimelock: enableTimelock,
             asset: address(asset),
-            valuer: valuerAddress,
             name: "Delta Neutral Vault",
             symbol: "ldn",
             strategyIdData: bytes("hyperliquid-dn"),
@@ -546,7 +512,6 @@ contract StrategyControllersTest is Test {
             absoluteCap: 1_000_000e6,
             relativeCap: 1e18,
             salt: bytes32("delta"),
-            useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: HYPERLIQUID_VENUE_ID,
                 venue: address(coreWriter),
@@ -603,14 +568,6 @@ contract StrategyControllersTest is Test {
     }
 
     function _deployPTLoop() internal returns (Deployment memory) {
-        return _deployPTLoopWithValuer(address(valuer));
-    }
-
-    function _deployPTLoopWithValuer(address valuerAddress) internal returns (Deployment memory) {
-        return _deployPTLoopWithValuer(valuerAddress, false);
-    }
-
-    function _deployPTLoopWithValuer(address valuerAddress, bool useOffchainValuer) internal returns (Deployment memory) {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
             vaultManager: owner,
@@ -619,7 +576,6 @@ contract StrategyControllersTest is Test {
             asset: address(asset),
             market: PENDLE_MARKET,
             ptToken: address(ptAsset),
-            valuer: valuerAddress,
             name: "PT Loop Vault",
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
@@ -629,7 +585,6 @@ contract StrategyControllersTest is Test {
             absoluteCap: 1_000_000e6,
             relativeCap: 1e18,
             salt: bytes32("pt-loop"),
-            useOffchainValuer: useOffchainValuer,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
                 venue: address(pendleRouter),

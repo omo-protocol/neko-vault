@@ -12,6 +12,7 @@ import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
 import {IERC20} from "../../src/interfaces/IERC20.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 contract UniversalAdapterEscrowTest is Test {
     UniversalAdapterEscrow adapter;
@@ -23,7 +24,7 @@ contract UniversalAdapterEscrowTest is Test {
     MockTarget target;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
     address attacker = address(0x3);
     address recipient = address(0x4);
 
@@ -39,6 +40,9 @@ contract UniversalAdapterEscrowTest is Test {
     event StrategyRemoved(bytes32 indexed strategyId);
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy mocks
         asset = new MockERC20("USDC", "USDC", 6);
         rewardToken = new MockERC20("REWARD", "RWD", 18);
@@ -57,8 +61,6 @@ contract UniversalAdapterEscrowTest is Test {
             payable(
                 factory.deployAdapter(
                     address(vault),
-                    address(valuer),
-                    false, // use onchain valuer
                     keccak256("test-salt")
                 )
             )
@@ -85,7 +87,6 @@ contract UniversalAdapterEscrowTest is Test {
     function testDeployment() public view {
         assertEq(adapter.parentVault(), address(vault));
         assertEq(adapter.asset(), address(asset));
-        assertEq(adapter.valuer(), address(valuer));
         assertEq(adapter.owner(), owner);
         assertEq(adapter.paused(), false);
     }
@@ -341,7 +342,7 @@ contract UniversalAdapterEscrowTest is Test {
         feeToken.setTransferFeePercent(100); // 1% fee
 
         MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
-        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault), address(valuer), false);
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault));
 
         vm.prank(owner);
         feeVault.addAdapter(address(feeAdapter));
@@ -386,7 +387,7 @@ contract UniversalAdapterEscrowTest is Test {
         feeToken.setTransferFeePercent(200); // 2% fee
 
         MockVaultV2 feeVault = new MockVaultV2(address(feeToken), owner);
-        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault), address(valuer), false);
+        UniversalAdapterEscrow feeAdapter = new UniversalAdapterEscrow(address(feeVault));
 
         vm.prank(owner);
         feeVault.addAdapter(address(feeAdapter));
@@ -649,7 +650,17 @@ contract UniversalAdapterEscrowTest is Test {
     /* REAL ASSETS TESTS */
 
     function testRealAssets() public {
-        valuer.setValue(address(adapter), 5000e6);
+        // Need an active strategy for valuation to work
+        vm.prank(owner);
+        adapter.setStrategy(STRATEGY_1, agent, "", 1000e6);
+
+        bytes memory allocData = abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0));
+        asset.mint(address(adapter), 100e6);
+        vm.prank(address(vault));
+        adapter.allocate(allocData, 100e6, bytes4(0), address(0));
+
+        // Agent reports 5000e6 via quoteCurrentAssets
+        MockAgent(agent).setAssets(5000e6);
         assertEq(adapter.realAssets(), 5000e6);
     }
 
@@ -1527,7 +1538,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Setup: Allocate to a strategy
         bytes32 strategyId = STRATEGY_1;
-        address strategyAgent = address(0x789);
+        address strategyAgent = address(new MockAgent());
 
         vm.prank(owner);
         adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
@@ -1574,7 +1585,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Setup: Allocate to a strategy
         bytes32 strategyId = STRATEGY_1;
-        address strategyAgent = address(0x789);
+        address strategyAgent = address(new MockAgent());
 
         vm.startPrank(owner);
         adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
@@ -1637,7 +1648,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         // Setup strategy
         bytes32 strategyId = STRATEGY_1;
-        address strategyAgent = address(0x789);
+        address strategyAgent = address(new MockAgent());
 
         vm.prank(owner);
         adapter.setStrategy(strategyId, strategyAgent, "", 1000e6);
@@ -1691,28 +1702,12 @@ contract UniversalAdapterEscrowTest is Test {
         // Attacker tries to deploy adapter for the vault
         vm.prank(attacker);
         vm.expectRevert(UniversalAdapterEscrowFactory.OnlyVaultOwnerCanDeploy.selector);
-        newFactory.deployAdapter(address(vault), address(valuer), false, keccak256("attacker-salt"));
+        newFactory.deployAdapter(address(vault), keccak256("attacker-salt"));
 
         // Owner can successfully deploy
         vm.prank(owner);
-        address deployed = newFactory.deployAdapter(address(vault), address(valuer), false, keccak256("owner-salt"));
+        address deployed = newFactory.deployAdapter(address(vault), keccak256("owner-salt"));
         assertTrue(deployed != address(0), "Owner should be able to deploy");
-    }
-
-    /* SECURITY FIX: ESCROW_TOTAL ID NAMESPACE COLLISION PREVENTION */
-
-    function testSetStrategyRevertsIfStrategyIdEqualsEscrowTotal() public {
-        // SECURITY FIX: Prevent same-escrow collision where owner accidentally sets
-        // strategyId = ESCROW_TOTAL ID, which would allow strategy updates to
-        // overwrite the total valuation
-
-        // Compute the ESCROW_TOTAL ID for this adapter
-        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(adapter)));
-
-        // Trying to set a strategy with ID equal to ESCROW_TOTAL should revert
-        vm.prank(owner);
-        vm.expectRevert(IUniversalAdapterEscrow.StrategyIdCollisionWithEscrowTotal.selector);
-        adapter.setStrategy(escrowTotalId, agent, "", 1000e6);
     }
 
     function testSetStrategySucceedsWithNormalStrategyId() public {
@@ -1764,7 +1759,7 @@ contract UniversalAdapterEscrowTest is Test {
 
         bytes memory deallocData = abi.encode(STRATEGY_1, uint256(2), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
-        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        vm.expectRevert(abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 0, 100e6));
         adapter.deallocate(deallocData, 100e6, bytes4(keccak256("withdraw(uint256,address,address)")), address(0));
     }
 
@@ -1811,6 +1806,10 @@ contract MockAutomationController {
     constructor(address _target, uint256 _callCount) {
         target = _target;
         callCount = _callCount;
+    }
+
+    function quoteCurrentAssets() external pure returns (uint256 assets, bool healthy) {
+        return (0, true);
     }
 
     function quoteAutomaticWithdrawal(uint256) external view returns (IUniversalAdapterEscrow.Call[] memory calls) {

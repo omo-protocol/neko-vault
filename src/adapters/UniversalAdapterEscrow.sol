@@ -13,9 +13,7 @@ import {ISettlementQueueValidation, UniversalAdapterEscrowStorage} from "./Unive
 contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
     using EnumerableSet for EnumerableSet.Bytes32Set;
 
-    constructor(address _parentVault, address _valuer, bool _useOffchainValuer)
-        UniversalAdapterEscrowStorage(_parentVault, _valuer, _useOffchainValuer)
-    {}
+    constructor(address _parentVault) UniversalAdapterEscrowStorage(_parentVault) {}
 
     function allocate(bytes memory data, uint256 assets, bytes4 selector, address)
         external
@@ -126,13 +124,8 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         external
         onlyOwner
     {
-        if (!_hasExternalValuer() && !_supportsOnchainValuationAgent(agent)) {
+        if (!_supportsOnchainValuationAgent(agent)) {
             revert InvalidData();
-        }
-
-        bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-        if (strategyId == escrowTotalId) {
-            revert StrategyIdCollisionWithEscrowTotal();
         }
 
         strategies[strategyId] = StrategyConfig({
@@ -348,9 +341,5 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
         emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);
     }
-
-    /// @notice Manually sync strategy with valuer for drift correction (owner-only)
-    /// @dev Optional maintenance hook for deployments that still use an external valuer.
-    /// @param strategyId Strategy to sync with valuer
 
 }

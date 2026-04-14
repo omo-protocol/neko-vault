@@ -8,6 +8,7 @@ import "../../src/VaultV2.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 contract UniversalValuerOffchainWithAdapterTest is Test {
     UniversalValuerOffchain valuer;
@@ -16,10 +17,13 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
     MockERC20 asset;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
     bytes32 strategyId = keccak256("test-strategy");
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy mock asset
         asset = new MockERC20("Test Token", "TEST", 18);
 
@@ -32,7 +36,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.stopPrank();
 
         // Deploy adapter (parentVault should be set during construction)
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Add adapter to vault and set permissions
         vm.startPrank(owner);

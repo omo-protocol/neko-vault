@@ -5,6 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../src/adapters/UniversalAdapterEscrow.sol";
 import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {ERC20Mock} from "./mocks/ERC20Mock.sol";
+import {MockAgent} from "./mocks/MockAgent.sol";
 
 /// @title Mock Vault for testing UniversalAdapterEscrow
 contract MockVaultForEscrow {
@@ -97,6 +98,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     // Actors
     address public owner;
     address public agent;
+    MockAgent public mockAgent;
     address public attacker;
     address public randomUser;
 
@@ -119,7 +121,8 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     function setUp() public {
         // Setup actors
         owner = makeAddr("owner");
-        agent = makeAddr("agent");
+        mockAgent = new MockAgent();
+        agent = address(mockAgent);
         attacker = makeAddr("attacker");
         randomUser = makeAddr("randomUser");
 
@@ -136,7 +139,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.label(address(valuer), "valuer");
 
         // Deploy escrow
-        escrow = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        escrow = new UniversalAdapterEscrow(address(vault));
         vm.label(address(escrow), "escrow");
 
         // Deploy external protocol
@@ -464,11 +467,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     /// @notice Fuzz test: Set strategy with various parameters
     function testFuzz_SetStrategy(
         bytes32 strategyId,
-        address newAgent,
         bytes calldata preConfiguredData,
         uint256 dailyLimit
     ) public {
-        vm.assume(newAgent != address(0));
+        address newAgent = address(new MockAgent());
 
         vm.prank(owner);
         escrow.setStrategy(strategyId, newAgent, preConfiguredData, dailyLimit);
@@ -499,9 +501,9 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     }
 
     /// @notice Fuzz test: Remove strategy succeeds when empty
-    function testFuzz_RemoveEmptyStrategy(bytes32 strategyId, address newAgent) public {
-        vm.assume(newAgent != address(0));
+    function testFuzz_RemoveEmptyStrategy(bytes32 strategyId) public {
         vm.assume(strategyId != STRATEGY_ID); // Use fresh strategy
+        address newAgent = address(new MockAgent());
 
         vm.startPrank(owner);
         escrow.setStrategy(strategyId, newAgent, "", 0);
@@ -521,6 +523,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: Whitelist configuration
     function testFuzz_WhitelistConfiguration(address target, bytes4 selector, bool allowed, uint256 limit) public {
+        // Whitelist validation requires target to have code when allowed=true
+        if (allowed && target.code.length == 0) {
+            target = address(externalProtocol);
+        }
         vm.prank(owner);
         escrow.updateWhitelist(target, selector, allowed, limit);
 
@@ -791,6 +797,11 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     function testFuzz_EmergencyModeToggle() public {
         assertFalse(escrow.emergencyMode());
 
+        // Need an active strategy for valuation to work on disable
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
+        vm.prank(address(vault));
+        escrow.allocate(data, 1000e18, bytes4(0), address(0));
+
         vm.prank(owner);
         escrow.enableEmergencyMode();
 
@@ -802,11 +813,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.expectRevert(IUniversalAdapterEscrow.EmergencyModeAlreadyEnabled.selector);
         escrow.enableEmergencyMode();
 
-        // Setup valuer to return valid value for disable
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
-        valuer.setValue(totalId, 1000e18);
+        // Setup agent to return valid value for disable
+        mockAgent.setAssets(1000e18);
 
-        // Can disable when valuer works
+        // Can disable when valuation works
         vm.prank(owner);
         escrow.disableEmergencyMode();
 
@@ -819,10 +829,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(owner);
         escrow.enableEmergencyMode();
 
-        valuer.setShouldFail(true);
+        mockAgent.setShouldFail(true);
 
         vm.prank(owner);
-        vm.expectRevert(IUniversalAdapterEscrow.ValuerStillUnavailable.selector);
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         escrow.disableEmergencyMode();
     }
 
@@ -841,17 +851,17 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     function testFuzz_RealAssetsWithValuer(uint256 valuerValue) public {
         valuerValue = bound(valuerValue, 1, INITIAL_BALANCE * 2);
 
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
-        valuer.setValue(totalId, valuerValue);
+        // Set agent's quoteCurrentAssets return value
+        mockAgent.setAssets(valuerValue);
 
-        // With allocations, should use valuer
+        // With allocations, should use agent valuation
         bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, 1000e18, bytes4(0), address(0));
 
         uint256 realAssetsValue = escrow.realAssets();
 
-        // Value should be based on valuer with adjustments
+        // Value should be based on agent valuation
         assertTrue(realAssetsValue > 0 || valuerValue == 0);
     }
 
@@ -887,8 +897,8 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(owner);
         escrow.enableEmergencyMode();
 
-        // Set valuer to fail
-        valuer.setShouldFail(true);
+        // Set agent to fail so emergency fallback kicks in
+        mockAgent.setShouldFail(true);
 
         uint256 realAssetsValue = escrow.realAssets();
 
@@ -911,55 +921,6 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     // ============================================
     // SYNC FUNCTIONALITY FUZZ TESTS
     // ============================================
-
-    /// @notice Fuzz test: syncStrategyWithValuer updates deposits correctly
-    /// @dev Uses bypass circuit breaker to allow deposits for testing
-    function testFuzz_SyncStrategyWithValuer(uint256 valuerValue, uint256 depositAmount) public {
-        // Limit deposit to avoid circuit breaker
-        uint256 maxDeposit = INITIAL_BALANCE / 10 - 1;
-        depositAmount = bound(depositAmount, 1000e18, maxDeposit);
-        valuerValue = bound(valuerValue, 0, depositAmount * 2);
-
-        // Setup allocation and external deposit
-        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
-        vm.prank(address(vault));
-        escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
-
-        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
-        calls[0] = IUniversalAdapterEscrow.Call({
-            target: address(externalProtocol),
-            data: abi.encodeCall(MockExternalProtocol.deposit, (depositAmount)),
-            value: 0
-        });
-        vm.prank(agent);
-        escrow.executeStrategy(STRATEGY_ID, calls);
-
-        // Set valuer value
-        valuer.setValue(STRATEGY_ID, valuerValue);
-
-        uint256 externalBefore = escrow.externalDeposits(STRATEGY_ID);
-        uint256 totalBefore = escrow.totalExternalDeposits();
-
-        vm.prank(owner);
-        escrow.syncStrategyWithValuer(STRATEGY_ID);
-
-        // External deposits should now match valuer value
-        assertEq(escrow.externalDeposits(STRATEGY_ID), valuerValue);
-
-        // Total should be adjusted accordingly
-        if (valuerValue > externalBefore) {
-            assertEq(escrow.totalExternalDeposits(), totalBefore + (valuerValue - externalBefore));
-        } else if (valuerValue < externalBefore) {
-            uint256 decrease = externalBefore - valuerValue;
-            if (decrease > totalBefore) {
-                assertEq(escrow.totalExternalDeposits(), 0);
-            } else {
-                assertEq(escrow.totalExternalDeposits(), totalBefore - decrease);
-            }
-        }
-
-        _checkInvariants();
-    }
 
     /// @notice Fuzz test: syncExternalDepositsPerStrategy reduces deposits
     /// @dev Uses bypass circuit breaker to allow deposits for testing
@@ -1108,13 +1069,8 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
-        // NEW TRUST MODEL: refreshCachedValuation() now trusts the valuer completely (no adjustment)
-        // It checks that totalValue is within 75-150% of totalAllocations
-        // Off-chain valuer handles donation exclusion, so it reports just the allocated value
-        uint256 valuerValue = allocAmount; // Valuer reports actual value (excluding donations)
-
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
-        valuer.setValue(totalId, valuerValue);
+        // Agent reports its current value
+        mockAgent.setAssets(allocAmount);
 
         escrow.refreshCachedValuation();
 
@@ -1136,11 +1092,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
-        // NEW TRUST MODEL: refreshCachedValuation() trusts valuer completely (see testFuzz_RefreshCachedValuation)
-        uint256 valuerValue = allocAmount;
-
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(escrow)));
-        valuer.setValue(totalId, valuerValue);
+        mockAgent.setAssets(allocAmount);
 
         escrow.refreshCachedValuation();
 

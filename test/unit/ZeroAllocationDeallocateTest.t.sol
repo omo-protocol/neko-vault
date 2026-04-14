@@ -8,6 +8,7 @@ import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalA
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title ZeroAllocationDeallocateTest
@@ -27,17 +28,19 @@ contract ZeroAllocationDeallocateTest is Test {
     MockValuer valuer;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
 
     bytes32 constant STRATEGY_1 = keccak256("STRATEGY_1");
     bytes32 constant STRATEGY_2 = keccak256("STRATEGY_2");
 
     function setUp() public {
+        agent = address(new MockAgent());
+
         asset = new MockERC20("USDC", "USDC", 6);
         valuer = new MockValuer();
         vault = new MockVaultV2(address(asset), owner);
 
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         vm.startPrank(owner);
         vault.addAdapter(address(adapter));

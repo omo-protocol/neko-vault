@@ -7,6 +7,7 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
 import {MockTarget} from "../mocks/MockTarget.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowSecurityFixesTest
@@ -18,7 +19,7 @@ import {MockTarget} from "../mocks/MockTarget.sol";
  */
 contract UniversalAdapterEscrowSecurityFixesTest is Test {
     uint256 internal constant EXTERNAL_DEPOSITS_SLOT = 8;
-    uint256 internal constant TOTAL_EXTERNAL_DEPOSITS_SLOT = 9;
+    uint256 internal constant TOTAL_EXTERNAL_DEPOSITS_SLOT = 8;
 
     UniversalAdapterEscrow public adapter;
     MockERC20 public asset;
@@ -28,6 +29,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
 
     address public owner = address(0x1);
     address public user = address(0x2);
+    MockAgent public mockAgent;
 
     bytes32 public strategyId = keccak256("test-strategy");
 
@@ -40,16 +42,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Create a mock vault to get owner
         vault = new MockVault(address(asset), owner);
 
-        // Deploy adapter with valuer
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        // Deploy adapter
+        adapter = new UniversalAdapterEscrow(address(vault));
 
-        // Setup strategy
+        // Setup strategy (use MockAgent for agent, owner can still executeStrategy via onlyStrategyAgentOrOwner)
+        mockAgent = new MockAgent();
         vm.prank(owner);
-        adapter.setStrategy(strategyId, owner, "", 0);
+        adapter.setStrategy(strategyId, address(mockAgent), "", 0);
 
         // Whitelist protocol
         vm.prank(owner);
@@ -184,8 +183,8 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         vm.prank(owner);
         adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
-        // Simulate loss
-        valuer.setReturnValue(800e18);
+        // Simulate loss via agent valuation
+        mockAgent.setAssets(800e18);
 
         // Pause
         vm.prank(owner);
@@ -196,7 +195,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         assertEq(realAssetsBefore, 800e18, "Should return accurate valuer value (no longer overpriced!)");
 
         // Sync to fix accounting drift using per-strategy sync
-        valuer.setReturnValue(920e18);
+        mockAgent.setAssets(920e18);
         vm.prank(owner);
         bytes32[] memory strategyIds = new bytes32[](1);
         strategyIds[0] = strategyId;
@@ -339,7 +338,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
     }
 
     function testSetStrategyRejectsNonOnchainAgentWithoutValuer() public {
-        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault));
 
         vm.prank(owner);
         vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
@@ -347,7 +346,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
     }
 
     function testSetStrategyAcceptsOnchainValuerAgentWithoutValuer() public {
-        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault));
         MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
 
         vm.prank(owner);
@@ -359,7 +358,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
     }
 
     function testRealAssetsUsesHaircutForUnhealthyOnchainValuation() public {
-        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault));
         MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
         onchainAgent.setQuote(1_000e18, false);
 
@@ -376,7 +375,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
     }
 
     function testQuoteSnapshotStateUsesZeroTimestampForOnchainValuation() public {
-        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault));
         MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
         onchainAgent.setQuote(1_000e18, true);
 
@@ -396,21 +395,30 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
     }
 
     function testQuoteSnapshotStateMarksHealthCheckFailureUnhealthy() public {
-        MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
-        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(snapshotAdapter)));
-        snapshotValuer.setValue(totalId, 1_000e18, uint64(block.timestamp));
-        snapshotValuer.setHealthCheckFailure(true);
+        // Setup an adapter with an unhealthy agent
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault));
+        MockAgent unhealthyAgent = new MockAgent();
+        unhealthyAgent.setAssets(1_000e18);
+        unhealthyAgent.setHealthy(false);
 
-        (uint256 assetsQuoted, uint64 snapshotTimestamp, bool healthy) = snapshotAdapter.quoteSnapshotState();
+        vm.prank(owner);
+        snapshotAdapter.setStrategy(strategyId, address(unhealthyAgent), "", 0);
+
+        // Allocate to create an active strategy
+        asset.mint(address(snapshotAdapter), 100e18);
+        vm.prank(address(vault));
+        snapshotAdapter.allocate(
+            abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0)), 100e18, bytes4(0), address(0)
+        );
+
+        (uint256 assetsQuoted,, bool healthy) = snapshotAdapter.quoteSnapshotState();
         assertEq(assetsQuoted, 1_000e18);
-        assertEq(snapshotTimestamp, uint64(block.timestamp));
         assertFalse(healthy);
     }
 
     function testUpdateWhitelistRejectsDelegatecallTargets() public {
         MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
-        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault));
         MockSecurityDelegatecallTarget proxyLike = new MockSecurityDelegatecallTarget();
 
         vm.prank(owner);
@@ -420,11 +428,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
 
     function testExecuteStrategyRejectsCodeHashChangesAfterWhitelisting() public {
         MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
-        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault));
         MockTarget targetContract = new MockTarget(address(asset));
 
+        address snapshotAgentAddr = address(new MockAgent());
         vm.prank(owner);
-        snapshotAdapter.setStrategy(strategyId, owner, "", 0);
+        snapshotAdapter.setStrategy(strategyId, snapshotAgentAddr, "", 0);
         vm.prank(owner);
         snapshotAdapter.updateWhitelist(address(targetContract), targetContract.doSomething.selector, true, 0);
 

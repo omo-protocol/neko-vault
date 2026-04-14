@@ -59,7 +59,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer = new UniversalValuerOffchain(owner, address(asset));
         vm.stopPrank();
 
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup signers
         signer1 = vm.addr(signer1Key);

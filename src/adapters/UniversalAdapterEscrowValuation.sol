@@ -2,8 +2,6 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "../interfaces/IERC20.sol";
-import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
-import {IOnchainStrategyValuer} from "../controllers/StrategyControllerInterfaces.sol";
 import {AdapterAccountingLib} from "./libraries/AdapterAccountingLib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {UniversalAdapterEscrowInternals} from "./UniversalAdapterEscrowInternals.sol";
@@ -35,52 +33,6 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
             return cachedValuation < haircuttedBaseline ? cachedValuation : haircuttedBaseline;
         }
         return (trackedAssets * (10000 - EMERGENCY_HAIRCUT)) / 10000;
-    }
-
-    /* EXTERNAL FUNCTIONS - STRATEGY MANAGEMENT */
-    function syncStrategyWithValuer(bytes32 strategyId) external onlyOwner {
-        if (!strategies[strategyId].active) revert StrategyNotActive();
-        if (!_hasExternalValuer()) revert ValuationUnavailable();
-
-        (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyId));
-
-        if (!success || data.length < 32) {
-            revert ValuationUnavailable();
-        }
-
-        uint256 valuerValue = abi.decode(data, (uint256));
-        uint256 trackedValue = externalDeposits[strategyId];
-
-        if (valuerValue != trackedValue) {
-            int256 delta;
-
-            if (valuerValue > trackedValue) {
-                uint256 increase = valuerValue - trackedValue;
-                externalDeposits[strategyId] = valuerValue;
-                totalExternalDeposits += increase;
-                delta = int256(increase);
-
-                emit YieldAccrued(strategyId, increase);
-            } else {
-                uint256 decrease = trackedValue - valuerValue;
-                externalDeposits[strategyId] = valuerValue;
-
-                if (decrease > totalExternalDeposits) {
-                    totalExternalDeposits = 0;
-                } else {
-                    totalExternalDeposits -= decrease;
-                }
-
-                delta = -int256(decrease);
-            }
-
-            emit ExternalDepositsValuerSynced(strategyId, trackedValue, valuerValue, delta);
-            _markValuationDirty();
-
-            if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-                _removeFromActiveStrategies(strategyId);
-            }
-        }
     }
 
     /// @notice Manually adjust totalExternalDeposits to remove accounting drift
@@ -116,35 +68,6 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
         totalExternalDeposits -= totalDelta;
         _markValuationDirty();
 
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-        uint256 newMinKnown = balance + totalExternalDeposits;
-
-        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-
-        if (_hasExternalValuer()) {
-            (bool success, bytes memory data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
-
-            if (success && data.length >= 32) {
-                uint256 valuerValue = abi.decode(data, (uint256));
-
-                uint256 minExpected = (newMinKnown * 8000) / 10000;
-                uint256 maxExpected = (newMinKnown * 12000) / 10000;
-
-                if (valuerValue < minExpected || valuerValue > maxExpected) {
-                    uint256 deviation;
-                    if (valuerValue > newMinKnown) {
-                        deviation = valuerValue - newMinKnown;
-                    } else {
-                        deviation = newMinKnown - valuerValue;
-                    }
-
-                    uint256 deviationBps = newMinKnown == 0 ? 0 : (deviation * 10000) / newMinKnown; // basis points
-
-                    emit SyncDeviationWarning(newMinKnown, valuerValue, deviation, deviationBps);
-                }
-            }
-        }
-
         emit ExternalDepositsSyncedBatch(msg.sender, totalDelta, totalExternalDeposits);
     }
 
@@ -174,15 +97,10 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
 
     /// @notice Refresh cached valuation from the active valuation source
     function refreshCachedValuation() external {
-        (bool hasValue,, uint256 totalValue,, bool fromOnchain) = _resolveSnapshotValuation();
+        (bool hasValue,, uint256 totalValue,,) = _resolveSnapshotValuation();
 
         if (!hasValue) {
             revert("Valuation unavailable");
-        }
-
-        if (!fromOnchain && totalAllocations > 0) {
-            require(totalValue >= (totalAllocations * 75) / 100, "Valuation too low");
-            require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high");
         }
 
         cachedValuation = totalValue;
@@ -256,7 +174,7 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
         cachedValuationTimestamp = 0; // Disable cached valuation usage during emergency fallback
         emergencyModeActivatedAt = block.timestamp;
 
-        emit EmergencyModeEnabled(block.timestamp, "Valuer unavailable");
+        emit EmergencyModeEnabled(block.timestamp, "Valuation unavailable");
     }
 
     function disableEmergencyMode() external onlyOwner {
@@ -264,9 +182,9 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
 
         (bool hasValue,, uint256 totalValue) = _resolveCurrentValuation();
 
-        if (!hasValue) revert ValuerStillUnavailable();
+        if (!hasValue) revert ValuationUnavailable();
 
-        if (totalAllocations > 0 && totalValue == 0) revert ValuerStillUnavailable();
+        if (totalAllocations > 0 && totalValue == 0) revert ValuationUnavailable();
 
         uint256 duration = block.timestamp - emergencyModeActivatedAt;
         emergencyMode = false;

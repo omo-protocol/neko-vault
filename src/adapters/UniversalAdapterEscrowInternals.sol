@@ -4,7 +4,6 @@ pragma solidity 0.8.28;
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IAutomatedWithdrawalController, IOnchainStrategyValuer} from "../controllers/StrategyControllerInterfaces.sol";
-import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
 import {AdapterAccountingLib} from "./libraries/AdapterAccountingLib.sol";
 import {ContractCodeCheckerLib} from "./libraries/ContractCodeCheckerLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
@@ -101,28 +100,6 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         view
         returns (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 snapshotTimestamp, bool fromOnchain)
     {
-        if (_hasExternalValuer()) {
-            (bool healthSuccess, bytes memory healthData) =
-                valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
-            (bool healthDecoded, bool healthValue) = _safeDecodeBool(healthData);
-
-            bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
-            (bool totalSuccess, uint256 totalAssets, uint64 totalTimestamp) = _readValuerTotalValue(totalId);
-
-            if (totalSuccess) {
-                bool totalHealthy = healthSuccess && healthDecoded && healthValue;
-                return (true, !totalHealthy, totalAssets, totalTimestamp, false);
-            }
-
-            if (healthSuccess && healthDecoded) {
-                hasStaleData = !healthValue;
-                (hasValue, totalValue, snapshotTimestamp) = _aggregateActiveStrategyValuesWithTimestamp();
-                if (hasValue) {
-                    return (hasValue, hasStaleData, totalValue, snapshotTimestamp, false);
-                }
-            }
-        }
-
         (bool onchainSuccess, bool onchainHealthy, uint256 onchainValue, uint64 onchainTimestamp) =
             _aggregateOnchainStrategySnapshot();
         if (onchainSuccess) {
@@ -164,10 +141,6 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         return (true, healthy, totalValue, 0);
     }
 
-    function _hasExternalValuer() internal view returns (bool) {
-        return useOffchainValuer && valuer != address(0) && valuer.code.length > 0;
-    }
-
     function _supportsOnchainValuationAgent(address agent) internal view returns (bool) {
         if (agent == address(0) || agent == address(this) || agent == parentVault || agent.code.length == 0) {
             return false;
@@ -183,62 +156,6 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
             && implementation.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector);
     }
 
-    function _aggregateActiveStrategyValues() internal view returns (bool success, uint256 totalValue) {
-        (success, totalValue,) = _aggregateActiveStrategyValuesWithTimestamp();
-    }
-
-    function _aggregateActiveStrategyValuesWithTimestamp()
-        internal
-        view
-        returns (bool success, uint256 totalValue, uint64 snapshotTimestamp)
-    {
-        bytes32[] memory strategyIds = activeStrategies.values();
-        if (strategyIds.length == 0) {
-            return (false, 0, 0);
-        }
-
-        snapshotTimestamp = type(uint64).max;
-
-        for (uint256 i = 0; i < strategyIds.length; i++) {
-            (bool valueSuccess, bytes memory data) =
-                valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", strategyIds[i]));
-            if (!valueSuccess || data.length < 32) {
-                return (false, 0, 0);
-            }
-
-            (bool timestampSuccess, uint64 reportTimestamp) = _getValuerReportTimestamp(strategyIds[i]);
-            if (!timestampSuccess || reportTimestamp == 0 || reportTimestamp < minExternalValuationTimestamp) {
-                return (false, 0, 0);
-            }
-            if (reportTimestamp < snapshotTimestamp) {
-                snapshotTimestamp = reportTimestamp;
-            }
-
-            totalValue += abi.decode(data, (uint256));
-        }
-
-        return (true, totalValue, snapshotTimestamp);
-    }
-
-    function _readValuerTotalValue(bytes32 totalId)
-        internal
-        view
-        returns (bool success, uint256 totalValue, uint64 timestamp)
-    {
-        bytes memory data;
-        (success, data) = valuer.staticcall(abi.encodeWithSignature("getValue(bytes32)", totalId));
-        if (!success || data.length < 32) {
-            return (false, 0, 0);
-        }
-
-        totalValue = abi.decode(data, (uint256));
-        (bool timestampSuccess, uint64 reportTimestamp) = _getValuerReportTimestamp(totalId);
-        if (!timestampSuccess || reportTimestamp == 0 || reportTimestamp < minExternalValuationTimestamp) {
-            return (true, totalValue, 0);
-        }
-        return (true, totalValue, reportTimestamp);
-    }
-
     function _queueProtectedAssets(address queue) internal view returns (uint256 protectedAssets) {
         (bool success, bytes memory result) = queue.staticcall(abi.encodeWithSignature("totalProtectedAssets()"));
         if (!success || result.length < 32) {
@@ -246,21 +163,6 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         }
 
         protectedAssets = abi.decode(result, (uint256));
-    }
-
-    function _getValuerReportTimestamp(bytes32 strategyId) internal view returns (bool success, uint64 timestamp) {
-        bytes memory data;
-        (success, data) = valuer.staticcall(abi.encodeWithSignature("getReport(bytes32)", strategyId));
-        if (!success || data.length < 192) {
-            return (false, 0);
-        }
-
-        IUniversalValuerOffchain.ValueReport memory report = abi.decode(data, (IUniversalValuerOffchain.ValueReport));
-        if (report.timestamp == 0 || report.timestamp > type(uint64).max) {
-            return (false, 0);
-        }
-
-        return (true, uint64(report.timestamp));
     }
 
     function _validateWhitelistedCall(Call memory call) internal view {
@@ -296,23 +198,7 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         return (true, healthy, totalValue);
     }
 
-    function _safeDecodeBool(bytes memory data) internal pure returns (bool success, bool value) {
-        if (data.length != 32) {
-            return (false, false);
-        }
-
-        uint256 raw;
-        assembly {
-            raw := mload(add(data, 0x20))
-        }
-        if (raw > 1) {
-            return (false, false);
-        }
-        return (true, raw == 1);
-    }
-
     function _markValuationDirty() internal {
-        minExternalValuationTimestamp = uint64(block.timestamp);
         cachedValuationTimestamp = 0;
     }
 

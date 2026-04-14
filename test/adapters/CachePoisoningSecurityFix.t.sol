@@ -6,6 +6,7 @@ import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title CachePoisoningSecurityFix
 /// @notice Test suite validating the fix for cache poisoning vulnerability
@@ -15,6 +16,7 @@ contract CachePoisoningSecurityFix is Test {
     MockERC20 asset;
     MockValuer valuer;
     MockVault vault;
+    MockAgent mockAgent;
     address owner;
     address keeper;
 
@@ -26,19 +28,16 @@ contract CachePoisoningSecurityFix is Test {
 
         asset = new MockERC20("Test Asset", "TEST", 18);
         valuer = new MockValuer();
+        mockAgent = new MockAgent();
 
         // Create vault as owner so adapter gets correct owner
         vm.startPrank(owner);
         vault = new MockVault(address(asset));
 
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup a test strategy
-        adapter.setStrategy(strategyId, owner, "", type(uint256).max);
+        adapter.setStrategy(strategyId, address(mockAgent), "", type(uint256).max);
         vm.stopPrank();
     }
 
@@ -133,8 +132,8 @@ contract CachePoisoningSecurityFix is Test {
         adapter.allocate(allocData, 500e18, bytes4(0), address(0));
         vm.stopPrank();
 
-        // Set valuer to return specific value (with some yield)
-        valuer.setValue(520e18);
+        // Set agent to return specific value (with some yield)
+        mockAgent.setAssets(520e18);
 
         // Record cache state before refresh
         (uint256 cachedBefore, uint256 timestampBefore,) = adapter.getCachedValuation();
@@ -154,8 +153,8 @@ contract CachePoisoningSecurityFix is Test {
         assertTrue(cachedAfter != cachedBefore || timestampAfter != timestampBefore, "Cache state should change");
     }
 
-    /// @notice Test that refreshCachedValuation() includes sanity checks
-    function test_RefreshCachedValuationRejectsTooLowValue() public {
+    /// @notice Test that refreshCachedValuation() accepts any valid agent value
+    function test_RefreshCachedValuationAcceptsLowValue() public {
         // Setup - allocate all funds
         asset.mint(address(adapter), 500e18);
         vm.startPrank(address(vault));
@@ -163,16 +162,16 @@ contract CachePoisoningSecurityFix is Test {
         adapter.allocate(allocData, 500e18, bytes4(0), address(0));
         vm.stopPrank();
 
-        // Set valuer to return suspiciously low value (< 80% of allocations)
-        valuer.setValue(300e18); // 500e18 * 0.8 = 400e18, so 300e18 should fail
-
-        // Attempt to refresh should revert
-        vm.expectRevert("Valuation too low");
+        // Agent reports low value — should succeed (no sanity bounds)
+        mockAgent.setAssets(300e18);
         adapter.refreshCachedValuation();
+
+        (uint256 cached,,) = adapter.getCachedValuation();
+        assertEq(cached, 300e18);
     }
 
-    /// @notice Test that refreshCachedValuation() rejects too high values
-    function test_RefreshCachedValuationRejectsTooHighValue() public {
+    /// @notice Test that refreshCachedValuation() accepts high values
+    function test_RefreshCachedValuationAcceptsHighValue() public {
         // Setup - allocate all funds
         asset.mint(address(adapter), 500e18);
         vm.startPrank(address(vault));
@@ -180,12 +179,12 @@ contract CachePoisoningSecurityFix is Test {
         adapter.allocate(allocData, 500e18, bytes4(0), address(0));
         vm.stopPrank();
 
-        // Set valuer to return suspiciously high value (> 150% of allocations)
-        valuer.setValue(800e18); // 500e18 * 1.5 = 750e18, so 800e18 should fail
-
-        // Attempt to refresh should revert
-        vm.expectRevert("Valuation too high");
+        // Agent reports high value — should succeed (no sanity bounds)
+        mockAgent.setAssets(800e18);
         adapter.refreshCachedValuation();
+
+        (uint256 cached,,) = adapter.getCachedValuation();
+        assertEq(cached, 800e18);
     }
 
     /// @notice Test the full workflow: state change -> keeper updates valuer -> refresh cache
@@ -202,9 +201,9 @@ contract CachePoisoningSecurityFix is Test {
         (, uint256 timestampAfter1,) = adapter.getCachedValuation();
         assertEq(timestampAfter1, 0, "Cache should not be updated by allocate");
 
-        // Step 2: Time passes, keeper collects signatures and updates valuer
+        // Step 2: Time passes, agent reports yield
         vm.warp(block.timestamp + 300); // 5 minutes later
-        valuer.setValue(520e18); // Strategy earned some yield
+        mockAgent.setAssets(520e18); // Strategy earned some yield
 
         // Step 3: Keeper refreshes cache with validated data
         vm.prank(keeper);

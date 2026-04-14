@@ -37,7 +37,6 @@ abstract contract StrategyLaunchpadScriptBase is Script {
             curator: vm.envOr("CURATOR", owner),
             enableTimelock: vm.envOr("ENABLE_TIMELOCK", false),
             asset: vm.envAddress("ASSET"),
-            valuer: vm.envOr("VALUER", address(0)),
             name: vm.envString("NAME"),
             symbol: vm.envString("SYMBOL"),
             strategyIdData: bytes(vm.envString("STRATEGY_ID_DATA")),
@@ -49,7 +48,6 @@ abstract contract StrategyLaunchpadScriptBase is Script {
             absoluteCap: vm.envUint("ABSOLUTE_CAP"),
             relativeCap: vm.envUint("RELATIVE_CAP"),
             salt: vm.envOr("SALT", bytes32(0)),
-            useOffchainValuer: vm.envOr("USE_OFFCHAIN_VALUER", false),
             venueConfig: _loadVenueConfig()
         });
 
@@ -71,7 +69,6 @@ abstract contract StrategyLaunchpadScriptBase is Script {
             asset: vm.envAddress("ASSET"),
             market: vm.envAddress("MARKET"),
             ptToken: vm.envAddress("PT_TOKEN"),
-            valuer: vm.envOr("VALUER", address(0)),
             name: vm.envString("NAME"),
             symbol: vm.envString("SYMBOL"),
             strategyIdData: bytes(vm.envString("STRATEGY_ID_DATA")),
@@ -81,7 +78,6 @@ abstract contract StrategyLaunchpadScriptBase is Script {
             absoluteCap: vm.envUint("ABSOLUTE_CAP"),
             relativeCap: vm.envUint("RELATIVE_CAP"),
             salt: vm.envOr("SALT", bytes32(0)),
-            useOffchainValuer: vm.envOr("USE_OFFCHAIN_VALUER", false),
             venueConfig: _loadVenueConfig()
         });
 

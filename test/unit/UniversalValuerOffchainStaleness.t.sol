@@ -7,6 +7,7 @@ import "../../src/adapters/UniversalAdapterEscrow.sol";
 import "../../src/VaultV2.sol";
 import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalValuerOffchainStaleness
@@ -18,6 +19,7 @@ contract UniversalValuerOffchainStaleness is Test {
     UniversalAdapterEscrow public adapter;
     VaultV2 public vault;
     MockERC20 public asset;
+    MockAgent public mockAgent;
 
     address public owner = address(0x1);
     address public signer1;
@@ -38,7 +40,7 @@ contract UniversalValuerOffchainStaleness is Test {
         valuer = new UniversalValuerOffchain(owner, address(asset));
         vm.stopPrank();
 
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), true);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         signer1 = vm.addr(signer1Key);
 
@@ -49,8 +51,9 @@ contract UniversalValuerOffchainStaleness is Test {
         valuer.configureStrategy(STRATEGY_B, MIN_UPDATE_INTERVAL, MAX_STALENESS, 500, 90);
 
         // Setup adapter strategy
-        adapter.setStrategy(STRATEGY_A, owner, "", type(uint256).max);
-        adapter.setStrategy(STRATEGY_B, owner, "", type(uint256).max);
+        mockAgent = new MockAgent();
+        adapter.setStrategy(STRATEGY_A, address(mockAgent), "", type(uint256).max);
+        adapter.setStrategy(STRATEGY_B, address(mockAgent), "", type(uint256).max);
         vm.stopPrank();
 
         // Give adapter some balance and allocate to make strategy active
@@ -229,18 +232,16 @@ contract UniversalValuerOffchainStaleness is Test {
     /* ADAPTER INTEGRATION TESTS */
 
     function testRealAssetsUsesPerStrategyAggregationWithoutEscrowTotalReport() public {
-        _submitValue(STRATEGY_A, 100e18, 95, 1);
+        // Agent reports 100e18 for the strategy
+        mockAgent.setAssets(100e18);
 
         assertEq(adapter.realAssets(), 100e18, "Should aggregate fresh strategy values directly");
     }
 
     function testRealAssetsUsesHaircuttedStaleAggregatedValuation() public {
-        _submitValue(STRATEGY_A, 100e18, 95, 1);
-
-        vm.prank(owner);
-        valuer.setFallbackValue(STRATEGY_A, 200e18);
-
-        vm.warp(block.timestamp + MAX_STALENESS + 1);
+        // Agent reports 200e18 but marks as unhealthy (stale data)
+        mockAgent.setAssets(200e18);
+        mockAgent.setHealthy(false);
 
         uint256 staleAssets = adapter.realAssets();
         assertEq(staleAssets, 190e18, "Should haircut the stale aggregated valuation without principal capping");

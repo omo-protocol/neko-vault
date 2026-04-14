@@ -11,15 +11,12 @@ contract UniversalAdapterEscrowFactory {
     event AdapterDeployed(
         address indexed adapter,
         address indexed parentVault,
-        address indexed valuer,
-        bool useOffchainValuer,
         bytes32 salt
     );
 
     /* ERRORS */
 
     error InvalidVault();
-    error InvalidValuer();
     error OnlyVaultOwnerCanDeploy();
 
     /* STATE */
@@ -29,33 +26,25 @@ contract UniversalAdapterEscrowFactory {
     mapping(address => bool) public isAdapter;
 
     constructor() {
-        adapterImplementation = address(new UniversalAdapterEscrow(address(0), address(0), false));
+        adapterImplementation = address(new UniversalAdapterEscrow(address(0)));
     }
 
     /* EXTERNAL FUNCTIONS */
 
     /// @notice Deploy a new UniversalAdapterEscrow
     /// @param parentVault The parent vault address
-    /// @param valuer The valuer contract address
-    /// @param useOffchainValuer Whether to use offchain valuation
     /// @return adapter The deployed adapter address
-    function deployAdapter(
-        address parentVault,
-        address valuer,
-        bool useOffchainValuer,
-        bytes32 salt
-    ) external returns (address adapter) {
+    function deployAdapter(address parentVault, bytes32 salt) external returns (address adapter) {
         if (parentVault == address(0)) revert InvalidVault();
-        if (useOffchainValuer && valuer == address(0)) revert InvalidValuer();
         if (IVaultV2(parentVault).owner() != msg.sender) revert OnlyVaultOwnerCanDeploy();
 
         adapter = Clones.clone(adapterImplementation);
-        UniversalAdapterEscrow(payable(adapter)).initialize(parentVault, valuer, useOffchainValuer);
+        UniversalAdapterEscrow(payable(adapter)).initialize(parentVault);
 
         vaultAdapters[parentVault].push(adapter);
         isAdapter[adapter] = true;
 
-        emit AdapterDeployed(adapter, parentVault, valuer, useOffchainValuer, salt);
+        emit AdapterDeployed(adapter, parentVault, salt);
     }
 
     /// @notice Get all adapters deployed for a vault

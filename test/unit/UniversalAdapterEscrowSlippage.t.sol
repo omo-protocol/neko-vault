@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowSlippageTest
@@ -34,19 +35,16 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Create a mock vault to get owner
         vault = new MockVault(address(asset), owner);
 
-        // Deploy adapter with valuer
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        // Deploy adapter
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Set adapter address in valuer for getValue(ESCROW_TOTAL_ID) pattern
         valuer.setAdapter(address(adapter));
 
         // Setup strategy
+        address agentAddr = address(new MockAgent());
         vm.prank(owner);
-        adapter.setStrategy(strategyId, owner, "", 0);
+        adapter.setStrategy(strategyId, agentAddr, "", 0);
 
         // Whitelist DEX functions
         vm.prank(owner);

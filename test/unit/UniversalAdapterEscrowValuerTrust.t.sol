@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowValuerTrustTest
@@ -40,6 +41,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
     UniversalAdapterEscrow public adapter;
     MockERC20 public asset;
     MockMaliciousValuer public maliciousValuer;
+    MockAgent public mockAgent;
     MockVault public vault;
 
     address public owner = address(0x1);
@@ -55,15 +57,12 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         vault = new MockVault(address(asset), owner);
 
         // Deploy adapter with malicious valuer
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(maliciousValuer),
-            true // useOffchainValuer
-        );
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy
+        mockAgent = new MockAgent();
         vm.prank(owner);
-        adapter.setStrategy(strategyId, owner, "", 0);
+        adapter.setStrategy(strategyId, address(mockAgent), "", 0);
 
         // Whitelist a mock protocol for deposits
         vm.prank(owner);
@@ -86,27 +85,27 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Test 1: 5% loss - ACCEPTED (typical slippage)
-        maliciousValuer.setReturnValue(950e18);
+        mockAgent.setAssets(950e18);
         uint256 reported1 = adapter.realAssets();
         assertEq(reported1, 950e18, "5% loss should be accepted");
 
         // Test 2: 9% loss - ACCEPTED (edge case)
-        maliciousValuer.setReturnValue(910e18);
+        mockAgent.setAssets(910e18);
         uint256 reported2 = adapter.realAssets();
         assertEq(reported2, 910e18, "9% loss should be accepted");
 
         // Test 3: Exactly 10% loss - ACCEPTED (no longer threshold)
-        maliciousValuer.setReturnValue(900e18);
+        mockAgent.setAssets(900e18);
         uint256 reported3 = adapter.realAssets();
         assertEq(reported3, 900e18, "10% loss should be accepted");
 
         // Test 4: 11% loss - NOW ACCEPTED (was rejected before)
-        maliciousValuer.setReturnValue(890e18);
+        mockAgent.setAssets(890e18);
         uint256 reported4 = adapter.realAssets();
         assertEq(reported4, 890e18, "11% loss should be accepted (no longer rejected!)");
 
         // Test 5: 50% loss - NOW ACCEPTED (accurate reporting critical)
-        maliciousValuer.setReturnValue(500e18);
+        mockAgent.setAssets(500e18);
         uint256 reported5 = adapter.realAssets();
         assertEq(reported5, 500e18, "50% loss should be accepted (prevents value extraction!)");
     }
@@ -121,7 +120,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Realistic scenario: 0.5% slippage on swap to PT-KHYPE
-        maliciousValuer.setReturnValue(996e18); // 99.6% of minimum
+        mockAgent.setAssets(996e18); // 99.6% of minimum
 
         uint256 reportedAssets = adapter.realAssets();
 
@@ -141,7 +140,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
 
         // Real value: 1000e18
         // Valuer reports 100e18 (90% loss - could be legitimate black swan)
-        maliciousValuer.setReturnValue(100e18);
+        mockAgent.setAssets(100e18);
 
         uint256 reportedAssets = adapter.realAssets();
 
@@ -161,7 +160,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Valuer returns 1 wei (extreme undervaluation, but > 0)
-        maliciousValuer.setReturnValue(1);
+        mockAgent.setAssets(1);
 
         uint256 reportedAssets = adapter.realAssets();
 
@@ -179,7 +178,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
      */
     function testZeroValueTriggersFallback() public {
         // Set valuer to return correct value BEFORE allocation
-        maliciousValuer.setReturnValue(1000e18);
+        mockAgent.setAssets(1000e18);
 
         // Setup - allocate funds
         bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
@@ -194,8 +193,8 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         uint256 initialAssets = adapter.realAssets();
         assertEq(initialAssets, 1000e18, "Initial valuation should be 1000e18");
 
-        // Now force valuer to return 0 (simulating valuation failure)
-        maliciousValuer.setReturnValue(0);
+        // Now force agent to fail (simulating valuation failure)
+        mockAgent.setShouldFail(true);
 
         vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.realAssets();
@@ -237,32 +236,32 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         uint256 minKnownValue = adapter.totalAllocations();
 
         // Test 1: Far below minimum (890e18) - NOW ACCEPTED
-        maliciousValuer.setReturnValue(890e18);
+        mockAgent.setAssets(890e18);
         uint256 reportedAssets1 = adapter.realAssets();
         assertEq(reportedAssets1, 890e18, "Far below minimum is now accepted");
 
         // Test 2: At 90% of minimum (900e18) - ACCEPTED
-        maliciousValuer.setReturnValue(900e18);
+        mockAgent.setAssets(900e18);
         uint256 reportedAssets2 = adapter.realAssets();
         assertEq(reportedAssets2, 900e18, "At old threshold is accepted");
 
         // Test 3: Just above old threshold - ACCEPTED
-        maliciousValuer.setReturnValue(901e18);
+        mockAgent.setAssets(901e18);
         uint256 reportedAssets3 = adapter.realAssets();
         assertEq(reportedAssets3, 901e18, "Above old threshold is accepted");
 
         // Test 4: 1 wei below minimum - ACCEPTED
-        maliciousValuer.setReturnValue(minKnownValue - 1);
+        mockAgent.setAssets(minKnownValue - 1);
         uint256 reportedAssets4 = adapter.realAssets();
         assertEq(reportedAssets4, minKnownValue - 1, "1 wei below minimum is accepted");
 
         // Test 5: Exactly at minimum - ACCEPTED
-        maliciousValuer.setReturnValue(minKnownValue);
+        mockAgent.setAssets(minKnownValue);
         uint256 reportedAssets5 = adapter.realAssets();
         assertEq(reportedAssets5, minKnownValue, "At minimum returns valuer value");
 
         // Test 6: Above minimum (profits) - ACCEPTED
-        maliciousValuer.setReturnValue(minKnownValue + 100e18);
+        mockAgent.setAssets(minKnownValue + 100e18);
         uint256 reportedAssets6 = adapter.realAssets();
         assertEq(reportedAssets6, minKnownValue + 100e18, "Above minimum returns valuer value");
     }
@@ -284,7 +283,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         valuerReturn = bound(valuerReturn, 1, realValue * 10);
 
         // Set valuer to return correct value BEFORE allocation
-        maliciousValuer.setReturnValue(realValue);
+        mockAgent.setAssets(realValue);
 
         // Setup
         asset.mint(address(adapter), realValue);
@@ -296,7 +295,7 @@ contract UniversalAdapterEscrowValuerTrustTest is Test {
         vm.assume(adapter.totalAllocations() > 0);
 
         // Now set the fuzzed valuer return value
-        maliciousValuer.setReturnValue(valuerReturn);
+        mockAgent.setAssets(valuerReturn);
 
         uint256 reportedAssets = adapter.realAssets();
 

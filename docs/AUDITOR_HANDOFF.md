@@ -2,422 +2,384 @@
 
 ## Purpose
 
-This document is the shortest reliable path for an auditor or new reviewer to understand the current codebase.
+This document is the shortest accurate orientation for the current `simplified-demo-factory-vaults` branch.
 
-The repo has recently been consolidated around the factory-driven launchpad flow. Legacy offchain keeper code, emergency monitor/gate systems, wrapper experiments, and manual deployment surfaces were removed. The current source of truth is the Solidity code under `src/`, the rollout scripts under `script/ovault/`, and the retained tests under `test/`.
+It is intentionally branch-specific. The important point for auditors is that this branch is now a **same-chain-only** launchpad. Older omnichain / LayerZero descriptions are not relevant here.
 
-## Important orientation
+## Scope and current branch assumptions
 
-- Current launchpad entrypoint: `src/factories/StrategyVaultFactory.sol`
+- Launchpad entrypoint: `src/factories/StrategyVaultFactory.sol`
 - Supported strategy kinds:
   - `DeltaNeutral`
   - `PTLoop`
-- Same-chain valuation is now controller-driven and onchain-first
-- Cross-chain valuation is async and snapshot-based
-- Offchain valuer support still exists, but it is optional and no longer required for same-chain strategies
-- Optional timelock wrapper still exists:
+- Deployment model: factory-deployed **EIP-1167 clones**
+- Same-chain only:
+  - no LayerZero
+  - no OFTs
+  - no remote PPS store/sender
+  - `src/ovault/` is intentionally empty on this branch
+- Sleeve valuation is purely agent-based: each strategy's agent must implement `quoteCurrentAssets()` (see `IOnchainStrategyValuer`)
+- `UniversalValuerOffchain` still exists as an independent contract but the sleeve no longer reads from it directly
+- Optional timelock surfaces still exist:
   - `src/VaultTimeLockWrapper.sol`
   - `src/gates/WrapperOnlySendAssetsGate.sol`
 
-## Source-of-truth guidance
+## Source of truth
 
-Please treat the following as authoritative, in this order:
+Please treat these as authoritative, in order:
 
-1. Solidity contracts in `src/`
-2. Launchpad scripts in `script/ovault/`
-3. Retained tests in `test/`
+1. Solidity in `src/`
+2. Tests in `test/`
+3. Scripts in `script/`
 
-Several older docs in `docs/` still describe removed flows such as the Python keeper / emergency monitoring system. They are useful for historical context only and should not override the code.
+Older docs in `docs/` may still describe removed omnichain flows and should not override the code.
 
 ## High-level architecture
 
-The system is a strategy-vault launchpad built from four main layers:
+The live system is four layers:
 
 1. **Vault core**
    - `src/VaultV2.sol`
-   - ERC-4626 style vault with owner / curator / allocator roles, caps, fees, gates, and liquidity adapter hooks
+   - ERC-4626-style vault with owner / curator / allocator roles, caps, fees, gates, and adapter hooks
 
 2. **Sleeve / execution adapter**
    - `src/adapters/UniversalAdapterEscrow.sol`
-   - Holds strategy funds, tracks allocations and external deposits, executes whitelisted external calls, and reports `realAssets()`
+   - Holds strategy capital, executes whitelisted venue calls, tracks external exposure, and reports `realAssets()`
 
 3. **Strategy controller**
    - `src/controllers/DeltaNeutralController.sol`
    - `src/controllers/PTLoopController.sol`
-   - Each controller owns strategy-specific logic for reserve policy, automatic allocation / unwind quoting, and onchain valuation
+   - Owns reserve policy, automatic allocation / unwind quoting, and onchain valuation
 
-4. **Launchpad / deployment / async infra**
-   - `src/factories/StrategyVaultFactory.sol`
-   - `src/queues/AsyncWithdrawalQueue.sol`
-   - `src/ovault/RemotePpsSnapshotStore.sol`
-   - `src/ovault/RemotePpsSnapshotSender.sol`
-   - optional omnichain infra in `src/ovault/`
+4. **Exit / wrapper layer**
+   - `src/queues/AsyncWithdrawalQueue.sol` (DeltaNeutral only on this branch)
+   - `src/VaultTimeLockWrapper.sol` (optional)
+   - `src/gates/WrapperOnlySendAssetsGate.sol` (optional)
 
-## Directory map
+## What the factory deploys
 
-### Core vault
-
-- `src/VaultV2.sol`
-- `src/VaultV2Factory.sol`
-- `src/interfaces/`
-- `src/libraries/`
-
-### Strategy launchpad
-
-- `src/factories/StrategyVaultFactory.sol`
-- `src/strategies/StrategyTypes.sol`
-
-### Sleeve / adapter layer
-
-- `src/adapters/UniversalAdapterEscrow.sol`
-- `src/adapters/UniversalAdapterEscrowFactory.sol`
-- `src/adapters/interfaces/`
-
-### Controllers
-
-- `src/controllers/StrategyControllerInterfaces.sol`
-- `src/controllers/DeltaNeutralController.sol`
-- `src/controllers/PTLoopController.sol`
-- `src/controllers/venue_specific/hyperliquid/*`
-- `src/controllers/venue_specific/pendle/*`
-
-### Async / omnichain / remote PPS
-
-- `src/queues/AsyncWithdrawalQueue.sol`
-- `src/ovault/AsyncWithdrawalSettlementComposer.sol`
-- `src/ovault/RemotePpsSnapshotStore.sol`
-- `src/ovault/RemotePpsSnapshotSender.sol`
-- `src/ovault/ShareOFTAdapter.sol`
-- `src/ovault/VaultComposerSync.sol`
-- `src/ovault/{AssetOFT,ShareOFT}.sol`
-
-### Optional valuation fallback
-
-- `src/valuers/UniversalValuerOffchain.sol`
-
-## Canonical deployment flow
-
-The canonical deployment surface is:
-
-- `script/ovault/RunStrategyTestnetRollout.s.sol`
-- `script/ovault/StrategyLaunchpadScriptBase.s.sol`
-
-`RunStrategyTestnetRollout` supports four actions:
-
-1. deploy strategy vault
-2. deploy spoke OFTs
-3. configure omnichain peers / options
-4. deploy remote PPS reporter
-
-The factory is the key deployment contract:
+The factory is the canonical deployment surface:
 
 - `StrategyVaultFactory.createDeltaNeutralVault(...)`
 - `StrategyVaultFactory.createPTLoopVault(...)`
 
-During deployment the factory:
+For each vault it creates:
 
-1. creates the `VaultV2`
-2. deploys the sleeve via `UniversalAdapterEscrowFactory`
-3. deploys the controller
-4. optionally deploys:
-   - `VaultTimeLockWrapper`
-   - `WrapperOnlySendAssetsGate`
-   - `AsyncWithdrawalQueue`
-   - `AsyncWithdrawalSettlementComposer`
-   - `ShareOFTAdapter`
-   - `VaultComposerSync`
-   - `RemotePpsSnapshotStore`
-5. configures caps, whitelists, liquidity adapter, queue hook, and roles
-6. transfers sleeve ownership and final vault ownership / curation to the requested addresses
+1. a `VaultV2` clone
+2. a `UniversalAdapterEscrow` clone
+3. the relevant controller clone
+4. optional timelock wrapper + wrapper gate
+5. for DeltaNeutral only, an `AsyncWithdrawalQueue` clone
 
-## Strategy model
+Then it:
 
-The launchpad currently assumes one controller-managed strategy per sleeve.
+1. whitelists the strategy venue calls on the sleeve
+2. registers the controller as a vault allocator
+3. sets the sleeve as liquidity adapter with controller `liquidityData()`
+4. transfers sleeve ownership and final vault ownership / curation to requested addresses
 
-Relevant types live in:
+## Key files
 
-- `src/strategies/StrategyTypes.sol`
-
-Important structs:
-
-- `DeltaNeutralDeploymentParams`
-- `PTLoopDeploymentParams`
-- `ChainManifest`
-- `VenueConfig`
-- `Deployment`
-- unwind / rebalance quote structs
-
-`ChainManifest` is the cross-chain manifest that ties together:
-
-- chain id
-- LayerZero eid
-- sleeve
-- asset OFT
-- share OFT
-- home-chain marker
-
-## Runtime flow: deposits and allocation
-
-### Core path
-
-1. User deposits into `VaultV2`
-2. Vault can forward funds to its configured liquidity adapter
-3. For launchpad vaults, the configured liquidity adapter is normally the sleeve
-4. Controller-specific `liquidityData()` tells the sleeve which strategy id is being targeted
-
-Key files:
+### Core
 
 - `src/VaultV2.sol`
+- `src/VaultV2Admin.sol`
+- `src/VaultV2Factory.sol`
+
+### Launchpad
+
+- `src/factories/StrategyVaultFactory.sol`
+- `src/strategies/StrategyTypes.sol`
+
+### Sleeve
+
 - `src/adapters/UniversalAdapterEscrow.sol`
-- `src/controllers/{DeltaNeutralController,PTLoopController}.sol`
+- `src/adapters/UniversalAdapterEscrowStorage.sol`
+- `src/adapters/UniversalAdapterEscrowInternals.sol`
+- `src/adapters/UniversalAdapterEscrowValuation.sol`
+- `src/adapters/libraries/AdapterAccountingLib.sol`
+- `src/adapters/libraries/ContractCodeCheckerLib.sol`
 
-### Important security note
+### Controllers
 
-Deposit-triggered venue entry was intentionally removed.
+- `src/controllers/DeltaNeutralController.sol`
+- `src/controllers/DeltaNeutralControllerBase.sol`
+- `src/controllers/PTLoopController.sol`
+- `src/controllers/libraries/ControllerLiquidityLib.sol`
+- `src/controllers/libraries/DeltaNeutralKellyLib.sol`
+- `src/controllers/venue_specific/hyperliquid/*`
+- `src/controllers/venue_specific/pendle/*`
 
-In `UniversalAdapterEscrow.allocate(...)`, automatic allocation only runs when:
+### Exit / wrapper
 
-- the caller path is `IVaultV2.allocate.selector`
-- automation flags enable it
+- `src/queues/AsyncWithdrawalQueue.sol`
+- `src/VaultTimeLockWrapper.sol`
+- `src/gates/WrapperOnlySendAssetsGate.sol`
 
-This means ordinary user deposits do not automatically push capital into strategy execution, which avoids the previous deposit-triggered MEV surface.
+### Independent offchain valuer (not read by sleeve)
 
-## Runtime flow: sleeve accounting
+- `src/valuers/UniversalValuerOffchain.sol`
 
-The sleeve tracks two distinct quantities:
+## Deposit and allocation flow
+
+### User deposits
+
+The important behavioral change is:
+
+- **ordinary user deposits do not automatically open venue positions**
+
+Users deposit into `VaultV2`, receive vault shares, and increase local liquidity. Capital only enters the strategy when an allocator/controller path explicitly calls `vault.allocate(...)` or when the manager calls controller `sync()`.
+
+This was kept specifically to avoid deposit-triggered MEV / entry manipulation.
+
+### Controller liquidity data
+
+Each controller returns `liquidityData()` as:
+
+- `abi.encode(strategyId, automationFlags, emptyCalls)`
+
+Current automation flags:
+
+- `DeltaNeutral`: `1`
+  - auto-allocation enabled
+  - direct user exits do **not** auto-unwind
+- `PTLoop`: `3`
+  - auto-allocation enabled
+  - allocator-driven deallocation paths may use auto-withdraw logic
+
+### Reserve policy
+
+Reserve logic is centralized in `ControllerLiquidityLib`.
+
+The key concept is:
+
+- `requiredLocalLiquidity = max(targetReserve(totalAssets), queue.totalProtectedAssets())`
+
+That means controller allocation decisions preserve both:
+
+1. the configured reserve floor
+2. already-promised async withdrawal liquidity
+
+Important behavior:
+
+- if queue lookup fails, `protectedWithdrawalLiquidity()` fail-closes to `type(uint256).max`
+- this drives `availableToAllocate(...)` to zero
+- so reserve accounting fails closed instead of allocating too much
+
+### Sleeve allocation
+
+`UniversalAdapterEscrow.allocate(...)`:
+
+1. decodes `strategyId` + automation flags
+2. increments `allocations[strategyId]` and `totalAllocations`
+3. if automation is enabled on a vault allocator path, asks the controller for `quoteAutomaticAllocation(...)`
+4. executes those whitelisted calls via `_executeMulticall(...)`
+
+The sleeve explicitly rejects non-empty liquidity-call payloads for the generic vault allocation path. Strategy execution comes from controller quotes, not user-supplied calldata.
+
+## Sleeve accounting model
+
+The sleeve tracks:
 
 - `allocations[strategyId]`
 - `externalDeposits[strategyId]`
-
-Conceptually:
-
-- `allocations` = assets that the vault has allocated into the sleeve for the strategy
-- `externalDeposits` = assets the sleeve has pushed out into external venues and is still tracking there
-
-Important sleeve fields / methods:
-
+- `settlementSurplusAssets`
 - `totalAllocations`
 - `totalExternalDeposits`
-- `allocate(...)`
-- `deallocate(...)`
-- `executeStrategy(...)`
-- `withdrawFromStrategy(...)`
-- `recordSettlement(...)`
-- `realAssets()`
-- `refreshCachedValuation()`
-- `_executeMulticall(...)`
-- `_resolveCurrentValuation()`
 
-`_executeMulticall(...)` enforces per-target / per-selector whitelist checks and tracks balance deltas. A balance drop is treated as funds moving out to external venues and increments `externalDeposits`.
+Interpretation:
 
-## Runtime flow: valuation
+- `allocations` = vault capital assigned to the strategy
+- `externalDeposits` = capital the sleeve has pushed to the venue and still tracks externally
+- `settlementSurplusAssets` = returned assets beyond tracked external exposure
 
-### Current valuation model
+Important accounting paths:
 
-`UniversalAdapterEscrow.realAssets()` is onchain-first.
+### Funds moving out to venue
 
-Valuation resolution order:
+`_recordMulticallBalanceChange(...)` treats a sleeve balance decrease as venue deployment:
 
-1. try controller onchain valuation via `IOnchainStrategyValuer.quoteCurrentAssets()`
-2. if unavailable and an external valuer exists, fall back to offchain valuer paths
-3. if stale or emergency conditions apply, apply conservative handling / haircut
+1. consumes `settlementSurplusAssets` first
+2. then increments `externalDeposits[strategyId]`
+3. increments `totalExternalDeposits`
+4. marks valuation dirty
 
-Key implementation:
+### Funds returning from venue
 
-- `src/adapters/UniversalAdapterEscrow.sol`
-  - `_resolveCurrentValuation()`
-  - `_aggregateOnchainStrategyValue()`
+`_recordWithdrawnAssets(...)`:
 
-### Delta-neutral valuation
+1. reduces `externalDeposits[strategyId]`
+2. reduces `totalExternalDeposits`
+3. any excess return becomes `settlementSurplusAssets`
+4. marks valuation dirty
 
-`DeltaNeutralController.quoteCurrentAssets()` includes:
+### Async settlement credits
 
-- idle sleeve balance
-- spot inventory
-- Hyperliquid margin account equity
-- remote snapshot assets, if configured
+`recordSettlement(...)` is queue-only:
 
-Key file:
+1. reduces tracked external exposure when settlement assets come back
+2. forwards full assets to the vault if the strategy allocation is already zero
+3. otherwise books any excess as `settlementSurplusAssets`
+4. marks valuation dirty
+
+## Valuation model
+
+### How `realAssets()` is resolved
+
+`UniversalAdapterEscrow.realAssets()` is driven by `UniversalAdapterEscrowValuation`.
+
+The sleeve exclusively uses **agent-based onchain valuation**. Each strategy's agent must implement `IOnchainStrategyValuer.quoteCurrentAssets()`, which returns `(uint256 assets, bool healthy)`. The sleeve aggregates across all active strategies via `_aggregateOnchainStrategySnapshot()`.
+
+Resolution order:
+
+1. aggregate per-strategy agent quotes via `quoteCurrentAssets()` on each active strategy's agent
+2. if any agent reports `healthy=false`, the aggregate is marked as stale data
+3. if the aggregate has stale data or emergency mode is enabled, apply the emergency haircut (5%)
+4. if no valuation exists and `totalAllocations == 0`, return only tracked surplus
+5. if no valuation exists and there are live allocations:
+   - revert `ValuationUnavailable` unless emergency mode is enabled
+   - in emergency mode, use conservative tracked-asset fallback with haircut
+
+If any single agent call fails (reverts or returns malformed data), the entire aggregation fails, which triggers path 5.
+
+### Agent validation
+
+`setStrategy(...)` requires each agent to implement `quoteCurrentAssets()`. The check (`_supportsOnchainValuationAgent`) verifies the agent has code and can either successfully call `quoteCurrentAssets()` or contains the pushed selector in its bytecode (including behind a minimal proxy).
+
+### Important valuation details
+
+- `EMERGENCY_HAIRCUT = 500` (5% in basis points)
+- accounting-changing events (`_markValuationDirty()`) clear `cachedValuationTimestamp` to invalidate stale cache
+- `refreshCachedValuation()` is explicit; nothing auto-refreshes the cache on allocation / deallocation
+- `refreshCachedValuation()` accepts any value returned by the agent aggregation (no sanity bounds)
+- the offchain valuer (`UniversalValuerOffchain`) still exists as an independent contract but the sleeve does **not** read from it; it may be used by external monitoring or keeper infrastructure
+
+### `quoteSnapshotState()` semantics
+
+`quoteSnapshotState()` reports:
+
+- `(value, 0, healthy)` where `healthy = !hasStaleData && !emergencyMode && valuationTimestamp != 0`
+
+Since agent-based valuations always return `snapshotTimestamp = 0`, `quoteSnapshotState()` always reports `healthy=false`. This is deliberate: onchain controller quotes are usable for `realAssets()`, but they are not timestamped oracle snapshots.
+
+## DeltaNeutral valuation and flow
+
+Primary files:
 
 - `src/controllers/DeltaNeutralController.sol`
+- `src/controllers/DeltaNeutralControllerBase.sol`
 
-### PT-loop valuation
+### What valuation includes
 
-`PTLoopController.quoteCurrentAssets()` includes:
+`quoteCurrentAssets()` returns:
 
-- idle sleeve balance
-- PT position quoted via Pendle static quoter
-- remote snapshot assets, if configured
+- idle sleeve asset balance
+- spot inventory
+- **positive Hyperliquid margin account equity**
 
-Key file:
+It does **not** rely on a remote snapshot on this branch.
 
-- `src/controllers/PTLoopController.sol`
+### Health behavior
 
-### Offchain valuer status
+DeltaNeutral returns `healthy=false` when risk is degraded, specifically when:
 
-`src/valuers/UniversalValuerOffchain.sol` still exists, but it is no longer the required path for same-chain strategies. It should be reviewed as an optional fallback / legacy-compatible surface, not as the primary pricing path for launchpad strategies.
+- oracle price and mark price diverge beyond `maxOracleDivergenceBps`
+- or margin usage exceeds `maxMarginUsageBps`
+- or account value is non-positive
 
-## Runtime flow: sync and manager actions
+### Sync / maintenance
 
-Each controller now separates:
+`sync()` is `vaultManager`-only and:
 
-- `sync()` -> strategy maintenance / rebalance execution
-- `syncPPS()` -> refresh cached valuation used for PPS updates
+1. reads full Hyperliquid live state
+2. computes Kelly / rebalance target
+3. builds venue calls
+4. executes them through the sleeve
 
-These are restricted to `vaultManager`.
+`syncPPS()` is separate and only refreshes cached valuation.
 
-This separation is important because:
+### DeltaNeutral withdrawals
 
-- rebalancing and valuation refresh are no longer coupled
-- cron-style PPS refresh can happen without strategy repositioning
-
-## Runtime flow: withdrawals
-
-There are two withdrawal modes:
-
-### 1. Local liquidity path
-
-If enough local liquidity exists in vault + sleeve balances, withdrawals can complete directly.
-
-### 2. Async path
-
-Async withdrawals are handled by:
-
-- `src/queues/AsyncWithdrawalQueue.sol`
-
-Important functions:
-
-- `requestRedeem(...)`
-- `requestWithdraw(...)`
-- `creditSettlement(...)`
-- `claim(...)`
-- `refreshRequest(...)`
-
-Behavior:
-
-1. user escrows shares into the queue
-2. queue reserves currently available local liquidity
-3. if not enough liquidity exists, queue asks the controller to initiate an async unwind
-4. settlement funds are credited later
-5. once claimable, the queue redeems escrowed shares through the vault
-
-The queue’s solvency / fairness depends on:
-
-- live `previewRedeem(...)`
-- reserved local liquidity tracking
-- request ordering in `_isClaimableByCurrentLiquidity(...)`
-- duplicate-settlement protection via `processedGuids`
-
-## Cross-chain PPS and remote settlement
-
-### Remote PPS snapshots
-
-Remote valuation is async.
-
-Home chain:
-
-- `src/ovault/RemotePpsSnapshotStore.sol`
-
-Remote / spoke chain:
-
-- `src/ovault/RemotePpsSnapshotSender.sol`
+This branch deploys an `AsyncWithdrawalQueue` for DeltaNeutral vaults.
 
 Flow:
 
-1. remote manager calls `pushSnapshot(...)`
-2. sender reads `IAdapter(sleeve).realAssets()`
-3. LayerZero message is sent to home chain
-4. `RemotePpsSnapshotStore.lzReceive(...)` stores snapshot by source eid
-5. controllers include `quoteRemoteAssets()` in `quoteCurrentAssets()`
+1. user calls `requestRedeem(...)` or `requestWithdraw(...)`
+2. queue escrows shares
+3. queue reserves currently available local liquidity
+4. if short, queue calls `controller.initiateAsyncWithdrawal(shortfallAssets)`
+5. controller builds Hyperliquid unwind calls and executes them through the sleeve
+6. settlement is later credited with `creditSettlement(...)`
+7. `claim(...)` redeems escrowed shares when request becomes claimable
 
-Audit notes:
+The queue tracks:
 
-- peer wiring is critical
-- staleness is enforced via `MAX_SNAPSHOT_AGE`
-- health degrades when snapshots are missing or stale
+- `totalReservedLocalAssets`
+- `totalProtectedAssets`
 
-### Cross-chain async withdrawal settlement
+and uses `_isClaimableByCurrentLiquidity(...)` to maintain ordering under changing `previewRedeem(...)`.
 
-If LayerZero async settlement is enabled, the factory can deploy:
-
-- `src/ovault/AsyncWithdrawalSettlementComposer.sol`
-
-It:
-
-- receives composed OFT settlement messages
-- forwards assets to the sleeve
-- credits the async withdrawal queue
-- stores recoverable pending settlements if processing fails
-
-## Strategy-specific surfaces
-
-### DeltaNeutralController
-
-Primary file:
-
-- `src/controllers/DeltaNeutralController.sol`
-
-Auxiliary files:
-
-- `src/controllers/libraries/DeltaNeutralKellyLib.sol`
-- `src/controllers/venue_specific/hyperliquid/CoreWriter.sol`
-- `src/controllers/venue_specific/hyperliquid/L1Read.sol`
-- `src/controllers/venue_specific/hyperliquid/HyperliquidLib.sol`
-
-What it does:
-
-- manages target reserve vs deployed risk
-- computes Kelly-based target sizing
-- quotes automatic allocation / automatic withdrawal
-- performs manager-triggered `sync()`
-- supports async unwind initiation for same-chain setups
-
-Areas to inspect carefully:
-
-- `_liveState()`
-- `_quoteTargetCalls(...)`
-- `_quoteUnwindExecution(...)`
-- `_buildUnwindCalls(...)`
-- delta-band and risk-degraded logic
-- assumptions around margin equity, spot balances, and remote assets
-
-### PTLoopController
+## PTLoop valuation and flow
 
 Primary file:
 
 - `src/controllers/PTLoopController.sol`
 
-Auxiliary file:
+### What valuation includes
 
-- `src/controllers/venue_specific/pendle/PendleLib.sol`
+`quoteCurrentAssets()` returns:
 
-What it does:
+- idle sleeve asset balance
+- PT balance marked using `IPendleStaticQuoter.getPtToAssetRate(market)`
 
-- manages local reserve vs PT deployment
-- quotes PT entry and unwind
-- prices PT using Pendle static quoter
-- includes remote snapshot assets when configured
+If the PT rate is zero, the quote is unhealthy.
 
-Areas to inspect carefully:
+The PT valuation intentionally uses the **spot PT-to-asset rate**, not a conservative redeem quote.
 
-- `_quoteAutomaticAllocation()`
-- `quoteUnloopForAssets(...)`
-- `_quoteExactPtInForAssets(...)`
-- slippage assumptions
-- binary search / quoter dependence
+### Sync / allocation
 
-### PendleLib
+`sync()` is `vaultManager`-only and:
 
-`src/controllers/venue_specific/pendle/PendleLib.sol` is a call-builder / interface library.
+1. reads idle assets and PT balance
+2. estimates total assets using current PT spot rate
+3. computes `availableToAllocate(...)` after reserve protection
+4. builds Pendle open-loop calls
+5. executes them through the sleeve
 
-It does not hold state. It packages:
+`_quoteExactPtInForAssets(...)` seeds its search using the current PT spot rate, then refines with the static quoter.
 
-- Pendle router interfaces
-- static quoter interfaces
-- helper constructors for `TokenInput`, `TokenOutput`, and default approximation params
-- helper builders for approve / swap / open-loop / close-loop call bundles
+### PTLoop withdrawals
 
-For auditors, this file is mainly about call correctness and ABI/data packing rather than stateful accounting.
+PTLoop does **not** deploy an async withdrawal queue on this branch.
+
+Behavior is:
+
+- local liquidity can satisfy normal user exits
+- direct user `withdraw` / `redeem` does **not** trigger a strategy unwind
+- if reserve is insufficient, the user exit reverts
+- owner-managed liquidity preparation is done with `prepareWithdrawal(...)`
+
+`prepareWithdrawal(...)` can:
+
+1. call `sleeve.withdrawFromStrategy(...)`
+2. call `vault.deallocate(...)`
+3. leave liquid assets locally available for user withdrawals
+
+`quoteAutomaticWithdrawal(...)` still exists, but it is for controller/allocator-driven deallocation paths, not for letting arbitrary users force a live venue unwind from `withdraw()` / `redeem()`.
+
+## Timelock wrapper flow
+
+If timelock is enabled, deposits route through:
+
+- `VaultTimeLockWrapper`
+
+Key behaviors:
+
+- wrapped balances preserve FIFO batch timing
+- `unwrap(...)` converts unlocked wrapper shares into vault shares
+- `unwrapToApproval(...)` allows pull-based integrations to take vault shares
+
+For wrapped DeltaNeutral vaults, `AsyncWithdrawalQueue.requestRedeemFrom(...)` exists so the queue can pull approved vault shares directly from the wrapper flow.
 
 ## Roles and trust boundaries
 
@@ -430,85 +392,82 @@ Defined in `VaultV2`:
 - allocators
 - sentinels
 
-### Launchpad ownership model
+### Launchpad handoff model
 
-During deployment:
-
-- the factory temporarily owns / curates the vault
+During deployment the factory temporarily configures the vault and sleeve.
 
 After deployment:
 
-- vault owner is the final `owner`
-- curator is final `curator` or owner fallback
-- controller is an allocator
-- sleeve owner is transferred to the final owner
-- `vaultManager` is a separate operational role for `sync()` / `syncPPS()` if configured
+- vault owner = final `owner`
+- curator = final `curator` or owner fallback
+- controller = allocator
+- sleeve owner = final owner
+- `vaultManager` = operational role for `sync()` / `syncPPS()`
 
-### Trust boundaries to focus on
+### Core trust boundaries
 
-1. `VaultV2` trusts adapter `realAssets()` and adapter accounting
-2. `UniversalAdapterEscrow` trusts controller quotes when onchain valuation succeeds
-3. if configured, sleeve also trusts `UniversalValuerOffchain`
-4. `RemotePpsSnapshotStore` trusts configured LayerZero endpoint + peers
-5. `AsyncWithdrawalQueue` trusts controller async initiation and settlement hook credits
-6. whitelisted external calls in the sleeve are still powerful despite whitelist gating
+1. `VaultV2` trusts sleeve `realAssets()` and adapter accounting
+2. `UniversalAdapterEscrow` trusts whitelisted venue calls and agent `quoteCurrentAssets()` responses
+3. each strategy agent is the sole valuation source for its strategy; a compromised agent can misreport value
+4. DeltaNeutral queue trusts controller async unwind initiation plus settlement credits
+5. wrapper flows trust FIFO batch accounting and lock enforcement
 
-## What was removed and should not distract the auditor
+## What was removed on this branch
 
-The current launchpad architecture no longer depends on:
+These should **not** distract the audit for this branch:
 
-- Python offchain keeper infrastructure
-- security monitor contracts
-- emergency gate system
-- legacy top-level deployment scripts
-- older wrapper experiments such as `UniversalTokenWrapper`
+- LayerZero peers / manifests
+- remote PPS store / sender
+- OFT settlement paths
+- async compose settlement plumbing
+- older keeper / monitor / emergency infra outside the current contracts
 
-The remaining wrapper/gate pieces that still matter are only:
+## Highest-value audit targets
 
-- `src/VaultTimeLockWrapper.sol`
-- `src/gates/WrapperOnlySendAssetsGate.sol`
-
-## Likely high-risk areas
-
-If audit time is limited, prioritize these:
+If time is limited, prioritize:
 
 1. `src/VaultV2.sol`
-   - adapter accounting
    - total asset calculation
+   - adapter interactions
    - deallocate / forceDeallocate
    - fee accrual
 
-2. `src/adapters/UniversalAdapterEscrow.sol`
+2. `src/adapters/UniversalAdapterEscrow*.sol`
    - allocation vs external deposit accounting
-   - whitelisted multicall execution
-   - cached valuation / emergency mode behavior
-   - settlement recording
-   - onchain vs offchain valuation selection
+   - agent-based valuation aggregation and health flag handling
+   - cache invalidation (`_markValuationDirty`) and explicit refresh
+   - emergency mode fallback vs normal-mode revert on agent failure
+   - whitelist enforcement and codehash pinning
+   - async settlement handling
 
-3. `src/factories/StrategyVaultFactory.sol`
-   - temporary ownership model
-   - deployment / wiring correctness
-   - chain manifest validation
-   - whitelist configuration
+3. `src/controllers/libraries/ControllerLiquidityLib.sol`
+   - reserve preservation
+   - queue-protected-liquidity integration
+   - fail-closed behavior
 
-4. Controllers
-   - rebalance / unwind sizing
-   - manager-only sync surfaces
-   - venue-specific call construction
-   - pricing assumptions
+4. `src/controllers/DeltaNeutralController*.sol`
+   - live-state reads
+   - Kelly sizing
+   - unwind execution sizing
+   - risk degradation behavior
 
-5. `src/queues/AsyncWithdrawalQueue.sol`
+5. `src/controllers/PTLoopController.sol`
+   - PT pricing assumptions
+   - open/close loop construction
+   - unwind sizing and slippage handling
+
+6. `src/queues/AsyncWithdrawalQueue.sol`
    - reservation logic
-   - claimability ordering
+   - fairness ordering
+   - changing PPS interaction
    - duplicate GUID protection
-   - interaction with changing PPS
 
-6. Cross-chain components
-   - peer config
-   - stale snapshot handling
-   - compose-based settlement recovery
+7. `src/VaultTimeLockWrapper.sol`
+   - FIFO batch preservation
+   - lock enforcement
+   - unwrap / unwrapToApproval share flows
 
-## Recommended audit reading order
+## Recommended reading order
 
 1. `src/strategies/StrategyTypes.sol`
 2. `src/controllers/StrategyControllerInterfaces.sol`
@@ -516,24 +475,33 @@ If audit time is limited, prioritize these:
 4. `src/VaultV2Factory.sol`
 5. `src/VaultV2.sol`
 6. `src/adapters/UniversalAdapterEscrow.sol`
-7. `src/controllers/DeltaNeutralController.sol`
-8. `src/controllers/PTLoopController.sol`
-9. `src/controllers/venue_specific/pendle/PendleLib.sol`
-10. `src/controllers/venue_specific/hyperliquid/*`
-11. `src/queues/AsyncWithdrawalQueue.sol`
-12. `src/ovault/RemotePpsSnapshotStore.sol`
-13. `src/ovault/RemotePpsSnapshotSender.sol`
-14. `src/ovault/AsyncWithdrawalSettlementComposer.sol`
-15. `src/VaultTimeLockWrapper.sol`
-16. `src/valuers/UniversalValuerOffchain.sol`
+7. `src/adapters/UniversalAdapterEscrowInternals.sol`
+8. `src/adapters/UniversalAdapterEscrowValuation.sol`
+9. `src/controllers/libraries/ControllerLiquidityLib.sol`
+10. `src/controllers/DeltaNeutralControllerBase.sol`
+11. `src/controllers/DeltaNeutralController.sol`
+12. `src/controllers/PTLoopController.sol`
+13. `src/queues/AsyncWithdrawalQueue.sol`
+14. `src/VaultTimeLockWrapper.sol`
+15. `src/valuers/UniversalValuerOffchain.sol` (independent of sleeve; used by external monitoring only)
 
-## Test files worth using as executable documentation
+## Tests that act as executable documentation
 
-### Launchpad / strategy flow
+### Launchpad and strategy behavior
 
 - `test/strategy/StrategyVaultFactory.t.sol`
 - `test/strategy/StrategyControllers.t.sol`
-- `test/script/StrategyLaunchpadScripts.t.sol`
+
+### Sleeve / valuation / exit security
+
+- `test/unit/UniversalAdapterEscrowSecurityFixes.t.sol`
+- `test/unit/UniversalAdapterEscrowValuerTrust.t.sol`
+- `test/unit/UniversalAdapterEscrowDonationAttack.t.sol`
+- `test/unit/UniversalAdapterEscrowLazyDeallocation.t.sol`
+- `test/adapters/EmergencyModeSecurityFix.t.sol`
+- `test/adapters/CachePoisoningSecurityFix.t.sol`
+- `test/adapters/YieldAccountingTest.t.sol`
+- `test/VaultTimeLockWrapper.t.sol`
 
 ### Core vault behavior
 
@@ -544,35 +512,32 @@ If audit time is limited, prioritize these:
 - `test/ExchangeRateTest.sol`
 - `test/ForceDeallocateTest.sol`
 
-### Sleeve / security / async coverage
-
-- `test/adapters/CachePoisoningSecurityFix.t.sol`
-- `test/adapters/EmergencyModeSecurityFix.t.sol`
-- `test/adapters/YieldAccountingTest.t.sol`
-- `test/unit/UniversalAdapterEscrow*.t.sol`
-- `test/VaultTimeLockWrapper.t.sol`
-
 ## Suggested audit questions
 
-1. Does `VaultV2.totalAssets()` remain correct across all adapter and queue states?
-2. Can sleeve accounting drift between `allocations`, `externalDeposits`, balance, and valuation?
-3. Are whitelist constraints sufficient for the venue call surfaces actually used by controllers?
-4. Can async withdrawals become unfair or insolvent under changing PPS / liquidity conditions?
-5. Can stale or malicious remote snapshots distort home-chain valuation?
-6. Are controller sizing / unwind assumptions robust under adversarial or broken venue data?
-7. Is the factory handoff sequence safe under partial configuration or misconfigured manifests?
+1. Does `VaultV2.totalAssets()` remain correct across idle, allocated, external, surplus, and queued-withdrawal states?
+2. Can sleeve accounting drift between `allocations`, `externalDeposits`, `settlementSurplusAssets`, and actual balances?
+3. Can a malicious or malfunctioning agent's `quoteCurrentAssets()` cause value extraction or share mispricing?
+4. Is the emergency mode fallback (tracked-asset haircut) conservative enough when all agents fail?
+5. Are controller reserve calculations always conservative when queue state changes or queue reads fail?
+6. Can DeltaNeutral async withdrawals become unfair or insolvent under changing `previewRedeem(...)`?
+7. Are PTLoop unwind and pricing assumptions robust under bad quoter output or low-liquidity markets?
+8. Are whitelist and codehash checks sufficient for the venue call surfaces actually used?
 
-## Fast walkthrough for a live review with auditors
+## Fast walkthrough for a live review
 
-If you are screensharing the codebase, the fastest verbal walkthrough is:
+For a quick auditor screenshare walkthrough:
 
-1. open `StrategyTypes.sol` to define the system vocabulary
-2. open `StrategyVaultFactory.sol` to show what gets deployed and how roles are handed off
-3. open `VaultV2.sol` to show the base vault and adapter model
-4. open `UniversalAdapterEscrow.sol` to explain sleeve accounting and valuation
-5. open the relevant controller (`DeltaNeutralController` or `PTLoopController`)
-6. open `AsyncWithdrawalQueue.sol` for non-instant exits
-7. open `RemotePpsSnapshotStore.sol` / `RemotePpsSnapshotSender.sol` for cross-chain valuation
-8. finish with the matching strategy tests
+1. open `StrategyTypes.sol`
+2. open `StrategyVaultFactory.sol`
+3. open `VaultV2.sol`
+4. open `UniversalAdapterEscrow.sol`
+5. open `UniversalAdapterEscrowValuation.sol`
+6. open `ControllerLiquidityLib.sol`
+7. open the relevant controller:
+   - `DeltaNeutralControllerBase.sol` / `DeltaNeutralController.sol`
+   - or `PTLoopController.sol`
+8. open `AsyncWithdrawalQueue.sol` for DeltaNeutral exits
+9. open `VaultTimeLockWrapper.sol` if timelock is enabled
+10. finish with `StrategyControllers.t.sol`
 
-That sequence gives an auditor the system in the same order the code executes.
+That follows the same order the system executes at runtime.

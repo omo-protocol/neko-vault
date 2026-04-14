@@ -6,6 +6,7 @@ import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockVaultV2} from "../mocks/MockVaultV2.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowDonationAttackTest
@@ -20,7 +21,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
     MockValuer public valuer;
 
     address public owner = address(this);
-    address public agent = address(0x1);
+    address public agent;
     address public attacker = address(0x2);
 
     bytes32 public constant STRATEGY_1 = keccak256("STRATEGY_1");
@@ -28,17 +29,16 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
     event AllocationUpdated(bytes32 indexed strategyId, uint256 newAllocation, int256 change);
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy mock contracts
         asset = new MockERC20("Test Asset", "TEST", 18);
         vault = new MockVaultV2(address(asset), owner);
         valuer = new MockValuer();
 
         // Deploy adapter
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Set up strategy
         vm.prank(owner);
@@ -60,7 +60,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         adapter.allocate(allocateData, existingAllocation, bytes4(0), address(0));
 
         // Set valuer to report current value
-        valuer.setReturnValue(existingAllocation);
+        MockAgent(agent).setAssets(existingAllocation);
 
         // Get baseline realAssets before attack
         uint256 realAssetsBeforeDonation = adapter.realAssets();
@@ -74,7 +74,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
 
         // NEW SECURITY MODEL: Off-chain valuer is responsible for excluding donations
         // A properly functioning off-chain valuer will NOT include donations in its report
-        valuer.setReturnValue(existingAllocation); // Valuer correctly excludes the donation
+        MockAgent(agent).setAssets(existingAllocation); // Valuer correctly excludes the donation
 
         // SECURITY FIX VERIFICATION: Donated tokens should NOT inflate realAssets
         uint256 realAssetsAfterDonation = adapter.realAssets();
@@ -110,7 +110,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         adapter.allocate(allocateData, initialAllocation, bytes4(0), address(0));
 
         // Set valuer to report current value
-        valuer.setReturnValue(initialAllocation);
+        MockAgent(agent).setAssets(initialAllocation);
 
         // Get baseline
         uint256 realAssetsBefore = adapter.realAssets();
@@ -138,7 +138,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         // - Balance in adapter: 1000e18 (900 initial + 100 donation, not pulled by vault)
         // - totalAllocations: 800e18 (900 - 100 deallocated)
         // - Off-chain valuer correctly reports only the legitimate 800e18 (excluding donation)
-        valuer.setReturnValue(initialAllocation - donationAmount); // 800e18
+        MockAgent(agent).setAssets(initialAllocation - donationAmount); // 800e18
 
         uint256 realAssetsAfter = adapter.realAssets();
         uint256 expectedRealAssets = initialAllocation - donationAmount; // 800e18
@@ -167,14 +167,14 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
         // Set valuer to report current value
-        valuer.setReturnValue(allocation);
+        MockAgent(agent).setAssets(allocation);
         uint256 realAssetsBefore = adapter.realAssets();
 
         // Donate arbitrary amount
         asset.mint(address(adapter), donation);
 
         // NEW SECURITY MODEL: Off-chain valuer correctly excludes donation
-        valuer.setReturnValue(allocation); // Valuer does NOT include donation
+        MockAgent(agent).setAssets(allocation); // Valuer does NOT include donation
 
         // Verify realAssets unchanged
         uint256 realAssetsAfter = adapter.realAssets();
@@ -196,7 +196,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
         // Set valuer to report current value
-        valuer.setReturnValue(allocation);
+        MockAgent(agent).setAssets(allocation);
 
         // Verify allocation is counted in realAssets
         uint256 realAssets = adapter.realAssets();
@@ -211,7 +211,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         adapter.allocate(allocateData2, additionalAllocation, bytes4(0), address(0));
 
         // Update valuer
-        valuer.setReturnValue(allocation + additionalAllocation);
+        MockAgent(agent).setAssets(allocation + additionalAllocation);
 
         // Verify BOTH allocations are counted
         uint256 realAssetsAfter = adapter.realAssets();
@@ -253,7 +253,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         // Valuer tracks external deposits and knows when real yield is earned
         // It reports allocation + profit because this is legitimate value increase
         uint256 expectedValue = allocation + profit;
-        valuer.setReturnValue(expectedValue);
+        MockAgent(agent).setAssets(expectedValue);
 
         // Verify profit IS counted in realAssets (not excluded as donation)
         uint256 realAssets = adapter.realAssets();

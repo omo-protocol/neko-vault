@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowBypassCircuitBreakerTest
@@ -23,11 +24,13 @@ contract UniversalAdapterEscrowBypassCircuitBreakerTest is Test {
     MockProtocol public protocol;
 
     address public owner = address(0x1);
-    address public agent = address(0x2);
+    address public agent;
 
     bytes32 public strategyId = keccak256("lp-strategy");
 
     function setUp() public {
+        agent = address(new MockAgent());
+
         asset = new MockERC20("Test Token", "TEST", 18);
         valuer = new MockValuer();
         valuer.setAsset(address(asset));
@@ -37,12 +40,8 @@ contract UniversalAdapterEscrowBypassCircuitBreakerTest is Test {
         // Create a mock vault to get owner
         vault = new MockVault(address(asset), owner);
 
-        // Deploy adapter with valuer
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        // Deploy adapter
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy with agent
         vm.prank(owner);

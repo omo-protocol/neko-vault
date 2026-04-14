@@ -136,8 +136,6 @@ contract StrategyVaultFactory is ReentrancyGuard {
         _validateCommon(
             params.owner,
             params.asset,
-            params.valuer,
-            params.useOffchainValuer,
             params.strategyIdData,
             params.absoluteCap,
             params.relativeCap
@@ -146,9 +144,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
         bytes32 strategyId = keccak256(params.strategyIdData);
         bytes32 salt = _deriveSalt(StrategyKind.DeltaNeutral, params.owner, strategyId, params.salt);
         address vaultAddress = vaultFactory.createVaultV2(address(this), params.asset, salt);
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(
-            payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
-        );
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(adapterFactory.deployAdapter(vaultAddress, salt)));
 
         DeltaNeutralController controller = DeltaNeutralController(Clones.clone(deltaNeutralControllerImplementation));
         controller.initialize(
@@ -229,8 +225,6 @@ contract StrategyVaultFactory is ReentrancyGuard {
         _validateCommon(
             params.owner,
             params.asset,
-            params.valuer,
-            params.useOffchainValuer,
             params.strategyIdData,
             params.absoluteCap,
             params.relativeCap
@@ -239,9 +233,7 @@ contract StrategyVaultFactory is ReentrancyGuard {
         bytes32 strategyId = keccak256(params.strategyIdData);
         bytes32 salt = _deriveSalt(StrategyKind.PTLoop, params.owner, strategyId, params.salt);
         address vaultAddress = vaultFactory.createVaultV2(address(this), params.asset, salt);
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(
-            payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
-        );
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(adapterFactory.deployAdapter(vaultAddress, salt)));
 
         PTLoopController controller = PTLoopController(Clones.clone(ptLoopControllerImplementation));
         controller.initialize(
@@ -395,13 +387,11 @@ contract StrategyVaultFactory is ReentrancyGuard {
     function _validateCommon(
         address owner,
         address asset,
-        address valuer,
-        bool valuerRequired,
         bytes calldata strategyIdData,
         uint256 absoluteCap,
         uint256 relativeCap
     ) internal pure {
-        if (owner == address(0) || asset == address(0) || (valuerRequired && valuer == address(0))) {
+        if (owner == address(0) || asset == address(0)) {
             revert InvalidAddress();
         }
         if (strategyIdData.length == 0 || absoluteCap == 0 || relativeCap == 0) revert InvalidConfig();

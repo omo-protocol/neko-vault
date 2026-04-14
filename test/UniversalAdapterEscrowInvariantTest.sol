@@ -6,6 +6,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {UniversalAdapterEscrow} from "../src/adapters/UniversalAdapterEscrow.sol";
 import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {ERC20Mock} from "./mocks/ERC20Mock.sol";
+import {MockAgent} from "./mocks/MockAgent.sol";
 
 // ============================================
 // MOCK CONTRACTS
@@ -272,22 +273,27 @@ contract UniversalAdapterEscrowHandler is Test {
         try escrow.reduceExternalDeposits(strategyId, newValue) {} catch {}
     }
 
-    /// @notice Sync strategy with valuer
-    function handler_syncStrategyWithValuer(uint256 strategySeed, uint256 valuerValue) external {
+    /// @notice Sync strategy external deposits via per-strategy reduction
+    function handler_syncStrategyWithValuer(uint256 strategySeed, uint256 newValue) external {
         if (activeStrategyIds.length == 0) return;
 
         bytes32 strategyId = _getStrategyId(strategySeed);
 
         if (!isStrategyActive[strategyId]) return;
 
-        // Set a reasonable valuer value - bound to prevent unrealistic increases
         uint256 currentDeposits = escrow.externalDeposits(strategyId);
-        // Max 20% increase to simulate reasonable yield
-        valuerValue = bound(valuerValue, 0, currentDeposits + (currentDeposits / 5) + 1e18);
-        valuer.setValue(strategyId, valuerValue);
+        if (currentDeposits == 0) return;
+
+        // Can only reduce, so bound newValue to [0, currentDeposits]
+        newValue = bound(newValue, 0, currentDeposits);
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = strategyId;
+        uint256[] memory vals = new uint256[](1);
+        vals[0] = newValue;
 
         vm.prank(owner);
-        try escrow.syncStrategyWithValuer(strategyId) {} catch {}
+        try escrow.syncExternalDepositsPerStrategy(ids, vals) {} catch {}
     }
 
     // ============================================
@@ -564,7 +570,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
     function setUp() public {
         // Setup actors
         owner = makeAddr("owner");
-        agent = makeAddr("agent");
+        agent = address(new MockAgent());
 
         // Deploy token
         token = new ERC20Mock(18);
@@ -579,7 +585,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         vm.label(address(valuer), "valuer");
 
         // Deploy escrow
-        escrow = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        escrow = new UniversalAdapterEscrow(address(vault));
         vm.label(address(escrow), "escrow");
 
         // Deploy external protocol
@@ -765,11 +771,6 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
     /// @notice Invariant: Asset is immutable and correct
     function invariant_assetImmutable() public view {
         assertEq(escrow.asset(), address(token), "Asset changed");
-    }
-
-    /// @notice Invariant: Valuer is immutable and correct
-    function invariant_valuerImmutable() public view {
-        assertEq(escrow.valuer(), address(valuer), "Valuer changed");
     }
 
     /// @notice Invariant: Ghost tracking matches contract state (approximate)

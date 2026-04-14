@@ -7,6 +7,7 @@ import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalA
 import {VaultV2} from "../../src/VaultV2.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title EmergencyModeSecurityFixTest
 /// @notice Tests for SECURITY FIX Issue #2: Cached Valuation Exploitation via Emergency Mode
@@ -19,6 +20,7 @@ contract EmergencyModeSecurityFixTest is Test {
 
     address public owner;
     address public agent;
+    MockAgent public mockAgent;
     address public user;
 
     bytes32 public strategyId;
@@ -30,7 +32,8 @@ contract EmergencyModeSecurityFixTest is Test {
 
     function setUp() public {
         owner = address(this);
-        agent = makeAddr("agent");
+        mockAgent = new MockAgent();
+        agent = address(mockAgent);
         user = makeAddr("user");
 
         // Deploy mock asset
@@ -43,7 +46,7 @@ contract EmergencyModeSecurityFixTest is Test {
         valuer = new MockValuer();
 
         // Deploy adapter
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), true);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy
         strategyId = keccak256("test_strategy");
@@ -66,7 +69,7 @@ contract EmergencyModeSecurityFixTest is Test {
         assertEq(adapter.emergencyModeActivatedAt(), 0);
 
         vm.expectEmit(true, true, true, true);
-        emit EmergencyModeEnabled(block.timestamp, "Valuer unavailable");
+        emit EmergencyModeEnabled(block.timestamp, "Valuation unavailable");
 
         adapter.enableEmergencyMode();
 
@@ -123,7 +126,7 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.enableEmergencyMode();
 
         // Try to disable - should fail because valuer still returns 0
-        vm.expectRevert(IUniversalAdapterEscrow.ValuerStillUnavailable.selector);
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.disableEmergencyMode();
     }
 
@@ -301,8 +304,13 @@ contract EmergencyModeSecurityFixTest is Test {
     }
 
     function _setValuerValue(uint256 value) internal {
-        // Set the ESCROW_TOTAL ID value (what realAssets() queries)
-        valuer.setValue(totalId, value);
+        // Set agent's quoteCurrentAssets return value (what realAssets() queries)
+        if (value == 0) {
+            mockAgent.setShouldFail(true);
+        } else {
+            mockAgent.setShouldFail(false);
+            mockAgent.setAssets(value);
+        }
     }
 
     function _simulateExternalDeposit(bytes32 _strategyId, uint256 amount) internal {

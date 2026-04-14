@@ -14,7 +14,7 @@ import {AdapterMock} from "./mocks/AdapterMock.sol";
 import {Test, console} from "../lib/forge-std/src/Test.sol";
 import {stdError} from "../lib/forge-std/src/StdError.sol";
 
-bytes32 constant TOTAL_ASSETS_AND_LAST_UPDATE_PACKED_SLOT = bytes32(uint256(15));
+bytes32 constant TOTAL_ASSETS_AND_LAST_UPDATE_PACKED_SLOT = bytes32(uint256(17));
 
 contract BaseTest is Test {
     address immutable owner = makeAddr("owner");

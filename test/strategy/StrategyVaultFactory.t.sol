@@ -25,7 +25,6 @@ import {
     VenueConfig
 } from "../../src/strategies/StrategyTypes.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockValuer} from "../mocks/MockValuer.sol";
 
 contract StrategyVaultFactoryTest is Test {
     bytes32 internal constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
@@ -37,7 +36,6 @@ contract StrategyVaultFactoryTest is Test {
 
     MockERC20 internal asset;
     MockERC20 internal ptAsset;
-    MockValuer internal valuer;
     MockPendleVenue internal pendleVenue;
     CoreWriter internal coreWriter;
     L1Read internal l1Read;
@@ -48,7 +46,6 @@ contract StrategyVaultFactoryTest is Test {
     function setUp() public {
         asset = new MockERC20("USD Coin", "USDC", 6);
         ptAsset = new MockERC20("Pendle PT", "PT", 6);
-        valuer = new MockValuer();
         pendleVenue = new MockPendleVenue();
         coreWriter = new CoreWriter();
         l1Read = new L1Read();
@@ -58,7 +55,7 @@ contract StrategyVaultFactoryTest is Test {
     }
 
     function testCreateDeltaNeutralVault() public {
-        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(address(valuer), false));
+        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(false));
 
         DeltaNeutralController controller = DeltaNeutralController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -87,13 +84,13 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(controller.getKellyConfig().asymmetricRebalanceThresholdBps, 7_500);
     }
 
-    function testCreateDeltaNeutralVaultAllowsZeroValuerForSameChainOnchainPricing() public {
-        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(address(0), false));
+    function testCreateDeltaNeutralVaultUsesSameChainOnchainPricing() public {
+        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(false));
         assertTrue(deployment.vault != address(0));
     }
 
     function testCreateDeltaNeutralVaultWithOptionalTimelock() public {
-        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(address(valuer), true));
+        Deployment memory deployment = childFactory.createDeltaNeutralVault(_deltaNeutralParams(true));
         IVaultV2 vault = IVaultV2(deployment.vault);
         VaultTimeLockWrapper wrapper = VaultTimeLockWrapper(deployment.wrapper);
 
@@ -105,7 +102,7 @@ contract StrategyVaultFactoryTest is Test {
     }
 
     function testCreatePTLoopVault() public {
-        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(address(valuer), false));
+        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(false));
 
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -130,13 +127,13 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(controller.maxUnwindSlippageBps(), 600);
     }
 
-    function testCreatePTLoopVaultAllowsZeroValuerForSameChainOnchainPricing() public {
-        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(address(0), false));
+    function testCreatePTLoopVaultUsesSameChainOnchainPricing() public {
+        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(false));
         assertTrue(deployment.vault != address(0));
     }
 
     function testCreatePTLoopVaultWithOptionalTimelock() public {
-        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(address(valuer), true));
+        Deployment memory deployment = childFactory.createPTLoopVault(_ptLoopParams(true));
         IVaultV2 vault = IVaultV2(deployment.vault);
         VaultTimeLockWrapper wrapper = VaultTimeLockWrapper(deployment.wrapper);
 
@@ -148,7 +145,7 @@ contract StrategyVaultFactoryTest is Test {
     }
 
     function testCreateDeltaNeutralVaultRejectsWrongVenue() public {
-        DeltaNeutralDeploymentParams memory params = _deltaNeutralParams(address(valuer), false);
+        DeltaNeutralDeploymentParams memory params = _deltaNeutralParams(false);
         params.venueConfig = VenueConfig({venueId: PENDLE_VENUE_ID, venue: address(coreWriter), helper: address(l1Read)});
 
         vm.expectRevert(DeltaNeutralControllerBase.InvalidVenue.selector);
@@ -156,25 +153,20 @@ contract StrategyVaultFactoryTest is Test {
     }
 
     function testCreatePTLoopVaultRejectsWrongVenue() public {
-        PTLoopDeploymentParams memory params = _ptLoopParams(address(valuer), false);
+        PTLoopDeploymentParams memory params = _ptLoopParams(false);
         params.venueConfig = VenueConfig({venueId: HYPERLIQUID_VENUE_ID, venue: address(coreWriter), helper: address(l1Read)});
 
         vm.expectRevert(PTLoopController.InvalidVenue.selector);
         childFactory.createPTLoopVault(params);
     }
 
-    function _deltaNeutralParams(address valuerAddress, bool enableTimelock)
-        internal
-        view
-        returns (DeltaNeutralDeploymentParams memory)
-    {
+    function _deltaNeutralParams(bool enableTimelock) internal view returns (DeltaNeutralDeploymentParams memory) {
         return DeltaNeutralDeploymentParams({
             owner: owner,
             vaultManager: owner,
             curator: curator,
             enableTimelock: enableTimelock,
             asset: address(asset),
-            valuer: valuerAddress,
             name: "Delta Neutral Vault",
             symbol: "ldn",
             strategyIdData: bytes("hyperliquid-dn"),
@@ -186,7 +178,6 @@ contract StrategyVaultFactoryTest is Test {
             absoluteCap: 1_000_000e6,
             relativeCap: 1e18,
             salt: bytes32("delta"),
-            useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: HYPERLIQUID_VENUE_ID,
                 venue: address(coreWriter),
@@ -195,11 +186,7 @@ contract StrategyVaultFactoryTest is Test {
         });
     }
 
-    function _ptLoopParams(address valuerAddress, bool enableTimelock)
-        internal
-        view
-        returns (PTLoopDeploymentParams memory)
-    {
+    function _ptLoopParams(bool enableTimelock) internal view returns (PTLoopDeploymentParams memory) {
         return PTLoopDeploymentParams({
             owner: owner,
             vaultManager: owner,
@@ -208,7 +195,6 @@ contract StrategyVaultFactoryTest is Test {
             asset: address(asset),
             market: PENDLE_MARKET,
             ptToken: address(ptAsset),
-            valuer: valuerAddress,
             name: "PT Loop Vault",
             symbol: "lpt",
             strategyIdData: bytes("pendle-loop"),
@@ -218,7 +204,6 @@ contract StrategyVaultFactoryTest is Test {
             absoluteCap: 1_000_000e6,
             relativeCap: 1e18,
             salt: bytes32("pt-loop"),
-            useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
                 venue: address(pendleVenue),

@@ -8,6 +8,7 @@ import "../mocks/MockERC20.sol";
 import "../mocks/MockValuer.sol";
 import "../mocks/MockVaultV2.sol";
 import "../mocks/MockProtocol.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title YieldAccountingTest
 /// @notice Tests for yield accounting fix (valuer-based synchronization)
@@ -20,23 +21,25 @@ contract YieldAccountingTest is Test {
     MockOnchainQuoteAgent noValuerAgent;
 
     address owner = address(this);
-    address agent = address(0x3);
+    address agent;
 
     bytes32 strategyId = keccak256("TEST_STRATEGY");
 
-    event ExternalDepositsValuerSynced(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, int256 delta);
+    event ExternalDepositSyncedPerStrategy(bytes32 indexed strategyId, uint256 oldValue, uint256 newValue, uint256 delta);
     event UnexpectedValueChange(
         bytes32 indexed strategyId, uint256 expected, uint256 actual, uint256 withdrawn, string reason
     );
 
     function setUp() public {
+        agent = address(new MockAgent());
+
         asset = new MockERC20("Test", "TEST", 18);
         valuer = new MockValuer();
         vault = new MockVaultV2(address(asset), owner);
         protocol = new MockProtocol(address(asset));
         noValuerAgent = new MockOnchainQuoteAgent();
 
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), true);
+        adapter = new UniversalAdapterEscrow(address(vault));
         vault.addAdapter(address(adapter));
         adapter.setStrategy(strategyId, agent, "", 0);
 
@@ -109,17 +112,14 @@ contract YieldAccountingTest is Test {
         // externalDeposits now = 1000 - 450 = 550 (symmetric reduction)
         assertEq(adapter.externalDeposits(strategyId), 550e18, "Immediate symmetric reduction");
 
-        // Owner manually syncs with valuer to capture yield
-        adapter.syncStrategyWithValuer(strategyId);
-
         // User deallocates 500
         vm.prank(address(vault));
         adapter.deallocate(
             abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0)), 500e18, bytes4(0), address(0)
         );
 
-        // After manual sync: now shows 750 (actual remaining with yield)
-        assertEq(adapter.externalDeposits(strategyId), 750e18, "Should sync to actual value");
+        // External deposits unchanged (symmetric reduction only, no valuer sync)
+        assertEq(adapter.externalDeposits(strategyId), 550e18, "Symmetric reduction preserved");
     }
 
     /// @notice Test 2: Yield tracking (LAZY DEALLOCATION)
@@ -150,22 +150,20 @@ contract YieldAccountingTest is Test {
         // SOLUTION 4 (Simplified): Immediate symmetric reduction gives 1000 - 90 = 910
         assertEq(adapter.externalDeposits(strategyId), 910e18, "Immediate symmetric reduction");
 
-        // Owner manually syncs with valuer to capture yield
-        adapter.syncStrategyWithValuer(strategyId);
-
         // User deallocates 100
         vm.prank(address(vault));
         adapter.deallocate(
             abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0)), 100e18, bytes4(0), address(0)
         );
 
-        assertEq(adapter.externalDeposits(strategyId), 1110e18, "Should include yield");
+        // External deposits unchanged (symmetric reduction only, no valuer sync)
+        assertEq(adapter.externalDeposits(strategyId), 910e18, "Symmetric reduction preserved");
     }
 
     /// @notice Test 3: Conservative fallback without valuer (LAZY DEALLOCATION)
     function testConservativeFallback() public {
         // Deploy adapter without valuer
-        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault));
         vault.addAdapter(address(noValuerAdapter));
         bytes32 sid = keccak256("NO_VALUER");
         noValuerAdapter.setStrategy(sid, address(noValuerAgent), "", 0);
@@ -253,10 +251,14 @@ contract YieldAccountingTest is Test {
         // SOLUTION 4 (Simplified): Immediate symmetric reduction gives 1000 - 90 = 910
         assertEq(adapter.externalDeposits(strategyId), 910e18, "After symmetric reduction");
 
-        // Owner manually syncs with valuer - expect sync event: 910 -> 800, delta = -110e18
+        // Owner manually syncs - expect sync event: 910 -> 800, delta = 110e18
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = strategyId;
+        uint256[] memory vals = new uint256[](1);
+        vals[0] = 800e18;
         vm.expectEmit(true, false, false, true);
-        emit ExternalDepositsValuerSynced(strategyId, 910e18, 800e18, -110e18);
-        adapter.syncStrategyWithValuer(strategyId);
+        emit ExternalDepositSyncedPerStrategy(strategyId, 910e18, 800e18, 110e18);
+        adapter.syncExternalDepositsPerStrategy(ids, vals);
 
         // User deallocates
         vm.prank(address(vault));
