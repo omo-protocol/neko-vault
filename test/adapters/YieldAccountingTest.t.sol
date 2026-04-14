@@ -17,6 +17,7 @@ contract YieldAccountingTest is Test {
     MockERC20 asset;
     MockValuer valuer;
     MockProtocol protocol;
+    MockOnchainQuoteAgent noValuerAgent;
 
     address owner = address(this);
     address agent = address(0x3);
@@ -33,6 +34,7 @@ contract YieldAccountingTest is Test {
         valuer = new MockValuer();
         vault = new MockVaultV2(address(asset), owner);
         protocol = new MockProtocol(address(asset));
+        noValuerAgent = new MockOnchainQuoteAgent();
 
         adapter = new UniversalAdapterEscrow(address(vault), address(valuer), true);
         vault.addAdapter(address(adapter));
@@ -166,7 +168,7 @@ contract YieldAccountingTest is Test {
         UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
         vault.addAdapter(address(noValuerAdapter));
         bytes32 sid = keccak256("NO_VALUER");
-        noValuerAdapter.setStrategy(sid, agent, "", 0);
+        noValuerAdapter.setStrategy(sid, address(noValuerAgent), "", 0);
         noValuerAdapter.updateWhitelist(
             address(protocol), bytes4(keccak256("deposit(uint256)")), true, type(uint256).max
         );
@@ -198,7 +200,7 @@ contract YieldAccountingTest is Test {
             value: 0
         });
 
-        vm.prank(agent);
+        vm.prank(address(noValuerAgent));
         noValuerAdapter.executeStrategyBypassCircuitBreaker(sid, depositCalls);
 
         // Burn idle to force protocol withdrawal
@@ -213,7 +215,7 @@ contract YieldAccountingTest is Test {
             value: 0
         });
 
-        vm.prank(agent);
+        vm.prank(address(noValuerAgent));
         noValuerAdapter.withdrawFromStrategy(sid, withdrawCalls, 450e18);
 
         // User deallocates 500
@@ -307,5 +309,11 @@ contract YieldAccountingTest is Test {
         // Should be completely withdrawn
         assertEq(adapter.externalDeposits(strategyId), 0, "Complete withdrawal");
         assertEq(adapter.totalExternalDeposits(), 0, "Total also zero");
+    }
+}
+
+contract MockOnchainQuoteAgent {
+    function quoteCurrentAssets() external pure returns (uint256 assets, bool healthy) {
+        return (0, true);
     }
 }

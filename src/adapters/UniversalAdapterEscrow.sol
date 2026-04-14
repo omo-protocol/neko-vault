@@ -41,6 +41,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     uint256 private cachedValuation;
     uint256 private cachedValuationTimestamp;
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
+    mapping(address => bytes32) private whitelistCodeHashes;
     bool public paused;
     address public owner;
     address public settlementQueue;
@@ -226,6 +227,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         external
         onlyOwner
     {
+        if (!_hasExternalValuer() && !_supportsOnchainValuationAgent(agent)) {
+            revert InvalidData();
+        }
+
         bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
         if (strategyId == escrowTotalId) {
             revert StrategyIdCollisionWithEscrowTotal();
@@ -255,6 +260,10 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     function updateWhitelist(address target, bytes4 selector, bool allowed, uint256 limit) external onlyOwner {
+        if (allowed) {
+            _validateWhitelistTarget(target);
+            whitelistCodeHashes[target] = target.codehash;
+        }
         functionWhitelist[target][selector] = WhitelistConfig({allowed: allowed, limit: limit});
 
         emit WhitelistUpdated(target, selector, allowed, limit);
@@ -693,6 +702,12 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         if (automationFlags > MAX_AUTOMATION_FLAGS) revert InvalidData();
     }
 
+    function _validateWhitelistTarget(address target) internal view {
+        if (target.code.length == 0 || _containsDelegatecallOpcode(target)) {
+            revert InvalidData();
+        }
+    }
+
     function _shouldAutoWithdraw(bytes4 caller, address initiator) internal view returns (bool) {
         if (caller == WITHDRAW_SELECTOR || caller == REDEEM_SELECTOR) {
             return true;
@@ -725,6 +740,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
                     revert FunctionNotWhitelisted();
                 }
             }
+            if (whitelistCodeHashes[call.target] != call.target.codehash) revert InvalidData();
 
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
             if (!success) {
@@ -835,10 +851,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             (bool totalSuccess, uint256 totalAssets, uint64 totalTimestamp) = _readValuerTotalValue(totalId);
 
             if (totalSuccess) {
-                bool totalHealthy = true;
-                if (healthSuccess && healthData.length >= 32) {
-                    totalHealthy = abi.decode(healthData, (bool));
-                }
+                bool totalHealthy = healthSuccess && healthData.length >= 32 && abi.decode(healthData, (bool));
                 return (true, !totalHealthy, totalAssets, totalTimestamp, false);
             }
 
@@ -882,14 +895,21 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         (totalValue, healthy) = abi.decode(data, (uint256, bool));
-        if (!healthy) {
-            return (false, false, 0, 0);
-        }
-        return (true, true, totalValue, uint64(block.timestamp));
+        return (true, healthy, totalValue, 0);
     }
 
     function _hasExternalValuer() internal view returns (bool) {
         return valuer != address(0) && valuer.code.length > 0;
+    }
+
+    function _supportsOnchainValuationAgent(address agent) internal view returns (bool) {
+        if (agent.code.length == 0) return false;
+
+        (bool success, bytes memory data) =
+            agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
+        if (success && data.length >= 64) return true;
+
+        return _containsPushedSelector(agent, IOnchainStrategyValuer.quoteCurrentAssets.selector);
     }
 
     function _aggregateActiveStrategyValues() internal view returns (bool success, uint256 totalValue) {
@@ -982,6 +1002,49 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         return (true, uint64(report.timestamp));
+    }
+
+    function _containsDelegatecallOpcode(address target) internal view returns (bool) {
+        uint256 size = target.code.length;
+        bytes memory code = new bytes(size);
+        assembly {
+            extcodecopy(target, add(code, 0x20), 0, size)
+        }
+
+        for (uint256 i; i < size; i++) {
+            uint8 opcode = uint8(code[i]);
+            if (opcode == 0xf4) {
+                return true;
+            }
+            if (opcode >= 0x60 && opcode <= 0x7f) {
+                unchecked {
+                    i += opcode - 0x5f;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    function _containsPushedSelector(address target, bytes4 selector) internal view returns (bool) {
+        bytes memory code = target.code;
+        uint256 size = code.length;
+
+        for (uint256 i; i < size; i++) {
+            uint8 opcode = uint8(code[i]);
+            if (opcode == 0x63 && i + 4 < size) {
+                bytes4 pushedSelector =
+                    bytes4(bytes.concat(code[i + 1], code[i + 2], code[i + 3], code[i + 4]));
+                if (pushedSelector == selector) return true;
+            }
+            if (opcode >= 0x60 && opcode <= 0x7f) {
+                unchecked {
+                    i += opcode - 0x5f;
+                }
+            }
+        }
+
+        return false;
     }
 
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale) {

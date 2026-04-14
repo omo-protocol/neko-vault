@@ -361,9 +361,6 @@ contract DeltaNeutralController is
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         HyperliquidLiveState memory live = _liveState();
         (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
-        if (!remoteHealthy) {
-            return (0, false);
-        }
         uint256 hedgeEquityAssets =
             live.marginSummary.accountValue > 0 ? uint256(uint64(live.marginSummary.accountValue)) : 0;
         return (

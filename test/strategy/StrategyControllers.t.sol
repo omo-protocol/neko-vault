@@ -442,6 +442,45 @@ contract StrategyControllersTest is Test {
         assertEq(sleeve.realAssets(), 957_500_000);
     }
 
+    function testPTLoopOnchainSnapshotStateDoesNotMintFreshTimestamp() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        (uint256 assetsQuoted, uint64 snapshotTimestamp, bool healthy) = sleeve.quoteSnapshotState();
+        assertEq(assetsQuoted, 957_500_000);
+        assertEq(snapshotTimestamp, 0);
+        assertFalse(healthy);
+    }
+
+    function testPTLoopRemoteSnapshotUnhealthyUsesHaircuttedLocalValue() public {
+        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
+        PTLoopController controller = PTLoopController(deployment.controller);
+        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
+        IVaultV2 vault = IVaultV2(deployment.vault);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, user);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        assertTrue(controller.sync());
+
+        assertEq(sleeve.realAssets(), 909_625_000);
+    }
+
     function testPTLoopValuationIgnoresConservativeStaticRedeemQuote() public {
         Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
@@ -544,7 +583,7 @@ contract StrategyControllersTest is Test {
             1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(requestId))
         );
 
-        composer.lzCompose(address(assetOFT), bytes32("remote-fill"), message, address(0), "");
+        composer.lzCompose(address(assetOFT), bytes32("remote-fill"), message, address(this), "");
 
         request = queue.getRequest(requestId);
         assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Claimable));
@@ -587,7 +626,7 @@ contract StrategyControllersTest is Test {
         bytes memory message = OFTComposeMsgCodec.encode(
             1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(requestId))
         );
-        composer.lzCompose(address(assetOFT), bytes32("remote-fill-2"), message, address(0), "");
+        composer.lzCompose(address(assetOFT), bytes32("remote-fill-2"), message, address(this), "");
 
         assertEq(queue.totalProtectedAssets(), 850e6);
 
@@ -646,7 +685,7 @@ contract StrategyControllersTest is Test {
             1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(999))
         );
 
-        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
 
         (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
         assertEq(requestId, 999);
@@ -671,7 +710,7 @@ contract StrategyControllersTest is Test {
             1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), hex"1234")
         );
 
-        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
 
         (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
         assertEq(requestId, 0);
@@ -695,7 +734,7 @@ contract StrategyControllersTest is Test {
         );
 
         vm.expectRevert(AsyncWithdrawalSettlementComposer.InvalidRequest.selector);
-        composer.lzCompose(address(assetOFT), bytes32("zero-settlement"), message, address(0), "");
+        composer.lzCompose(address(assetOFT), bytes32("zero-settlement"), message, address(this), "");
     }
 
     function testCrossChainSettlementComposerRetrySettlementPreservesPendingOnFailure() public {
@@ -709,7 +748,7 @@ contract StrategyControllersTest is Test {
             1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(uint256(999)))
         );
 
-        composer.lzCompose(address(assetOFT), guid, message, address(0), "");
+        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
 
         vm.expectRevert();
         composer.retrySettlement(guid);

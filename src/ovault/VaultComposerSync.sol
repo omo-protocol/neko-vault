@@ -59,6 +59,7 @@ contract VaultComposerSync is BaseVaultComposerSync {
     error UserCannotSendShares(address user);
     error UserCannotReceiveAssets(address user);
     error ZeroDestinationAmount(address oft, uint256 amountLD);
+    error InvalidExecutor(address executor);
 
     /// @notice Initializes the vault composer
     /// @param _vault VaultV2 contract address (ERC-4626 compliant)
@@ -116,20 +117,27 @@ contract VaultComposerSync is BaseVaultComposerSync {
         super._sendLocal(_oft, _sendParam, _refundAddress, _msgValue);
     }
 
-    function lzCompose(address _composeSender, bytes32 _guid, bytes calldata _message, address, bytes calldata)
+    function lzCompose(
+        address _composeSender,
+        bytes32 _guid,
+        bytes calldata _message,
+        address _executor,
+        bytes calldata
+    )
         public
         payable
         override
     {
         if (msg.sender != ENDPOINT) revert OnlyEndpoint(msg.sender);
         if (_composeSender != ASSET_OFT && _composeSender != SHARE_OFT) revert OnlyValidComposeCaller(_composeSender);
+        if (_executor == address(0)) revert InvalidExecutor(_executor);
 
         bytes32 composeFrom = _message.composeFrom();
         uint256 amount = _message.amountLD();
         bytes memory composeMsg = _message.composeMsg();
-        address refundAddress = _composeFromToAddress(composeFrom);
+        address refundAddress = _executor;
 
-        try this.handleComposeSafe{value: msg.value}(_composeSender, composeFrom, composeMsg, amount) {
+        try this.handleComposeSafe{value: msg.value}(_composeSender, composeFrom, composeMsg, amount, refundAddress) {
             emit Sent(_guid);
         } catch (bytes memory _err) {
             if (bytes4(_err) == InsufficientMsgValue.selector) {
@@ -143,20 +151,26 @@ contract VaultComposerSync is BaseVaultComposerSync {
         }
     }
 
-    function handleComposeSafe(address _oftIn, bytes32 _composeFrom, bytes memory _composeMsg, uint256 _amount)
+    function handleComposeSafe(
+        address _oftIn,
+        bytes32 _composeFrom,
+        bytes memory _composeMsg,
+        uint256 _amount,
+        address _refundAddress
+    )
         external
         payable
     {
         if (msg.sender != address(this)) revert OnlySelf(msg.sender);
+        if (_refundAddress == address(0)) revert InvalidExecutor(_refundAddress);
 
         (SendParam memory sendParam, uint256 minMsgValue) = abi.decode(_composeMsg, (SendParam, uint256));
         if (msg.value < minMsgValue) revert InsufficientMsgValue(minMsgValue, msg.value);
 
-        address refundAddress = _composeFromToAddress(_composeFrom);
         if (_oftIn == ASSET_OFT) {
-            _depositAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
+            _depositAndSend(_composeFrom, _amount, sendParam, _refundAddress, msg.value);
         } else {
-            _redeemAndSend(_composeFrom, _amount, sendParam, refundAddress, msg.value);
+            _redeemAndSend(_composeFrom, _amount, sendParam, _refundAddress, msg.value);
         }
     }
 

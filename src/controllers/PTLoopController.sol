@@ -255,16 +255,15 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         assets = IERC20(asset).balanceOf(address(sleeve));
         (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
-        if (!remoteHealthy) return (0, false);
 
         uint256 ptBalance = IERC20(ptToken).balanceOf(address(sleeve));
         if (ptBalance == 0) return (assets + remoteAssets, remoteHealthy);
 
         uint256 rate = IPendleStaticQuoter(helper).getPtToAssetRate(market);
-        if (rate == 0) return (0, false);
+        if (rate == 0) return (assets + remoteAssets, false);
 
         uint256 ptAssets = ptBalance * rate / WAD;
-        return (assets + ptAssets + remoteAssets, true);
+        return (assets + ptAssets + remoteAssets, remoteHealthy);
     }
 
     function quoteUnloopForAssets(uint256 requestedAssets) public view returns (PTLoopUnloopQuote memory quote) {
