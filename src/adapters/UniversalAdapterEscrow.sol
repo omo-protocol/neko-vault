@@ -200,28 +200,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
         uint256 withdrawnAmount = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
 
-        if (withdrawnAmount > 0) {
-            uint256 oldExtDeposits = externalDeposits[strategyId];
-            uint256 reduction = withdrawnAmount;
-
-            if (reduction > oldExtDeposits) {
-                reduction = oldExtDeposits;
-            }
-            if (reduction > totalExternalDeposits) {
-                reduction = totalExternalDeposits;
-            }
-
-            if (reduction > 0) {
-                externalDeposits[strategyId] = oldExtDeposits - reduction;
-                totalExternalDeposits -= reduction;
-
-                emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
-
-                if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-                    _removeFromActiveStrategies(strategyId);
-                }
-            }
-        }
+        _recordWithdrawnAssets(strategyId, withdrawnAmount);
 
         if (minBalanceIncrease > 0) {
             require(withdrawnAmount >= minBalanceIncrease, "Slippage: insufficient balance increase");
@@ -274,29 +253,10 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         }
 
         uint256 withdrawnAmount = balanceAfter - balanceBefore;
+        _recordWithdrawnAssets(strategyId, withdrawnAmount);
 
         if (withdrawnAmount < minBalanceIncrease) {
             revert SlippageTooHigh();
-        }
-
-        uint256 oldExtDeposits = externalDeposits[strategyId];
-        uint256 reduction = withdrawnAmount;
-
-        if (reduction > oldExtDeposits) {
-            reduction = oldExtDeposits;
-        }
-        if (reduction > totalExternalDeposits) {
-            reduction = totalExternalDeposits;
-        }
-        if (reduction > 0) {
-            externalDeposits[strategyId] = oldExtDeposits - reduction;
-            totalExternalDeposits -= reduction;
-
-            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
-
-            if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-                _removeFromActiveStrategies(strategyId);
-            }
         }
 
         emit StrategyWithdrawn(strategyId, withdrawnAmount, msg.sender);
@@ -334,7 +294,10 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         if (settlementQueue != address(0) && settlementQueue != settlementQueue_) {
             if (_queueProtectedAssets(settlementQueue) != 0) revert InvalidData();
         }
+        bytes32 queueStrategyId = ISettlementQueueValidation(settlementQueue_).strategyId();
         if (
+            queueStrategyId == bytes32(0)
+                || 
             ISettlementQueueValidation(settlementQueue_).vault() != parentVault
                 || ISettlementQueueValidation(settlementQueue_).sleeve() != address(this)
         ) {
@@ -355,7 +318,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         }
 
         if (reduction == 0) {
-            cachedValuationTimestamp = 0;
+            _markValuationDirty();
             if (allocations[strategyId] == 0) {
                 _removeFromActiveStrategies(strategyId);
                 SafeERC20Lib.safeTransfer(asset, parentVault, assetsReceived);
@@ -380,7 +343,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
             settlementSurplusAssets += surplus;
         }
 
-        cachedValuationTimestamp = 0;
+        _markValuationDirty();
 
         emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
         emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);

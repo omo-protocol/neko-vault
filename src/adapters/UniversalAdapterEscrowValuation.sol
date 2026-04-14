@@ -75,6 +75,7 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
             }
 
             emit ExternalDepositsValuerSynced(strategyId, trackedValue, valuerValue, delta);
+            _markValuationDirty();
 
             if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
                 _removeFromActiveStrategies(strategyId);
@@ -113,6 +114,7 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
         }
 
         totalExternalDeposits -= totalDelta;
+        _markValuationDirty();
 
         uint256 balance = IERC20(asset).balanceOf(address(this));
         uint256 newMinKnown = balance + totalExternalDeposits;
@@ -143,8 +145,6 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
             }
         }
 
-        cachedValuationTimestamp = 0;
-
         emit ExternalDepositsSyncedBatch(msg.sender, totalDelta, totalExternalDeposits);
     }
 
@@ -163,6 +163,7 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
 
         require(delta <= totalExternalDeposits, "Invariant: delta exceeds total");
         totalExternalDeposits -= delta;
+        _markValuationDirty();
 
         if (allocations[strategyId] == 0 && newPerStrategy == 0) {
             _removeFromActiveStrategies(strategyId);
@@ -173,13 +174,13 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
 
     /// @notice Refresh cached valuation from the active valuation source
     function refreshCachedValuation() external {
-        (bool hasValue,, uint256 totalValue) = _resolveCurrentValuation();
+        (bool hasValue,, uint256 totalValue,, bool fromOnchain) = _resolveSnapshotValuation();
 
         if (!hasValue) {
             revert("Valuation unavailable");
         }
 
-        if (totalAllocations > 0) {
+        if (!fromOnchain && totalAllocations > 0) {
             require(totalValue >= (totalAllocations * 75) / 100, "Valuation too low");
             require(totalValue <= (totalAllocations * 150) / 100, "Valuation too high");
         }
@@ -200,13 +201,8 @@ abstract contract UniversalAdapterEscrowValuation is UniversalAdapterEscrowInter
     function _quoteSnapshotState() internal view returns (uint256 assets, uint64 snapshotTimestamp, bool healthy) {
         uint256 balance = IERC20(asset).balanceOf(address(this));
         (, uint256 trackedSurplus, uint256 trackedAssets) = _trackedAssets(balance);
-        (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 valuationTimestamp, bool fromOnchain) =
+        (bool hasValue, bool hasStaleData, uint256 totalValue, uint64 valuationTimestamp,) =
             _resolveSnapshotValuation();
-        uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
-
-        if (fromOnchain && !AdapterAccountingLib.withinLiveValuationBounds(totalValue, valuationBase)) {
-            return (trackedAssets, 0, false);
-        }
 
         if (!hasValue) {
             return (totalAllocations == 0 ? trackedSurplus : trackedAssets, 0, false);

@@ -277,6 +277,31 @@ contract StrategyControllersTest is Test {
         assertEq(request.sharesEscrowed, unlockedShares / 2);
     }
 
+    function testTimelockWrapperCanUnwrapToApprovalForAsyncQueueFlows() public {
+        Deployment memory deployment = _deployDeltaNeutral(true);
+        VaultTimeLockWrapper wrapper = VaultTimeLockWrapper(deployment.wrapper);
+        IVaultV2 vault = IVaultV2(deployment.vault);
+        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
+
+        _mockCustomHyperliquidReads(deployment.sleeve, 100_000_000, 100_000_000, 0, 0, 0, 1_000_000_000, 100_000_000);
+
+        asset.mint(user, 1_000e6);
+        vm.startPrank(user);
+        asset.approve(address(wrapper), type(uint256).max);
+        wrapper.deposit(1_000e6);
+        vm.warp(block.timestamp + wrapper.LOCK_PERIOD());
+
+        uint256 unlockedShares = wrapper.balanceOf(user);
+        wrapper.unwrapToApproval(unlockedShares, address(queue), user);
+        uint256 requestId = queue.requestRedeemFrom(address(wrapper), unlockedShares / 2, user);
+        vm.stopPrank();
+
+        WithdrawalRequest memory request = queue.getRequest(requestId);
+        assertEq(vault.balanceOf(address(wrapper)), unlockedShares / 2);
+        assertEq(request.owner, user);
+        assertEq(request.sharesEscrowed, unlockedShares / 2);
+    }
+
     function testDeltaNeutralSameChainWithdrawUsesAsyncQueue() public {
         Deployment memory deployment = _deployDeltaNeutral(false);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -362,7 +387,7 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
-    function testPTLoopAutomatesLoopingAndSupportsDirectUserExitUnwinds() public {
+    function testPTLoopAutomatesLoopingAndRequiresAsyncQueueForLargeUserExits() public {
         Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -383,12 +408,13 @@ contract StrategyControllersTest is Test {
         assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
 
         vm.prank(user);
+        vm.expectRevert();
         vault.withdraw(700e6, user, user);
 
-        assertEq(asset.balanceOf(user), 700e6);
-        assertLt(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
         assertEq(asset.balanceOf(address(vault)), 0);
-        assertLt(asset.balanceOf(deployment.sleeve), 150e6);
+        assertEq(asset.balanceOf(deployment.sleeve), 150e6);
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
@@ -451,7 +477,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testValuerSnapshotOverridesOnchainQuoteWhenConfigured() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(address(valuer));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(valuer), true);
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -581,6 +607,10 @@ contract StrategyControllersTest is Test {
     }
 
     function _deployPTLoopWithValuer(address valuerAddress) internal returns (Deployment memory) {
+        return _deployPTLoopWithValuer(valuerAddress, false);
+    }
+
+    function _deployPTLoopWithValuer(address valuerAddress, bool useOffchainValuer) internal returns (Deployment memory) {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
             vaultManager: owner,
@@ -599,7 +629,7 @@ contract StrategyControllersTest is Test {
             absoluteCap: 1_000_000e6,
             relativeCap: 1e18,
             salt: bytes32("pt-loop"),
-            useOffchainValuer: false,
+            useOffchainValuer: useOffchainValuer,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
                 venue: address(pendleRouter),

@@ -26,9 +26,6 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
     }
 
     function _shouldAutoWithdraw(bytes4 caller, address initiator) internal view returns (bool) {
-        if (caller == WITHDRAW_SELECTOR || caller == REDEEM_SELECTOR) {
-            return true;
-        }
         return caller == DEALLOCATE_SELECTOR && _isAllocator(initiator);
     }
 
@@ -82,22 +79,7 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         if (balanceAfter <= balanceBefore) revert InvalidAmount();
 
         uint256 withdrawnAmount = balanceAfter - balanceBefore;
-        uint256 oldExtDeposits = externalDeposits[strategyId];
-        uint256 reduction = withdrawnAmount;
-
-        if (reduction > oldExtDeposits) reduction = oldExtDeposits;
-        if (reduction > totalExternalDeposits) reduction = totalExternalDeposits;
-
-        if (reduction > 0) {
-            externalDeposits[strategyId] = oldExtDeposits - reduction;
-            totalExternalDeposits -= reduction;
-
-            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
-
-            if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-                _removeFromActiveStrategies(strategyId);
-            }
-        }
+        _recordWithdrawnAssets(strategyId, withdrawnAmount);
 
         if (withdrawnAmount < shortfallAssets) revert SlippageTooHigh();
     }
@@ -111,14 +93,7 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
     }
 
     function _resolveCurrentValuation() internal view returns (bool hasValue, bool hasStaleData, uint256 totalValue) {
-        uint256 balance = IERC20(asset).balanceOf(address(this));
-        (,, uint256 trackedAssets) = _trackedAssets(balance);
-        bool fromOnchain;
-        (hasValue, hasStaleData, totalValue,, fromOnchain) = _resolveSnapshotValuation();
-        uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
-        if (fromOnchain && !AdapterAccountingLib.withinLiveValuationBounds(totalValue, valuationBase)) {
-            return (false, false, 0);
-        }
+        (hasValue, hasStaleData, totalValue,,) = _resolveSnapshotValuation();
     }
 
     function _resolveSnapshotValuation()
@@ -129,17 +104,18 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         if (_hasExternalValuer()) {
             (bool healthSuccess, bytes memory healthData) =
                 valuer.staticcall(abi.encodeWithSignature("isValuationHealthy(address)", address(this)));
+            (bool healthDecoded, bool healthValue) = _safeDecodeBool(healthData);
 
             bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(this)));
             (bool totalSuccess, uint256 totalAssets, uint64 totalTimestamp) = _readValuerTotalValue(totalId);
 
             if (totalSuccess) {
-                bool totalHealthy = healthSuccess && healthData.length >= 32 && abi.decode(healthData, (bool));
+                bool totalHealthy = healthSuccess && healthDecoded && healthValue;
                 return (true, !totalHealthy, totalAssets, totalTimestamp, false);
             }
 
-            if (healthSuccess && healthData.length >= 32) {
-                hasStaleData = !abi.decode(healthData, (bool));
+            if (healthSuccess && healthDecoded) {
+                hasStaleData = !healthValue;
                 (hasValue, totalValue, snapshotTimestamp) = _aggregateActiveStrategyValuesWithTimestamp();
                 if (hasValue) {
                     return (hasValue, hasStaleData, totalValue, snapshotTimestamp, false);
@@ -166,31 +142,39 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         returns (bool success, bool healthy, uint256 totalValue, uint64 snapshotTimestamp)
     {
         bytes32[] memory strategyIds = activeStrategies.values();
-        if (strategyIds.length != 1) {
+        if (strategyIds.length == 0) {
             return (false, false, 0, 0);
         }
 
-        address agent = strategies[strategyIds[0]].agent;
-        (bool valuationSuccess, bytes memory data) =
-            agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
-        if (!valuationSuccess || data.length < 64) {
-            return (false, false, 0, 0);
+        healthy = true;
+
+        for (uint256 i = 0; i < strategyIds.length; i++) {
+            address agent = strategies[strategyIds[i]].agent;
+            (bool valuationSuccess, bool strategyHealthy, uint256 strategyValue) = _quoteOnchainStrategyValue(agent);
+            if (!valuationSuccess) {
+                return (false, false, 0, 0);
+            }
+
+            totalValue += strategyValue;
+            if (!strategyHealthy) {
+                healthy = false;
+            }
         }
 
-        (totalValue, healthy) = abi.decode(data, (uint256, bool));
         return (true, healthy, totalValue, 0);
     }
 
     function _hasExternalValuer() internal view returns (bool) {
-        return valuer != address(0) && valuer.code.length > 0;
+        return useOffchainValuer && valuer != address(0) && valuer.code.length > 0;
     }
 
     function _supportsOnchainValuationAgent(address agent) internal view returns (bool) {
-        if (agent.code.length == 0) return false;
+        if (agent == address(0) || agent == address(this) || agent == parentVault || agent.code.length == 0) {
+            return false;
+        }
 
-        (bool success, bytes memory data) =
-            agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
-        if (success && data.length >= 64) return true;
+        (bool success,,) = _quoteOnchainStrategyValue(agent);
+        if (success) return true;
 
         if (agent.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector)) return true;
 
@@ -223,7 +207,7 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
             }
 
             (bool timestampSuccess, uint64 reportTimestamp) = _getValuerReportTimestamp(strategyIds[i]);
-            if (!timestampSuccess || reportTimestamp == 0) {
+            if (!timestampSuccess || reportTimestamp == 0 || reportTimestamp < minExternalValuationTimestamp) {
                 return (false, 0, 0);
             }
             if (reportTimestamp < snapshotTimestamp) {
@@ -249,13 +233,9 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
 
         totalValue = abi.decode(data, (uint256));
         (bool timestampSuccess, uint64 reportTimestamp) = _getValuerReportTimestamp(totalId);
-        if (!timestampSuccess) {
-            if (totalValue == 0) {
-                return (false, 0, 0);
-            }
+        if (!timestampSuccess || reportTimestamp == 0 || reportTimestamp < minExternalValuationTimestamp) {
             return (true, totalValue, 0);
         }
-
         return (true, totalValue, reportTimestamp);
     }
 
@@ -293,6 +273,78 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
         if (whitelistCodeHashes[call.target] != call.target.codehash) revert InvalidData();
     }
 
+    function _quoteOnchainStrategyValue(address agent)
+        internal
+        view
+        returns (bool success, bool healthy, uint256 totalValue)
+    {
+        (bool valuationSuccess, bytes memory data) =
+            agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
+        if (!valuationSuccess || data.length < 64) {
+            return (false, false, 0);
+        }
+
+        uint256 rawHealthy;
+        assembly {
+            totalValue := mload(add(data, 0x20))
+            rawHealthy := mload(add(data, 0x40))
+        }
+        if (rawHealthy > 1) {
+            return (false, false, 0);
+        }
+        healthy = rawHealthy == 1;
+        return (true, healthy, totalValue);
+    }
+
+    function _safeDecodeBool(bytes memory data) internal pure returns (bool success, bool value) {
+        if (data.length != 32) {
+            return (false, false);
+        }
+
+        uint256 raw;
+        assembly {
+            raw := mload(add(data, 0x20))
+        }
+        if (raw > 1) {
+            return (false, false);
+        }
+        return (true, raw == 1);
+    }
+
+    function _markValuationDirty() internal {
+        minExternalValuationTimestamp = uint64(block.timestamp);
+        cachedValuationTimestamp = 0;
+    }
+
+    function _recordWithdrawnAssets(bytes32 strategyId, uint256 withdrawnAmount) internal {
+        if (withdrawnAmount == 0) return;
+
+        uint256 oldExtDeposits = externalDeposits[strategyId];
+        uint256 reduction = withdrawnAmount > oldExtDeposits ? oldExtDeposits : withdrawnAmount;
+        if (reduction > totalExternalDeposits) {
+            reduction = totalExternalDeposits;
+        }
+
+        if (reduction > 0) {
+            externalDeposits[strategyId] = oldExtDeposits - reduction;
+            totalExternalDeposits -= reduction;
+            emit ExternalDepositsReduced(strategyId, oldExtDeposits, externalDeposits[strategyId], reduction);
+        }
+
+        uint256 surplus = withdrawnAmount - reduction;
+        if (surplus > 0) {
+            settlementSurplusAssets += surplus;
+        }
+
+        if (reduction > 0 || surplus > 0) {
+            _markValuationDirty();
+        }
+
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
+    }
+
     function _recordMulticallBalanceChange(
         bytes32 strategyId,
         uint256 balanceBefore,
@@ -307,8 +359,18 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
 
         if (balanceAfter < balanceBefore) {
             uint256 deposited = balanceBefore - balanceAfter;
-            externalDeposits[strategyId] += deposited;
-            totalExternalDeposits += deposited;
+            uint256 surplusConsumed = deposited > settlementSurplusAssets ? settlementSurplusAssets : deposited;
+            if (surplusConsumed > 0) {
+                settlementSurplusAssets -= surplusConsumed;
+                deposited -= surplusConsumed;
+            }
+            if (deposited > 0) {
+                externalDeposits[strategyId] += deposited;
+                totalExternalDeposits += deposited;
+            }
+            if (surplusConsumed > 0 || deposited > 0) {
+                _markValuationDirty();
+            }
         }
         if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
             _removeFromActiveStrategies(strategyId);

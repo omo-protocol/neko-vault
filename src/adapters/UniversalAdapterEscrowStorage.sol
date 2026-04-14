@@ -32,6 +32,7 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     address public parentVault;
     address public asset;
     address public valuer;
+    bool public useOffchainValuer;
     bool private _initialized;
     /* STORAGE */
     mapping(bytes32 => StrategyConfig) public strategies;
@@ -41,6 +42,7 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     mapping(bytes32 => uint256) public externalDeposits;
     uint256 public totalExternalDeposits;
     uint256 public settlementSurplusAssets;
+    uint64 public minExternalValuationTimestamp;
     uint256 internal cachedValuation;
     uint256 internal cachedValuationTimestamp;
     mapping(address => mapping(bytes4 => WhitelistConfig)) public functionWhitelist;
@@ -98,6 +100,7 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
         _initialized = true;
         parentVault = _parentVault;
         valuer = _valuer;
+        useOffchainValuer = _useOffchainValuer;
         asset = IVaultV2(_parentVault).asset();
         owner = IVaultV2(_parentVault).owner();
 

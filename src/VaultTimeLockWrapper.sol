@@ -162,8 +162,6 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     function _depositInternal(uint256 assets, address from, address to) internal returns (uint256 vTokens) {
         if (assets == 0) revert ZeroAmount();
         if (to == address(0)) revert ZeroAddress();
-
-        // SECURITY FIX: Check batch limit to prevent DoS
         if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Pull assets from caller
@@ -179,7 +177,6 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         // Mint vTokens 1:1 with vault shares
         vTokens = shares;
 
-        // Create new deposit batch
         userDeposits[to].push(DepositBatch({amount: vTokens, depositTime: block.timestamp}));
 
         // Mint receipt tokens
@@ -193,8 +190,6 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
      */
     function mint(uint256 shares) external nonReentrant returns (uint256 assets) {
         if (shares == 0) revert ZeroAmount();
-
-        // SECURITY FIX: Check batch limit
         if (userDeposits[msg.sender].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Calculate required assets
@@ -206,7 +201,6 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
         vault.mint(shares, address(this));
 
-        // Create deposit batch and mint vTokens
         userDeposits[msg.sender].push(DepositBatch({amount: shares, depositTime: block.timestamp}));
 
         _mint(msg.sender, shares);
@@ -548,8 +542,6 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
 
         // Transfer deposit batches (oldest first, preserving timestamps)
         DepositBatch[] storage fromDeposits = userDeposits[from];
-        DepositBatch[] storage toDeposits = userDeposits[to];
-
         uint256 remaining = amount;
         uint256 batchesConsumed = 0;
 
@@ -561,26 +553,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
             // SECURITY FIX: Merge batches with same depositTime to prevent transfer spam DoS
             // Without this fix, an attacker could fill a victim's batch array (max 100)
             // with tiny transfers, blocking the victim from receiving vTokens
-            bool merged = false;
-            if (toDeposits.length > 0) {
-                DepositBatch storage lastBatch = toDeposits[toDeposits.length - 1];
-                if (lastBatch.depositTime == sourceBatch.depositTime) {
-                    lastBatch.amount += transferAmount;
-                    merged = true;
-                }
-            }
-
-            if (!merged) {
-                // SECURITY FIX: Check batch limit only when creating NEW batch
-                if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
-
-                toDeposits.push(
-                    DepositBatch({
-                        amount: transferAmount,
-                        depositTime: sourceBatch.depositTime // Preserve original deposit time
-                    })
-                );
-            }
+            _appendOrMergeBatch(to, transferAmount, sourceBatch.depositTime);
 
             if (sourceBatch.amount <= remaining) {
                 remaining -= sourceBatch.amount;
@@ -597,6 +570,21 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         }
 
         emit Transfer(from, to, amount);
+    }
+
+    function _appendOrMergeBatch(address user, uint256 amount, uint256 depositTime) internal {
+        DepositBatch[] storage deposits = userDeposits[user];
+
+        for (uint256 i = deposits.length; i > 0; i--) {
+            DepositBatch storage batch = deposits[i - 1];
+            if (batch.depositTime == depositTime) {
+                batch.amount += amount;
+                return;
+            }
+        }
+
+        if (deposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
+        deposits.push(DepositBatch({amount: amount, depositTime: depositTime}));
     }
 
     /**

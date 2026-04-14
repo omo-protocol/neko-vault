@@ -127,7 +127,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
     }
 
-    function test_deallocate_UserExitSelectorTriggersAutoWithdrawal() public {
+    function test_deallocate_UserExitSelectorDoesNotTriggerAutoWithdrawal() public {
         uint256 allocAmount = 100e18;
         MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
 
@@ -154,13 +154,16 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         bytes4 withdrawSelector = bytes4(keccak256("withdraw(uint256,address,address)"));
 
         vm.prank(address(vault));
+        vm.expectRevert(
+            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 60e18, 80e18)
+        );
         adapter.deallocate(deallocData, 80e18, withdrawSelector, address(0));
 
-        assertEq(protocol.balanceOf(address(adapter)), 20e18);
-        assertEq(asset.balanceOf(address(adapter)), 80e18);
+        assertEq(protocol.balanceOf(address(adapter)), 40e18);
+        assertEq(asset.balanceOf(address(adapter)), 60e18);
     }
 
-    function test_deallocate_RedeemSelectorTriggersAutoWithdrawal() public {
+    function test_deallocate_RedeemSelectorDoesNotTriggerAutoWithdrawal() public {
         uint256 allocAmount = 100e18;
         MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
 
@@ -187,10 +190,13 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         bytes4 redeemSelector = bytes4(keccak256("redeem(uint256,address,address)"));
 
         vm.prank(address(vault));
+        vm.expectRevert(
+            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 50e18, 75e18)
+        );
         adapter.deallocate(deallocData, 75e18, redeemSelector, address(0));
 
-        assertEq(protocol.balanceOf(address(adapter)), 25e18);
-        assertEq(asset.balanceOf(address(adapter)), 75e18);
+        assertEq(protocol.balanceOf(address(adapter)), 50e18);
+        assertEq(asset.balanceOf(address(adapter)), 50e18);
     }
 
     /// @notice Test deallocate ignores withdrawCalls (backward compatibility)

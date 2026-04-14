@@ -97,15 +97,31 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
     }
 
     function requestRedeem(uint256 shares, address receiver) public nonReentrant returns (uint256 requestId) {
+        return _requestRedeem(msg.sender, msg.sender, shares, receiver);
+    }
+
+    function requestRedeemFrom(address shareOwner, uint256 shares, address receiver)
+        external
+        nonReentrant
+        returns (uint256 requestId)
+    {
+        return _requestRedeem(shareOwner, msg.sender, shares, receiver);
+    }
+
+    function _requestRedeem(address shareOwner, address requestOwner, uint256 shares, address receiver)
+        internal
+        returns (uint256 requestId)
+    {
         if (shares == 0 || receiver == address(0)) revert InvalidAmount();
+        if (shareOwner == address(0) || requestOwner == address(0)) revert InvalidAddress();
 
         requestId = nextRequestId++;
         uint256 assetEstimate = vault.previewRedeem(shares);
         uint256 reservedLocalAssets = _reserveLocalLiquidity(assetEstimate);
-        IERC20(address(vault)).transferFrom(msg.sender, address(this), shares);
+        IERC20(address(vault)).transferFrom(shareOwner, address(this), shares);
 
         _requests[requestId] = WithdrawalRequest({
-            owner: msg.sender,
+            owner: requestOwner,
             receiver: receiver,
             sharesEscrowed: shares,
             assetEstimate: assetEstimate,

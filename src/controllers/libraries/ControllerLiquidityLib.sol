@@ -15,7 +15,7 @@ library ControllerLiquidityLib {
 
         (bool success, bytes memory data) =
             queue.staticcall(abi.encodeWithSelector(IWithdrawalReserveSource.totalProtectedAssets.selector));
-        if (!success || data.length < 32) return 0;
+        if (!success || data.length < 32) return type(uint256).max;
         return abi.decode(data, (uint256));
     }
 
