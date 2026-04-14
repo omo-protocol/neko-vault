@@ -37,13 +37,14 @@ contract StrategyVaultFactoryTest is Test {
     bytes32 internal constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
     bytes32 internal constant PENDLE_VENUE_ID = keccak256("PENDLE");
     address internal constant PENDLE_MARKET = address(0xBEEF);
-    address internal constant PENDLE_PT = address(0xCAFE);
 
     address internal owner = makeAddr("owner");
     address internal curator = makeAddr("curator");
 
     MockERC20 internal asset;
+    MockERC20 internal ptAsset;
     MockValuer internal valuer;
+    MockPendleVenue internal pendleVenue;
     MockAssetOFTView internal assetOFT;
     MockEndpointV2 internal endpoint;
     AssetOFT internal omnichainAssetOFT;
@@ -55,7 +56,9 @@ contract StrategyVaultFactoryTest is Test {
 
     function setUp() public {
         asset = new MockERC20("USD Coin", "USDC", 6);
+        ptAsset = new MockERC20("Pendle PT", "PT", 6);
         valuer = new MockValuer();
+        pendleVenue = new MockPendleVenue();
         assetOFT = new MockAssetOFTView(address(asset), address(this));
         endpoint = new MockEndpointV2(30_184);
         omnichainAssetOFT = new AssetOFT("Omnichain USDC", "oUSDC", address(endpoint), address(this));
@@ -331,7 +334,7 @@ contract StrategyVaultFactoryTest is Test {
 
         vm.prank(address(endpoint));
         vm.expectRevert(abi.encodeWithSelector(VaultComposerSync.InvalidComposeFrom.selector, invalidComposeFrom));
-        composer.lzCompose(address(omnichainAssetOFT), bytes32("compose"), message, address(0), "");
+        composer.lzCompose(address(omnichainAssetOFT), bytes32("compose"), message, address(this), "");
     }
 
     function testCreateDeltaNeutralVaultRejectsTimelockWithOmnichainVault() public {
@@ -411,7 +414,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: false,
             asset: address(asset),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(valuer),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -425,8 +428,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeAndRemoteManifest()
@@ -443,7 +446,7 @@ contract StrategyVaultFactoryTest is Test {
         assertEq(deployment.wrapper, address(0));
         assertEq(childFactory.timeLockWrapperOf(deployment.vault), address(0));
         assertEq(controller.market(), PENDLE_MARKET);
-        assertEq(controller.ptToken(), PENDLE_PT);
+        assertEq(controller.ptToken(), address(ptAsset));
         assertEq(IVaultV2(deployment.vault).liquidityAdapter(), deployment.sleeve);
         assertEq(childFactory.shareOFTAdapterOf(deployment.vault), address(0));
         assertEq(childFactory.vaultComposerSyncOf(deployment.vault), address(0));
@@ -463,7 +466,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: true,
             asset: address(omnichainAssetOFT),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(valuer),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -477,8 +480,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeAndRemoteManifestWithAssetOFT(address(omnichainAssetOFT))
@@ -497,7 +500,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: false,
             asset: address(asset),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(0),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -511,8 +514,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeAndRemoteManifest()
@@ -531,7 +534,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: true,
             asset: address(omnichainAssetOFT),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(valuer),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -545,8 +548,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeAndRemoteManifestWithAssetOFT(address(omnichainAssetOFT))
@@ -568,7 +571,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: true,
             asset: address(omnichainAssetOFT),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(valuer),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -582,8 +585,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeAndRemoteManifestMissingShareOFT(address(omnichainAssetOFT))
@@ -602,7 +605,7 @@ contract StrategyVaultFactoryTest is Test {
             enableOmnichainVault: false,
             asset: address(asset),
             market: PENDLE_MARKET,
-            ptToken: PENDLE_PT,
+            ptToken: address(ptAsset),
             valuer: address(valuer),
             name: "PT Loop Vault",
             symbol: "lpt",
@@ -616,8 +619,8 @@ contract StrategyVaultFactoryTest is Test {
             useOffchainValuer: false,
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
-                venue: address(0x2001),
-                helper: address(0x2002),
+                venue: address(pendleVenue),
+                helper: address(pendleVenue),
                 usesLayerZero: true
             }),
             chainManifests: _homeManifest()
@@ -811,5 +814,11 @@ contract MockEndpointV2 {
 
     function setDelegate(address newDelegate) external {
         delegate = newDelegate;
+    }
+}
+
+contract MockPendleVenue {
+    function getPtToAssetRate(address) external pure returns (uint256) {
+        return 1e18;
     }
 }

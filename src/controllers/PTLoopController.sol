@@ -8,9 +8,9 @@ import {IERC20} from "../interfaces/IERC20.sol";
 import {
     IAutomatedWithdrawalController,
     IOnchainStrategyValuer,
-    IRemotePpsSnapshotStore,
-    IWithdrawalReserveSource
+    IRemotePpsSnapshotStore
 } from "./StrategyControllerInterfaces.sol";
+import {ControllerLiquidityLib} from "./libraries/ControllerLiquidityLib.sol";
 import {
     PendleLib,
     IPendleStaticQuoter,
@@ -28,6 +28,7 @@ import {
 } from "../strategies/StrategyTypes.sol";
 
 contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IOnchainStrategyValuer {
+    using ControllerLiquidityLib for address;
     uint256 internal constant BPS = 10_000;
     uint256 internal constant WAD = 1e18;
 
@@ -150,32 +151,21 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     }
 
     function reserveTarget(uint256 totalAssets) public view returns (uint256) {
-        return totalAssets * targetReserveBps / BPS;
+        return ControllerLiquidityLib.reserveTarget(totalAssets, targetReserveBps);
     }
 
     function protectedWithdrawalLiquidity() public view returns (uint256 assets) {
-        address queue = _settlementQueue();
-        if (queue == address(0)) return 0;
-
-        (bool success, bytes memory data) =
-            queue.staticcall(abi.encodeWithSelector(IWithdrawalReserveSource.totalProtectedAssets.selector));
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
+        return address(sleeve).protectedWithdrawalLiquidity();
     }
 
     function requiredLocalLiquidity(uint256 totalAssets) public view returns (uint256) {
-        uint256 targetReserve = reserveTarget(totalAssets);
-        uint256 protectedAssets = protectedWithdrawalLiquidity();
-        return targetReserve > protectedAssets ? targetReserve : protectedAssets;
+        return ControllerLiquidityLib.requiredLocalLiquidity(address(sleeve), totalAssets, targetReserveBps);
     }
 
     function availableToAllocate(uint256 idleAssets, uint256 totalAssets) public view returns (uint256) {
-        uint256 requiredLiquidity = requiredLocalLiquidity(totalAssets);
-        uint256 totalLiquidAssets = IERC20(asset).balanceOf(address(vault)) + idleAssets;
-        if (totalLiquidAssets <= requiredLiquidity) return 0;
-
-        uint256 allocatableAssets = totalLiquidAssets - requiredLiquidity;
-        return allocatableAssets < idleAssets ? allocatableAssets : idleAssets;
+        return ControllerLiquidityLib.availableToAllocate(
+            asset, address(vault), address(sleeve), idleAssets, totalAssets, targetReserveBps
+        );
     }
 
     function liquidityData() public view returns (bytes memory) {
@@ -461,9 +451,7 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     }
 
     function _settlementQueue() internal view returns (address queue) {
-        (bool success, bytes memory data) = address(sleeve).staticcall(abi.encodeWithSignature("settlementQueue()"));
-        if (!success || data.length < 32) return address(0);
-        return abi.decode(data, (address));
+        return ControllerLiquidityLib.settlementQueue(address(sleeve));
     }
 
     function _storeChainManifests(ChainManifest[] memory manifests, address homeSleeve) internal {

@@ -7,12 +7,15 @@ import {IAdapter} from "../interfaces/IAdapter.sol";
 import {IUniversalAdapterEscrow} from "./interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "./interfaces/IUniversalValuerOffchain.sol";
 import {IAutomatedWithdrawalController, IOnchainStrategyValuer} from "../controllers/StrategyControllerInterfaces.sol";
+import {AdapterAccountingLib} from "./libraries/AdapterAccountingLib.sol";
+import {ContractCodeCheckerLib} from "./libraries/ContractCodeCheckerLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     using SafeERC20Lib for IERC20;
     using EnumerableSet for EnumerableSet.Bytes32Set;
+    using ContractCodeCheckerLib for address;
     /* CONSTANTS */
 
     bytes4 private constant DEALLOCATE_SELECTOR = 0x4b219d16; // deallocate(address,bytes,uint256)
@@ -656,7 +659,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             _resolveSnapshotValuation();
         uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
 
-        if (fromOnchain && !_withinLiveValuationBounds(totalValue, valuationBase)) {
+        if (fromOnchain && !AdapterAccountingLib.withinLiveValuationBounds(totalValue, valuationBase)) {
             return (trackedAssets, 0, false);
         }
 
@@ -703,7 +706,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
     }
 
     function _validateWhitelistTarget(address target) internal view {
-        if (target.code.length == 0 || _containsDelegatecallOpcode(target)) {
+        if (target.code.length == 0 || target.containsDelegatecallOpcode()) {
             revert InvalidData();
         }
     }
@@ -729,18 +732,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         for (uint256 i = 0; i < calls.length; i++) {
             Call memory call = calls[i];
-            if (call.data.length < 4) revert InvalidData();
-
-            bytes4 selector = bytes4(call.data);
-
-            WhitelistConfig memory config = functionWhitelist[call.target][selector];
-            if (!config.allowed) {
-                config = functionWhitelist[call.target][bytes4(0)];
-                if (!config.allowed) {
-                    revert FunctionNotWhitelisted();
-                }
-            }
-            if (whitelistCodeHashes[call.target] != call.target.codehash) revert InvalidData();
+            _validateWhitelistedCall(call);
 
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
             if (!success) {
@@ -749,23 +741,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         }
 
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-        if (!bypassCircuitBreaker && balanceAfter < balanceBefore && balanceBefore > 0) {
-            uint256 loss = balanceBefore - balanceAfter;
-            uint256 lossBps = (loss * 10000) / balanceBefore;
-
-            if (lossBps > MAX_BALANCE_LOSS_BPS) {
-                revert ExcessiveBalanceLoss();
-            }
-        }
-
-        if (balanceAfter < balanceBefore) {
-            uint256 deposited = balanceBefore - balanceAfter;
-            externalDeposits[strategyId] += deposited;
-            totalExternalDeposits += deposited;
-        }
-        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
-            _removeFromActiveStrategies(strategyId);
-        }
+        _recordMulticallBalanceChange(strategyId, balanceBefore, balanceAfter, bypassCircuitBreaker);
     }
 
     function _removeFromActiveStrategies(bytes32 strategyId) internal {
@@ -817,14 +793,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         view
         returns (uint256 allocatedInAdapterBounded, uint256 trackedSurplus, uint256 trackedAssets)
     {
-        uint256 allocatedInAdapter =
-            totalAllocations > totalExternalDeposits ? totalAllocations - totalExternalDeposits : 0;
-
-        allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
-
-        uint256 idleBalance = balance > allocatedInAdapterBounded ? balance - allocatedInAdapterBounded : 0;
-        trackedSurplus = settlementSurplusAssets < idleBalance ? settlementSurplusAssets : idleBalance;
-        trackedAssets = allocatedInAdapterBounded + totalExternalDeposits + trackedSurplus;
+        return AdapterAccountingLib.trackedAssets(balance, totalAllocations, totalExternalDeposits, settlementSurplusAssets);
     }
 
     function _resolveCurrentValuation() internal view returns (bool hasValue, bool hasStaleData, uint256 totalValue) {
@@ -833,7 +802,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         bool fromOnchain;
         (hasValue, hasStaleData, totalValue,, fromOnchain) = _resolveSnapshotValuation();
         uint256 valuationBase = totalAllocations > 0 ? totalAllocations : trackedAssets;
-        if (fromOnchain && !_withinLiveValuationBounds(totalValue, valuationBase)) {
+        if (fromOnchain && !AdapterAccountingLib.withinLiveValuationBounds(totalValue, valuationBase)) {
             return (false, false, 0);
         }
     }
@@ -909,7 +878,7 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
             agent.staticcall(abi.encodeWithSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector));
         if (success && data.length >= 64) return true;
 
-        return _containsPushedSelector(agent, IOnchainStrategyValuer.quoteCurrentAssets.selector);
+        return agent.containsPushedSelector(IOnchainStrategyValuer.quoteCurrentAssets.selector);
     }
 
     function _aggregateActiveStrategyValues() internal view returns (bool success, uint256 totalValue) {
@@ -972,14 +941,6 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
         return (true, totalValue, reportTimestamp);
     }
 
-    function _withinLiveValuationBounds(uint256 totalValue, uint256 trackedAssets) internal pure returns (bool) {
-        if (trackedAssets == 0) return totalValue == 0;
-
-        uint256 minExpected = (trackedAssets * 75) / 100;
-        uint256 maxExpected = (trackedAssets * 150) / 100;
-        return totalValue >= minExpected && totalValue <= maxExpected;
-    }
-
     function _queueProtectedAssets(address queue) internal view returns (uint256 protectedAssets) {
         (bool success, bytes memory result) = queue.staticcall(abi.encodeWithSignature("totalProtectedAssets()"));
         if (!success || result.length < 32) {
@@ -1003,48 +964,36 @@ contract UniversalAdapterEscrow is IUniversalAdapterEscrow {
 
         return (true, uint64(report.timestamp));
     }
+    function _validateWhitelistedCall(Call memory call) internal view {
+        if (call.data.length < 4) revert InvalidData();
 
-    function _containsDelegatecallOpcode(address target) internal view returns (bool) {
-        uint256 size = target.code.length;
-        bytes memory code = new bytes(size);
-        assembly {
-            extcodecopy(target, add(code, 0x20), 0, size)
+        bytes4 selector = bytes4(call.data);
+        if (!functionWhitelist[call.target][selector].allowed && !functionWhitelist[call.target][bytes4(0)].allowed) {
+            revert FunctionNotWhitelisted();
         }
-
-        for (uint256 i; i < size; i++) {
-            uint8 opcode = uint8(code[i]);
-            if (opcode == 0xf4) {
-                return true;
-            }
-            if (opcode >= 0x60 && opcode <= 0x7f) {
-                unchecked {
-                    i += opcode - 0x5f;
-                }
-            }
-        }
-
-        return false;
+        if (whitelistCodeHashes[call.target] != call.target.codehash) revert InvalidData();
     }
 
-    function _containsPushedSelector(address target, bytes4 selector) internal view returns (bool) {
-        bytes memory code = target.code;
-        uint256 size = code.length;
-
-        for (uint256 i; i < size; i++) {
-            uint8 opcode = uint8(code[i]);
-            if (opcode == 0x63 && i + 4 < size) {
-                bytes4 pushedSelector =
-                    bytes4(bytes.concat(code[i + 1], code[i + 2], code[i + 3], code[i + 4]));
-                if (pushedSelector == selector) return true;
-            }
-            if (opcode >= 0x60 && opcode <= 0x7f) {
-                unchecked {
-                    i += opcode - 0x5f;
-                }
-            }
+    function _recordMulticallBalanceChange(
+        bytes32 strategyId,
+        uint256 balanceBefore,
+        uint256 balanceAfter,
+        bool bypassCircuitBreaker
+    ) internal {
+        if (!bypassCircuitBreaker && balanceAfter < balanceBefore && balanceBefore > 0) {
+            uint256 loss = balanceBefore - balanceAfter;
+            uint256 lossBps = (loss * 10000) / balanceBefore;
+            if (lossBps > MAX_BALANCE_LOSS_BPS) revert ExcessiveBalanceLoss();
         }
 
-        return false;
+        if (balanceAfter < balanceBefore) {
+            uint256 deposited = balanceBefore - balanceAfter;
+            externalDeposits[strategyId] += deposited;
+            totalExternalDeposits += deposited;
+        }
+        if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
+            _removeFromActiveStrategies(strategyId);
+        }
     }
 
     function getCachedValuation() external view returns (uint256 value, uint256 timestamp, bool isStale) {
