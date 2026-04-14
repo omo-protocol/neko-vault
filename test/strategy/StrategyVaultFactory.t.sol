@@ -7,6 +7,7 @@ import {VaultV2Factory} from "../../src/VaultV2Factory.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {UniversalAdapterEscrowFactory} from "../../src/adapters/UniversalAdapterEscrowFactory.sol";
 import {DeltaNeutralController} from "../../src/controllers/DeltaNeutralController.sol";
+import {DeltaNeutralControllerBase} from "../../src/controllers/DeltaNeutralControllerBase.sol";
 import {PTLoopController} from "../../src/controllers/PTLoopController.sol";
 import {CoreWriter} from "../../src/controllers/venue_specific/hyperliquid/CoreWriter.sol";
 import {L1Read} from "../../src/controllers/venue_specific/hyperliquid/L1Read.sol";
@@ -150,7 +151,7 @@ contract StrategyVaultFactoryTest is Test {
         DeltaNeutralDeploymentParams memory params = _deltaNeutralParams(address(valuer), false);
         params.venueConfig = VenueConfig({venueId: PENDLE_VENUE_ID, venue: address(coreWriter), helper: address(l1Read)});
 
-        vm.expectRevert(DeltaNeutralController.InvalidVenue.selector);
+        vm.expectRevert(DeltaNeutralControllerBase.InvalidVenue.selector);
         childFactory.createDeltaNeutralVault(params);
     }
 
