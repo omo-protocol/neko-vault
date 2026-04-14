@@ -19,7 +19,10 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
     }
 
     function _validateWhitelistTarget(address target) internal view {
-        if (target.code.length == 0 || target.containsDelegatecallOpcode()) {
+        if (target.code.length == 0) revert InvalidData();
+        // Allow EIP-1167 minimal proxies (fixed implementation, safe despite DELEGATECALL)
+        // Block other contracts containing DELEGATECALL (upgradeable proxies)
+        if (target.containsDelegatecallOpcode() && target.cloneImplementation() == address(0)) {
             revert InvalidData();
         }
     }

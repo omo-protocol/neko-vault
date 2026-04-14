@@ -85,6 +85,12 @@ abstract contract DeltaNeutralControllerBase is
         _;
     }
 
+    function _requireQueueOrPrivileged() internal view {
+        if (msg.sender == owner || msg.sender == vaultManager) return;
+        (bool ok, bytes memory data) = address(sleeve).staticcall(abi.encodeWithSignature("settlementQueue()"));
+        if (!ok || data.length < 32 || abi.decode(data, (address)) != msg.sender) revert NotVaultManager();
+    }
+
     SpotSideMode public spotSideMode;
     uint256 public maxDeltaBps;
     uint256 public kellySpotYieldWad;
@@ -352,6 +358,7 @@ abstract contract DeltaNeutralControllerBase is
     }
 
     function initiateAsyncWithdrawal(uint256 shortfallAssets) external nonReentrant returns (bool initiated) {
+        _requireQueueOrPrivileged();
         if (shortfallAssets == 0) return false;
 
         HyperliquidLiveState memory live = _liveState();

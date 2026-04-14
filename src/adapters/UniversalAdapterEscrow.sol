@@ -161,6 +161,18 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         emit WhitelistUpdated(target, selector, allowed, limit);
     }
 
+    /// @notice Whitelist a target without DELEGATECALL safety checks
+    /// @dev Use only for trusted proxy contracts that cannot pass _validateWhitelistTarget
+    function updateWhitelistUnsafe(address target, bytes4 selector, bool allowed, uint256 limit) external onlyOwner {
+        if (allowed) {
+            if (target.code.length == 0) revert InvalidData();
+            whitelistCodeHashes[target] = target.codehash;
+        }
+        functionWhitelist[target][selector] = WhitelistConfig({allowed: allowed, limit: limit});
+
+        emit WhitelistUpdated(target, selector, allowed, limit);
+    }
+
     /* EXTERNAL FUNCTIONS - STRATEGY EXECUTION */
     function executeStrategy(bytes32 strategyId, Call[] calldata calls)
         external
@@ -298,6 +310,14 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         }
         settlementQueue = settlementQueue_;
         emit SettlementQueueSet(settlementQueue_);
+    }
+
+    /// @notice Force-remove a broken settlement queue that can't be removed via setSettlementQueue
+    /// @dev Use when the existing queue reverts on totalProtectedAssets(), preventing normal removal
+    function forceRemoveSettlementQueue() external onlyOwner {
+        if (settlementQueue == address(0)) revert InvalidAmount();
+        settlementQueue = address(0);
+        emit SettlementQueueSet(address(0));
     }
 
     function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue notPaused {
