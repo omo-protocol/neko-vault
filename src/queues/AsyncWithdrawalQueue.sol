@@ -33,12 +33,13 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
     event SettlementHookSet(address indexed settlementHook);
     event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
-    IVaultV2 public immutable vault;
-    address public immutable controller;
-    address public immutable sleeve;
-    bytes32 public immutable strategyId;
+    IVaultV2 public vault;
+    address public controller;
+    address public sleeve;
+    bytes32 public strategyId;
     address public owner;
     address public settlementHook;
+    bool private _initialized;
     uint256 public nextRequestId = 1;
     uint256 public totalReservedLocalAssets;
     uint256 public totalProtectedAssets;
@@ -57,14 +58,30 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
     }
 
     constructor(address vault_, address controller_, address sleeve_, address owner_) {
+        if (vault_ == address(0) && controller_ == address(0) && sleeve_ == address(0) && owner_ == address(0)) {
+            _initialized = true;
+            return;
+        }
+        _initialize(vault_, controller_, sleeve_, owner_);
+    }
+
+    function initialize(address vault_, address controller_, address sleeve_, address owner_) external {
+        _initialize(vault_, controller_, sleeve_, owner_);
+    }
+
+    function _initialize(address vault_, address controller_, address sleeve_, address owner_) internal {
+        if (_initialized) revert InvalidAddress();
         if (vault_ == address(0) || controller_ == address(0) || sleeve_ == address(0) || owner_ == address(0)) {
             revert InvalidAddress();
         }
+
+        _initialized = true;
         vault = IVaultV2(vault_);
         controller = controller_;
         sleeve = sleeve_;
         strategyId = IStrategyIdProvider(controller_).strategyId();
         owner = owner_;
+        nextRequestId = 1;
     }
 
     function setSettlementHook(address settlementHook_) external onlyOwner {

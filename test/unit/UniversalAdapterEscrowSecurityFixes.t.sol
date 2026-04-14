@@ -17,6 +17,9 @@ import {MockTarget} from "../mocks/MockTarget.sol";
  *      - Issue #9: Prevent desynchronized externalDeposits underflow
  */
 contract UniversalAdapterEscrowSecurityFixesTest is Test {
+    uint256 internal constant EXTERNAL_DEPOSITS_SLOT = 8;
+    uint256 internal constant TOTAL_EXTERNAL_DEPOSITS_SLOT = 9;
+
     UniversalAdapterEscrow public adapter;
     MockERC20 public asset;
     MockValuer public valuer;
@@ -230,7 +233,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // (This could happen through various edge cases or bugs)
         vm.store(
             address(adapter),
-            bytes32(uint256(6)), // totalExternalDeposits storage slot
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(uint256(60e18)) // Set to 60 instead of 80
         );
 
@@ -272,7 +275,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Create extreme desync
         vm.store(
             address(adapter),
-            bytes32(uint256(6)),
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(uint256(10e18)) // totalExternalDeposits = 10, but per-strategy = 80
         );
 
@@ -314,12 +317,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Manually set desynchronized state
         vm.store(
             address(adapter),
-            bytes32(uint256(5)), // externalDeposits[strategyId] storage slot (keccak256(strategyId, 5))
+            keccak256(abi.encode(strategyId, uint256(EXTERNAL_DEPOSITS_SLOT))),
             bytes32(perStrategy)
         );
         vm.store(
             address(adapter),
-            bytes32(uint256(6)), // totalExternalDeposits storage slot
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(totalExternal)
         );
 

@@ -241,7 +241,7 @@ contract UniversalAdapterEscrowDonationAttackTest is Test {
         // (In real usage, this would be done by executeStrategy)
         vm.store(
             address(adapter),
-            bytes32(uint256(6)), // totalExternalDeposits storage slot
+            bytes32(uint256(9)),
             bytes32(uint256(200e18))
         );
 

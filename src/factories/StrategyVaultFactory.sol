@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IVaultV2Factory} from "../interfaces/IVaultV2Factory.sol";
@@ -15,6 +16,11 @@ import {AsyncWithdrawalQueue} from "../queues/AsyncWithdrawalQueue.sol";
 import {
     StrategyKind,
     Deployment,
+    VenueConfig,
+    SpotSideMode,
+    DeltaNeutralKellyConfig,
+    DeltaNeutralAutomationConfig,
+    PTLoopAutomationConfig,
     DeltaNeutralDeploymentParams,
     PTLoopDeploymentParams
 } from "../strategies/StrategyTypes.sol";
@@ -28,6 +34,11 @@ contract StrategyVaultFactory is ReentrancyGuard {
 
     IVaultV2Factory public immutable vaultFactory;
     UniversalAdapterEscrowFactory public immutable adapterFactory;
+    address public immutable deltaNeutralControllerImplementation;
+    address public immutable ptLoopControllerImplementation;
+    address public immutable vaultTimeLockWrapperImplementation;
+    address public immutable wrapperOnlySendAssetsGateImplementation;
+    address public immutable asyncWithdrawalQueueImplementation;
     mapping(address vault => address wrapper) public timeLockWrapperOf;
     mapping(address vault => address gate) public depositGateOf;
     mapping(address vault => address queue) public withdrawalQueueOf;
@@ -48,6 +59,73 @@ contract StrategyVaultFactory is ReentrancyGuard {
         if (vaultFactory_ == address(0) || adapterFactory_ == address(0)) revert InvalidAddress();
         vaultFactory = IVaultV2Factory(vaultFactory_);
         adapterFactory = UniversalAdapterEscrowFactory(adapterFactory_);
+        deltaNeutralControllerImplementation = address(
+            new DeltaNeutralController(
+                address(0),
+                address(0),
+                address(0),
+                address(0),
+                bytes32(0),
+                0,
+                VenueConfig({venueId: bytes32(0), venue: address(0), helper: address(0)}),
+                SpotSideMode.Hold,
+                0,
+                DeltaNeutralKellyConfig({
+                    spotYieldWad: 0,
+                    marginYieldWad: 0,
+                    baseFundingRateWad: 0,
+                    ethVolatilityWad: 0,
+                    liquidationLossWad: 0,
+                    rebalanceThresholdWad: 0,
+                    minBenefitWad: 0,
+                    shortTakerFeeWad: 0,
+                    entrySlippageWad: 0,
+                    exitSlippageWad: 0,
+                    shortSlippageWad: 0,
+                    bridgeSlippageWad: 0,
+                    sizeImpactThresholdAssets: 0,
+                    sizeImpactMultiplierWad: 0,
+                    bridgeFeeAssets: 0,
+                    gasSpotActionAssets: 0,
+                    gasShortActionAssets: 0,
+                    timeHorizonDays: 0,
+                    fundingDivisor: 0,
+                    asymmetricRebalanceThresholdBps: 0
+                }),
+                DeltaNeutralAutomationConfig({
+                    spotAssetIndex: 0,
+                    perpAssetIndex: 0,
+                    spotPriceIndex: 0,
+                    perpDexIndex: 0,
+                    spotToken: 0,
+                    spotTokenDecimals: 0,
+                    encodedTif: 0,
+                    hyperCoreVault: address(0),
+                    maxOrderSlippageBps: 0,
+                    maxOracleDivergenceBps: 0,
+                    maxMarginUsageBps: 0
+                })
+            )
+        );
+        ptLoopControllerImplementation = address(
+            new PTLoopController(
+                address(0),
+                address(0),
+                address(0),
+                address(0),
+                address(0),
+                address(0),
+                bytes32(0),
+                0,
+                VenueConfig({venueId: bytes32(0), venue: address(0), helper: address(0)}),
+                PTLoopAutomationConfig({maxEntrySlippageBps: 0}),
+                0
+            )
+        );
+        vaultTimeLockWrapperImplementation = address(new VaultTimeLockWrapper(address(0)));
+        wrapperOnlySendAssetsGateImplementation = address(new WrapperOnlySendAssetsGate(address(0)));
+        asyncWithdrawalQueueImplementation =
+            address(new AsyncWithdrawalQueue(address(0), address(0), address(0), address(0)));
     }
 
     function createDeltaNeutralVault(DeltaNeutralDeploymentParams calldata params)
@@ -72,7 +150,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
             payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
         );
 
-        DeltaNeutralController controller = new DeltaNeutralController(
+        DeltaNeutralController controller = DeltaNeutralController(Clones.clone(deltaNeutralControllerImplementation));
+        controller.initialize(
             params.owner,
             _finalVaultManager(params.owner, params.vaultManager),
             vaultAddress,
@@ -89,8 +168,10 @@ contract StrategyVaultFactory is ReentrancyGuard {
         address wrapper;
         address depositGate;
         if (params.enableTimelock) {
-            wrapper = address(new VaultTimeLockWrapper(vaultAddress));
-            depositGate = address(new WrapperOnlySendAssetsGate(wrapper));
+            wrapper = Clones.clone(vaultTimeLockWrapperImplementation);
+            VaultTimeLockWrapper(wrapper).initialize(vaultAddress);
+            depositGate = Clones.clone(wrapperOnlySendAssetsGateImplementation);
+            WrapperOnlySendAssetsGate(depositGate).initialize(wrapper);
         }
 
         _configureDeltaNeutralWhitelist(sleeve, params.venueConfig.venue);
@@ -162,7 +243,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
             payable(adapterFactory.deployAdapter(vaultAddress, params.valuer, params.useOffchainValuer, salt))
         );
 
-        PTLoopController controller = new PTLoopController(
+        PTLoopController controller = PTLoopController(Clones.clone(ptLoopControllerImplementation));
+        controller.initialize(
             params.owner,
             _finalVaultManager(params.owner, params.vaultManager),
             vaultAddress,
@@ -179,8 +261,10 @@ contract StrategyVaultFactory is ReentrancyGuard {
         address wrapper;
         address depositGate;
         if (params.enableTimelock) {
-            wrapper = address(new VaultTimeLockWrapper(vaultAddress));
-            depositGate = address(new WrapperOnlySendAssetsGate(wrapper));
+            wrapper = Clones.clone(vaultTimeLockWrapperImplementation);
+            VaultTimeLockWrapper(wrapper).initialize(vaultAddress);
+            depositGate = Clones.clone(wrapperOnlySendAssetsGateImplementation);
+            WrapperOnlySendAssetsGate(depositGate).initialize(wrapper);
         }
 
         _configurePTLoopWhitelist(sleeve, params.asset, params.ptToken, params.venueConfig.venue);
@@ -300,7 +384,8 @@ contract StrategyVaultFactory is ReentrancyGuard {
     ) internal returns (address queue) {
         if (!deployQueue) return address(0);
 
-        AsyncWithdrawalQueue asyncQueue = new AsyncWithdrawalQueue(vault, controller, sleeve, address(this));
+        AsyncWithdrawalQueue asyncQueue = AsyncWithdrawalQueue(Clones.clone(asyncWithdrawalQueueImplementation));
+        asyncQueue.initialize(vault, controller, sleeve, address(this));
         asyncQueue.transferOwnership(finalOwner);
 
         emit AsyncWithdrawalQueueDeployed(vault, address(asyncQueue));

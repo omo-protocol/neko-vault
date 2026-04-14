@@ -335,15 +335,10 @@ contract UniversalAdapterEscrowE2E is Test {
         assertEq(realAssets, 10000e6);
     }
 
-    function testFactoryAddressComputation() public {
-        // Compute expected address
-        address computed = factory.computeAddress(address(vault), address(valuer), false, keccak256("test-deployment"));
-
-        // Deploy with same parameters (must be called by vault owner)
+    function testFactoryDeploysAdapterClone() public {
         vm.prank(owner);
         address deployed = factory.deployAdapter(address(vault), address(valuer), false, keccak256("test-deployment"));
 
-        // Should match
-        assertEq(computed, deployed);
+        assertLt(deployed.code.length, factory.adapterImplementation().code.length);
     }
 }
