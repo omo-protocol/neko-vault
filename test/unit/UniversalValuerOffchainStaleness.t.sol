@@ -56,12 +56,7 @@ contract UniversalValuerOffchainStaleness is Test {
         // Give adapter some balance and allocate to make strategy active
         asset.mint(address(adapter), 1000e18);
         vm.startPrank(address(vault));
-        bytes memory allocateData = abi.encode(
-            STRATEGY_A,
-            uint256(100e18),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocateData = abi.encode(STRATEGY_A, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocateData, 100e18, bytes4(0), address(0));
         vm.stopPrank();
     }
@@ -233,17 +228,30 @@ contract UniversalValuerOffchainStaleness is Test {
 
     /* ADAPTER INTEGRATION TESTS */
 
+    function testRealAssetsUsesPerStrategyAggregationWithoutEscrowTotalReport() public {
+        _submitValue(STRATEGY_A, 100e18, 95, 1);
+
+        assertEq(adapter.realAssets(), 100e18, "Should aggregate fresh strategy values directly");
+    }
+
+    function testRealAssetsUsesHaircuttedStaleAggregatedValuation() public {
+        _submitValue(STRATEGY_A, 100e18, 95, 1);
+
+        vm.prank(owner);
+        valuer.setFallbackValue(STRATEGY_A, 200e18);
+
+        vm.warp(block.timestamp + MAX_STALENESS + 1);
+
+        uint256 staleAssets = adapter.realAssets();
+        assertEq(staleAssets, 190e18, "Should haircut the stale aggregated valuation without principal capping");
+    }
+
     /// @notice Test realAssets applies haircut when valuation is unhealthy
     /// @dev SKIPPED: Depends on getValue(ESCROW_TOTAL_ID) feature not yet implemented
     function skip_testRealAssetsAppliesHaircutWhenUnhealthy() public {
         // Allocate more to strategy (adapter already has 1000e18 and 100e18 allocated in setup)
         vm.startPrank(address(vault));
-        bytes memory allocateData = abi.encode(
-            STRATEGY_A,
-            uint256(400e18),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocateData = abi.encode(STRATEGY_A, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocateData, 400e18, bytes4(0), address(0));
         vm.stopPrank();
 
@@ -286,20 +294,10 @@ contract UniversalValuerOffchainStaleness is Test {
         uint256 expiry,
         uint256 privateKey
     ) internal view returns (bytes memory) {
-        bytes32 messageHash = keccak256(abi.encode(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, ethSignedHash);
         return abi.encodePacked(r, s, v);

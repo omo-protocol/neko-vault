@@ -33,11 +33,7 @@ contract ThreeScenarioDeallocateTest is Test {
         valuer = new MockValuer();
         vault = new MockVaultV2(address(asset), owner);
 
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            false
-        );
+        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
 
         // Create mock protocol
         mockProtocol = new MockProtocol(address(asset));
@@ -47,12 +43,7 @@ contract ThreeScenarioDeallocateTest is Test {
         adapter.setStrategy(STRATEGY_1, agent, "", 10000e6);
 
         // Whitelist protocol withdraw function
-        adapter.updateWhitelist(
-            address(mockProtocol),
-            bytes4(keccak256("withdraw(uint256)")),
-            true,
-            0
-        );
+        adapter.updateWhitelist(address(mockProtocol), bytes4(keccak256("withdraw(uint256)")), true, 0);
         vm.stopPrank();
 
         asset.mint(address(vault), 10000e6);
@@ -64,12 +55,7 @@ contract ThreeScenarioDeallocateTest is Test {
         // Setup: First allocate 800e6 to strategy, then add 200e6 idle assets
         asset.mint(address(adapter), 800e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            800e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 800e6, bytes4(0), address(0));
 
         // Add idle assets (profits/yield)
         asset.mint(address(adapter), 200e6);
@@ -95,12 +81,8 @@ contract ThreeScenarioDeallocateTest is Test {
 
         // Execute deallocate
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, calls),
-            requestAmount,
-            bytes4(0),
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(abi.encode(STRATEGY_1, 0, calls), requestAmount, bytes4(0), address(0));
 
         // Verify results
         assertEq(change, -int256(requestAmount), "Should withdraw exact requested amount");
@@ -116,12 +98,7 @@ contract ThreeScenarioDeallocateTest is Test {
         // Setup: First allocate 600e6 to strategy (this is the strategy value)
         asset.mint(address(adapter), 600e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            600e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 600e6, bytes4(0), address(0));
 
         // Simulate that 300e6 was moved to external protocol, leaving 300e6 in adapter
         vm.prank(address(adapter));
@@ -158,10 +135,7 @@ contract ThreeScenarioDeallocateTest is Test {
         // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            requestAmount,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), requestAmount, bytes4(0), address(0)
         );
 
         // Verify results
@@ -177,12 +151,7 @@ contract ThreeScenarioDeallocateTest is Test {
         // Setup: First allocate 500e6 to strategy, then move all to protocol
         asset.mint(address(adapter), 500e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            500e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 500e6, bytes4(0), address(0));
 
         // Move all assets to external protocol, leaving adapter with 0 balance
         vm.prank(address(adapter));
@@ -219,10 +188,7 @@ contract ThreeScenarioDeallocateTest is Test {
         // User deallocates (calls ignored)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            requestAmount,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), requestAmount, bytes4(0), address(0)
         );
 
         // Verify results
@@ -232,7 +198,6 @@ contract ThreeScenarioDeallocateTest is Test {
         console2.log("[PASS] Scenario 3: Agent withdrew full amount from protocol, then user deallocated");
     }
 
-
     function testEdgeCases() public {
         console2.log("=== TESTING EDGE CASES ===");
 
@@ -241,19 +206,11 @@ contract ThreeScenarioDeallocateTest is Test {
 
         // First allocate to have strategy value
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            100e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 100e6, bytes4(0), address(0));
 
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            100e6,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 100e6, bytes4(0), address(0)
         );
 
         assertEq(change, -100e6, "Should handle exact balance match");

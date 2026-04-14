@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.0;
 
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IVaultV2} from "./interfaces/IVaultV2.sol";
 import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
@@ -29,22 +30,22 @@ import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
  *      - Wrapper holds vault shares, users hold receipt tokens
  *      - Non-custodial guarantees via forceDeallocate
  */
-contract VaultTimeLockWrapper {
-
+contract VaultTimeLockWrapper is ReentrancyGuard {
     // ============================================
     // STATE VARIABLES
     // ============================================
 
-    IVaultV2 public immutable vault;
-    IERC20 public immutable asset;
+    IVaultV2 public vault;
+    IERC20 public asset;
     uint256 public constant LOCK_PERIOD = 7 days;
     uint256 public constant MAX_BATCHES_PER_USER = 100; // Prevent DoS via batch spam
 
     // ERC20 Receipt Token State
     string public constant name = "Vault TimeLock Token";
     string public constant symbol = "vTLT";
-    uint8 public immutable decimals; // SECURITY FIX: Use vault's actual decimals instead of hardcoding 18
+    uint8 public decimals; // SECURITY FIX: Use vault's actual decimals instead of hardcoding 18
     uint256 public totalSupply;
+    bool private _initialized;
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -75,7 +76,14 @@ contract VaultTimeLockWrapper {
     // ============================================
 
     event Deposit(address indexed caller, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
-    event Withdraw(address indexed caller, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares, uint256 vTokens);
+    event Withdraw(
+        address indexed caller,
+        address indexed receiver,
+        address indexed onBehalf,
+        uint256 assets,
+        uint256 shares,
+        uint256 vTokens
+    );
     event EmergencyExit(address indexed user, address indexed adapter, uint256 assets, uint256 penaltyShares);
     event ApprovalForDeposit(address indexed owner, address indexed operator, bool approved);
 
@@ -101,11 +109,24 @@ contract VaultTimeLockWrapper {
     // ============================================
 
     constructor(address _vault) {
+        if (_vault == address(0)) {
+            _initialized = true;
+            return;
+        }
+        _initialize(_vault);
+    }
+
+    function initialize(address _vault) external {
+        _initialize(_vault);
+    }
+
+    function _initialize(address _vault) internal {
+        require(!_initialized, "initialized");
+        require(_vault != address(0), "invalid vault");
+
+        _initialized = true;
         vault = IVaultV2(_vault);
         asset = IERC20(vault.asset());
-        // SECURITY FIX: Use vault's decimals to prevent decimal mismatch
-        // VaultV2 uses max(asset.decimals, 18) for shares, so we match that here
-        // This ensures wrapper tokens have the same decimal precision as vault shares
         decimals = vault.decimals();
     }
 
@@ -119,7 +140,7 @@ contract VaultTimeLockWrapper {
      * @param assets Amount of underlying assets to deposit
      * @return vTokens Amount of receipt tokens minted
      */
-    function deposit(uint256 assets) external returns (uint256 vTokens) {
+    function deposit(uint256 assets) external nonReentrant returns (uint256 vTokens) {
         return _depositInternal(assets, msg.sender, msg.sender);
     }
 
@@ -130,7 +151,7 @@ contract VaultTimeLockWrapper {
      * @param onBehalf Address to receive vTokens
      * @return vTokens Amount of receipt tokens minted
      */
-    function depositFor(uint256 assets, address onBehalf) external returns (uint256 vTokens) {
+    function depositFor(uint256 assets, address onBehalf) external nonReentrant returns (uint256 vTokens) {
         if (!canDepositFor[onBehalf][msg.sender]) revert NotApprovedForDeposit();
         return _depositInternal(assets, msg.sender, onBehalf);
     }
@@ -146,12 +167,7 @@ contract VaultTimeLockWrapper {
         if (userDeposits[to].length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
         // Pull assets from caller
-        SafeERC20Lib.safeTransferFrom(
-            address(asset),
-            from,
-            address(this),
-            assets
-        );
+        SafeERC20Lib.safeTransferFrom(address(asset), from, address(this), assets);
 
         // Approve and deposit to vault
         SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
@@ -164,10 +180,7 @@ contract VaultTimeLockWrapper {
         vTokens = shares;
 
         // Create new deposit batch
-        userDeposits[to].push(DepositBatch({
-            amount: vTokens,
-            depositTime: block.timestamp
-        }));
+        userDeposits[to].push(DepositBatch({amount: vTokens, depositTime: block.timestamp}));
 
         // Mint receipt tokens
         _mint(to, vTokens);
@@ -178,7 +191,7 @@ contract VaultTimeLockWrapper {
     /**
      * @notice Mint specific amount of vault shares and receive vTokens
      */
-    function mint(uint256 shares) external returns (uint256 assets) {
+    function mint(uint256 shares) external nonReentrant returns (uint256 assets) {
         if (shares == 0) revert ZeroAmount();
 
         // SECURITY FIX: Check batch limit
@@ -188,21 +201,13 @@ contract VaultTimeLockWrapper {
         assets = vault.previewMint(shares);
 
         // Pull assets and deposit
-         SafeERC20Lib.safeTransferFrom(
-            address(asset),
-            msg.sender,
-            address(this),
-            assets
-        );
+        SafeERC20Lib.safeTransferFrom(address(asset), msg.sender, address(this), assets);
 
         SafeERC20Lib.safeApprove(address(asset), address(vault), assets);
         vault.mint(shares, address(this));
 
         // Create deposit batch and mint vTokens
-        userDeposits[msg.sender].push(DepositBatch({
-            amount: shares,
-            depositTime: block.timestamp
-        }));
+        userDeposits[msg.sender].push(DepositBatch({amount: shares, depositTime: block.timestamp}));
 
         _mint(msg.sender, shares);
 
@@ -232,6 +237,7 @@ contract VaultTimeLockWrapper {
      */
     function withdraw(uint256 assets, address receiver, address onBehalf)
         external
+        nonReentrant
         returns (uint256 vTokensBurned)
     {
         if (receiver == address(0)) revert ZeroAddress();
@@ -268,6 +274,7 @@ contract VaultTimeLockWrapper {
      */
     function redeem(uint256 vTokens, address receiver, address onBehalf)
         external
+        nonReentrant
         returns (uint256 assets)
     {
         if (receiver == address(0)) revert ZeroAddress();
@@ -288,6 +295,62 @@ contract VaultTimeLockWrapper {
         assets = vault.redeem(vTokens, receiver, address(this));
 
         emit Withdraw(msg.sender, receiver, onBehalf, assets, vTokens, vTokens);
+    }
+
+    /**
+     * @notice Burn unlocked vTokens and receive the underlying VaultV2 shares directly.
+     * @dev Enables async withdrawal queues and other share-based flows after lock expiry.
+     */
+    function unwrap(uint256 vTokens, address receiver, address onBehalf)
+        external
+        nonReentrant
+        returns (uint256 sharesOut)
+    {
+        if (receiver == address(0)) revert ZeroAddress();
+        if (vTokens == 0) revert ZeroAmount();
+
+        if (msg.sender != onBehalf) {
+            uint256 allowed = allowance[onBehalf][msg.sender];
+            if (allowed < vTokens) revert InsufficientAllowance();
+            if (allowed != type(uint256).max) {
+                allowance[onBehalf][msg.sender] = allowed - vTokens;
+            }
+        }
+
+        _burnWithLockupCheck(onBehalf, vTokens);
+        SafeERC20Lib.safeTransfer(address(vault), receiver, vTokens);
+        return vTokens;
+    }
+
+    /**
+     * @notice Burn unlocked vTokens and approve a spender to pull the underlying VaultV2 shares.
+     * @dev Supports pull-based integrations that cannot receive pushed shares directly during unwrap.
+     */
+    function unwrapToApproval(uint256 vTokens, address spender, address onBehalf)
+        external
+        nonReentrant
+        returns (uint256 sharesOut)
+    {
+        if (spender == address(0)) revert ZeroAddress();
+        if (vTokens == 0) revert ZeroAmount();
+
+        if (msg.sender != onBehalf) {
+            uint256 allowed = allowance[onBehalf][msg.sender];
+            if (allowed < vTokens) revert InsufficientAllowance();
+            if (allowed != type(uint256).max) {
+                allowance[onBehalf][msg.sender] = allowed - vTokens;
+            }
+        }
+
+        _burnWithLockupCheck(onBehalf, vTokens);
+
+        uint256 currentAllowance = IERC20(address(vault)).allowance(address(this), spender);
+        uint256 updatedAllowance = currentAllowance + vTokens;
+        if (currentAllowance != 0) {
+            SafeERC20Lib.safeApprove(address(vault), spender, 0);
+        }
+        SafeERC20Lib.safeApprove(address(vault), spender, updatedAllowance);
+        return vTokens;
     }
 
     /**
@@ -363,17 +426,16 @@ contract VaultTimeLockWrapper {
      * @param assets Amount of assets to deallocate
      * @return penaltyShares Shares burned as penalty
      */
-    function emergencyWithdraw(
-        address adapter,
-        bytes memory data,
-        uint256 assets
-    ) external returns (uint256 penaltyShares) {
+    function emergencyWithdraw(address adapter, bytes memory data, uint256 assets)
+        external
+        nonReentrant
+        returns (uint256 penaltyShares)
+    {
         if (balanceOf[msg.sender] == 0) revert InsufficientBalance();
 
         // SECURITY FIX: Approve vault for penalty shares before forceDeallocate
         // forceDeallocate internally calls withdraw(penaltyAssets, vault, wrapper)
         // which requires wrapper to approve vault for the penalty shares
-        uint256 vaultBalanceBefore = vault.balanceOf(address(this));
         vault.approve(address(vault), type(uint256).max);
 
         // Step 1: Force deallocate from adapter (charges penalty)
@@ -437,7 +499,7 @@ contract VaultTimeLockWrapper {
      * @notice Transfer vTokens to another address
      * @dev SECURITY FIX: Maintains proper FIFO ordering during transfers
      */
-    function transfer(address to, uint256 amount) external returns (bool) {
+    function transfer(address to, uint256 amount) external nonReentrant returns (bool) {
         if (to == address(0)) revert ZeroAddress();
         _transferWithBatches(msg.sender, to, amount);
         return true;
@@ -446,7 +508,7 @@ contract VaultTimeLockWrapper {
     /**
      * @notice Transfer vTokens from one address to another (requires approval)
      */
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) external nonReentrant returns (bool) {
         if (to == address(0)) revert ZeroAddress();
 
         // Check and update allowance
@@ -475,6 +537,10 @@ contract VaultTimeLockWrapper {
      */
     function _transferWithBatches(address from, address to, uint256 amount) internal {
         if (balanceOf[from] < amount) revert InsufficientBalance();
+        if (from == to || amount == 0) {
+            emit Transfer(from, to, amount);
+            return;
+        }
 
         // Standard ERC20 balance transfer
         balanceOf[from] -= amount;
@@ -490,9 +556,7 @@ contract VaultTimeLockWrapper {
         while (remaining > 0 && batchesConsumed < fromDeposits.length) {
             DepositBatch storage sourceBatch = fromDeposits[batchesConsumed];
 
-            uint256 transferAmount = sourceBatch.amount <= remaining
-                ? sourceBatch.amount
-                : remaining;
+            uint256 transferAmount = sourceBatch.amount <= remaining ? sourceBatch.amount : remaining;
 
             // SECURITY FIX: Merge batches with same depositTime to prevent transfer spam DoS
             // Without this fix, an attacker could fill a victim's batch array (max 100)
@@ -510,10 +574,12 @@ contract VaultTimeLockWrapper {
                 // SECURITY FIX: Check batch limit only when creating NEW batch
                 if (toDeposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
 
-                toDeposits.push(DepositBatch({
-                    amount: transferAmount,
-                    depositTime: sourceBatch.depositTime // Preserve original deposit time
-                }));
+                toDeposits.push(
+                    DepositBatch({
+                        amount: transferAmount,
+                        depositTime: sourceBatch.depositTime // Preserve original deposit time
+                    })
+                );
             }
 
             if (sourceBatch.amount <= remaining) {
@@ -610,19 +676,18 @@ contract VaultTimeLockWrapper {
     /**
      * @notice Get details of a specific deposit batch
      */
-    function getDeposit(address user, uint256 index) external view returns (
-        uint256 amount,
-        uint256 depositTime,
-        uint256 unlockTime,
-        bool isUnlocked
-    ) {
+    function getDeposit(address user, uint256 index)
+        external
+        view
+        returns (uint256 amount, uint256 depositTime, uint256 unlockTime, bool unlocked)
+    {
         require(index < userDeposits[user].length, "Index out of bounds");
 
         DepositBatch storage batch = userDeposits[user][index];
         amount = batch.amount;
         depositTime = batch.depositTime;
         unlockTime = depositTime + LOCK_PERIOD;
-        isUnlocked = block.timestamp >= unlockTime;
+        unlocked = block.timestamp >= unlockTime;
     }
 
     /**

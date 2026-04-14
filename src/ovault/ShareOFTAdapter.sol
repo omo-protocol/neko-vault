@@ -23,6 +23,8 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// - The share token MUST be an OFT adapter (lockbox) not mint-burn
 /// - A mint-burn adapter would break ShareERC20::totalSupply() accounting
 contract ShareOFTAdapter is OFTAdapter {
+    uint8 internal constant SHARED_DECIMALS = 4;
+
     /// @notice Initializes the Share OFT Adapter
     /// @param _token Address of the VaultV2 share token (ERC-20)
     /// @param _lzEndpoint LayerZero endpoint address on hub chain
@@ -32,4 +34,18 @@ contract ShareOFTAdapter is OFTAdapter {
         address _lzEndpoint,
         address _delegate
     ) OFTAdapter(_token, _lzEndpoint, _delegate) Ownable(_delegate) {}
+
+    function sharedDecimals() public pure override returns (uint8) {
+        return SHARED_DECIMALS;
+    }
+
+    function transferOwnership(address newOwner) public override onlyOwner {
+        super.transferOwnership(newOwner);
+        endpoint.setDelegate(newOwner);
+    }
+
+    function renounceOwnership() public override onlyOwner {
+        super.renounceOwnership();
+        endpoint.setDelegate(address(0));
+    }
 }

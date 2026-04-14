@@ -70,7 +70,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Setup: Allocate 1000 tokens and deposit to DEX
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -90,8 +90,8 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         assertEq(asset.balanceOf(address(adapter)), 950e18, "Adapter should have 910 + 40 = 950");
 
         // User deallocates (calls ignored)
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+        bytes memory deallocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
+
         vm.prank(address(vault));
         (, int256 change) = adapter.deallocate(deallocateData, 950e18, bytes4(0x4b219d16), address(0));
 
@@ -107,7 +107,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -120,7 +120,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // LAZY DEALLOCATION: Agent withdraws with slippage protection
         uint256 minBalanceIncrease = 40e18;
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
-        
+
         vm.prank(owner);
         adapter.withdrawFromStrategy(strategyId, withdrawCalls, minBalanceIncrease);
 
@@ -129,10 +129,11 @@ contract UniversalAdapterEscrowSlippageTest is Test {
 
         // User deallocates
         uint256 requestedAmount = 950e18;
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
 
         uint256 returnedAmount = uint256(-change);
         assertEq(returnedAmount, 950e18, "Should return exact requested amount");
@@ -147,7 +148,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -178,7 +179,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Setup: User has 1000 tokens allocated through adapter, all in DEX
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -210,7 +211,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
     function testExactMinimumAmount() public {
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -223,13 +224,13 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // LAZY DEALLOCATION: Agent withdraws exactly 40e18
         uint256 minBalanceIncrease = 40e18;
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createSwapWithdrawCall(40e18, 0);
-        
+
         vm.prank(owner);
         adapter.withdrawFromStrategy(strategyId, withdrawCalls, minBalanceIncrease);
 
         // User deallocates
         uint256 requestedAmount = 950e18;
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory deallocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         (, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
@@ -245,7 +246,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
     function testMinAmountGreaterThanRequested() public {
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -278,7 +279,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         // Setup: Deposit 9% to DEX (under circuit breaker threshold)
         asset.mint(address(adapter), amount);
 
-        bytes memory allocateData = abi.encode(strategyId, amount, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, amount, bytes4(0), address(0));
 
@@ -308,7 +309,7 @@ contract UniversalAdapterEscrowSlippageTest is Test {
 
         // LAZY DEALLOCATION: Agent attempts withdrawal
         vm.prank(owner);
-        
+
         if (dexActualReturn < minBalanceIncrease) {
             // Slippage exceeds tolerance - should revert
             vm.expectRevert(IUniversalAdapterEscrow.SlippageTooHigh.selector);
@@ -316,14 +317,14 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         } else {
             // Slippage within tolerance - should succeed
             adapter.withdrawFromStrategy(strategyId, withdrawCalls, minBalanceIncrease);
-            
+
             // Verify balance increased
             uint256 newBalance = asset.balanceOf(address(adapter));
             assertGe(newBalance, adapterBalance + minBalanceIncrease, "Balance should increase by at least min");
-            
+
             // User can now deallocate
             if (newBalance >= requestedAmount) {
-                bytes memory deallocateData = abi.encode(strategyId, 0, false, new IUniversalAdapterEscrow.Call[](0));
+                bytes memory deallocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
                 vm.prank(address(vault));
                 (, int256 change) = adapter.deallocate(deallocateData, requestedAmount, bytes4(0x4b219d16), address(0));
                 assertEq(uint256(-change), requestedAmount, "Should return exact requested amount");
@@ -343,7 +344,11 @@ contract UniversalAdapterEscrowSlippageTest is Test {
         return calls;
     }
 
-    function _createSwapWithdrawCall(uint256 amount, uint256 minOut) internal view returns (IUniversalAdapterEscrow.Call[] memory) {
+    function _createSwapWithdrawCall(uint256 amount, uint256 minOut)
+        internal
+        view
+        returns (IUniversalAdapterEscrow.Call[] memory)
+    {
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
         calls[0] = IUniversalAdapterEscrow.Call({
             target: address(dex),

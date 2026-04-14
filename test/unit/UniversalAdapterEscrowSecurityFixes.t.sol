@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
+import {MockTarget} from "../mocks/MockTarget.sol";
 
 /**
  * @title UniversalAdapterEscrowSecurityFixesTest
@@ -15,6 +17,9 @@ import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalA
  *      - Issue #9: Prevent desynchronized externalDeposits underflow
  */
 contract UniversalAdapterEscrowSecurityFixesTest is Test {
+    uint256 internal constant EXTERNAL_DEPOSITS_SLOT = 8;
+    uint256 internal constant TOTAL_EXTERNAL_DEPOSITS_SLOT = 9;
+
     UniversalAdapterEscrow public adapter;
     MockERC20 public asset;
     MockValuer public valuer;
@@ -68,16 +73,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup: Allocate 1000 tokens
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Simulate external deposit (80 to protocol, 920 in adapter) - 8% under circuit breaker threshold
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Set protocol to fail on withdrawal
         protocol.setShouldFail(true);
@@ -87,10 +89,11 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // After fix: Returns up to requested amount (90) without reverting
         // Note: Set minAmountOut = 0 to disable slippage check
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(30e18);
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls); // minAmountOut = 0
+        bytes memory deallocateData = abi.encode(strategyId, 0, withdrawCalls); // minAmountOut = 0
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
 
         // Should return requested amount (90) from adapter balance despite protocol failure
         assertEq(uint256(-change), 90e18, "Should return requested amount despite protocol failure");
@@ -104,26 +107,24 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Protocol has funds and will succeed
         protocol.setShouldFail(false);
 
         // Deallocate 90 (minAmountOut = 0 to disable slippage check for this test)
         IUniversalAdapterEscrow.Call[] memory withdrawCalls = _createWithdrawCall(30e18);
-        bytes memory deallocateData = abi.encode(strategyId, 0, false, withdrawCalls);
+        bytes memory deallocateData = abi.encode(strategyId, 0, withdrawCalls);
 
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocateData, 90e18, bytes4(0x4b219d16), address(0));
 
         // Should return requested amount (90) from available balance when protocol succeeds
         assertEq(uint256(-change), 90e18, "Should return requested amount when protocol succeeds");
@@ -140,15 +141,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup with ghost
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Simulate loss
         // State: balance=920, totalExternalDeposits=80, totalAllocations=1000
@@ -179,15 +177,12 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup with ghost
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Simulate loss
         valuer.setReturnValue(800e18);
@@ -224,16 +219,13 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // At this point: externalDeposits[strategyId] = 80, totalExternalDeposits = 80
 
@@ -241,7 +233,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // (This could happen through various edge cases or bugs)
         vm.store(
             address(adapter),
-            bytes32(uint256(6)), // totalExternalDeposits storage slot
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(uint256(60e18)) // Set to 60 instead of 80
         );
 
@@ -253,7 +245,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         adapter.executeStrategyWithSlippage(
             strategyId,
             _createWithdrawCall(30e18),
-            30e18  // Expect at least 30e18 balance increase
+            30e18 // Expect at least 30e18 balance increase
         );
 
         // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
@@ -272,21 +264,18 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
         // Deposit to protocol (8% under circuit breaker threshold)
         vm.prank(owner);
-        adapter.executeStrategy(
-            strategyId,
-            _createDepositCall(80e18)
-        );
+        adapter.executeStrategy(strategyId, _createDepositCall(80e18));
 
         // Create extreme desync
         vm.store(
             address(adapter),
-            bytes32(uint256(6)),
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(uint256(10e18)) // totalExternalDeposits = 10, but per-strategy = 80
         );
 
@@ -296,7 +285,7 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         adapter.executeStrategyWithSlippage(
             strategyId,
             _createWithdrawCall(50e18),
-            50e18  // Expect at least 50e18 balance increase
+            50e18 // Expect at least 50e18 balance increase
         );
 
         // SECURITY FIX (security_issues_5nov2025_3.md Issue #3): Symmetric reduction in executeStrategyWithSlippage
@@ -321,28 +310,25 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
         uint256 allocation = perStrategy + 200e18;
         asset.mint(address(adapter), allocation);
 
-        bytes memory allocateData = abi.encode(strategyId, allocation, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, allocation, bytes4(0), address(0));
 
         // Manually set desynchronized state
         vm.store(
             address(adapter),
-            bytes32(uint256(5)), // externalDeposits[strategyId] storage slot (keccak256(strategyId, 5))
+            keccak256(abi.encode(strategyId, uint256(EXTERNAL_DEPOSITS_SLOT))),
             bytes32(perStrategy)
         );
         vm.store(
             address(adapter),
-            bytes32(uint256(6)), // totalExternalDeposits storage slot
+            bytes32(uint256(TOTAL_EXTERNAL_DEPOSITS_SLOT)),
             bytes32(totalExternal)
         );
 
         // Withdraw - should not revert
         vm.prank(owner);
-        try adapter.executeStrategy(
-            strategyId,
-            _createWithdrawCall(withdrawAmount)
-        ) {
+        try adapter.executeStrategy(strategyId, _createWithdrawCall(withdrawAmount)) {
             // Success - verify no underflow occurred
             uint256 totalAfter = adapter.totalExternalDeposits();
             assertLe(totalAfter, totalExternal, "Total should not increase");
@@ -350,6 +336,111 @@ contract UniversalAdapterEscrowSecurityFixesTest is Test {
             // If it reverts, it should be for a different reason, not underflow
             // Underflow would be caught by Solidity 0.8's built-in checks
         }
+    }
+
+    function testSetStrategyRejectsNonOnchainAgentWithoutValuer() public {
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        noValuerAdapter.setStrategy(strategyId, address(0xBEEF), "", 0);
+    }
+
+    function testSetStrategyAcceptsOnchainValuerAgentWithoutValuer() public {
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
+
+        vm.prank(owner);
+        noValuerAdapter.setStrategy(strategyId, address(onchainAgent), "", 0);
+
+        IUniversalAdapterEscrow.StrategyConfig memory config = noValuerAdapter.getStrategy(strategyId);
+        assertEq(config.agent, address(onchainAgent));
+        assertTrue(config.active);
+    }
+
+    function testRealAssetsUsesHaircutForUnhealthyOnchainValuation() public {
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
+        onchainAgent.setQuote(1_000e18, false);
+
+        vm.prank(owner);
+        noValuerAdapter.setStrategy(strategyId, address(onchainAgent), "", 0);
+
+        asset.mint(address(noValuerAdapter), 1_000e18);
+        vm.prank(address(vault));
+        noValuerAdapter.allocate(
+            abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0)), 1_000e18, bytes4(0), address(0)
+        );
+
+        assertEq(noValuerAdapter.realAssets(), 950e18);
+    }
+
+    function testQuoteSnapshotStateUsesZeroTimestampForOnchainValuation() public {
+        UniversalAdapterEscrow noValuerAdapter = new UniversalAdapterEscrow(address(vault), address(0), false);
+        MockSecurityOnchainValuerAgent onchainAgent = new MockSecurityOnchainValuerAgent();
+        onchainAgent.setQuote(1_000e18, true);
+
+        vm.prank(owner);
+        noValuerAdapter.setStrategy(strategyId, address(onchainAgent), "", 0);
+
+        asset.mint(address(noValuerAdapter), 1_000e18);
+        vm.prank(address(vault));
+        noValuerAdapter.allocate(
+            abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0)), 1_000e18, bytes4(0), address(0)
+        );
+
+        (uint256 assetsQuoted, uint64 snapshotTimestamp, bool healthy) = noValuerAdapter.quoteSnapshotState();
+        assertEq(assetsQuoted, 1_000e18);
+        assertEq(snapshotTimestamp, 0);
+        assertFalse(healthy);
+    }
+
+    function testQuoteSnapshotStateMarksHealthCheckFailureUnhealthy() public {
+        MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
+        bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", address(snapshotAdapter)));
+        snapshotValuer.setValue(totalId, 1_000e18, uint64(block.timestamp));
+        snapshotValuer.setHealthCheckFailure(true);
+
+        (uint256 assetsQuoted, uint64 snapshotTimestamp, bool healthy) = snapshotAdapter.quoteSnapshotState();
+        assertEq(assetsQuoted, 1_000e18);
+        assertEq(snapshotTimestamp, uint64(block.timestamp));
+        assertFalse(healthy);
+    }
+
+    function testUpdateWhitelistRejectsDelegatecallTargets() public {
+        MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
+        MockSecurityDelegatecallTarget proxyLike = new MockSecurityDelegatecallTarget();
+
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        snapshotAdapter.updateWhitelist(address(proxyLike), bytes4(0), true, 0);
+    }
+
+    function testExecuteStrategyRejectsCodeHashChangesAfterWhitelisting() public {
+        MockSecuritySnapshotValuer snapshotValuer = new MockSecuritySnapshotValuer();
+        UniversalAdapterEscrow snapshotAdapter = new UniversalAdapterEscrow(address(vault), address(snapshotValuer), true);
+        MockTarget targetContract = new MockTarget(address(asset));
+
+        vm.prank(owner);
+        snapshotAdapter.setStrategy(strategyId, owner, "", 0);
+        vm.prank(owner);
+        snapshotAdapter.updateWhitelist(address(targetContract), targetContract.doSomething.selector, true, 0);
+
+        MockSecurityMutatedTarget mutatedTarget = new MockSecurityMutatedTarget();
+        vm.etch(address(targetContract), address(mutatedTarget).code);
+
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: address(targetContract),
+            data: abi.encodeWithSelector(targetContract.doSomething.selector),
+            value: 0
+        });
+
+        vm.prank(owner);
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
+        snapshotAdapter.executeStrategy(strategyId, calls);
     }
 
     /* ============ HELPER FUNCTIONS ============ */
@@ -393,6 +484,10 @@ contract MockValuer {
     function getValue(bytes32) external view returns (uint256) {
         return returnValue;
     }
+
+    function isValuationHealthy(address) external pure returns (bool) {
+        return true;
+    }
 }
 
 /**
@@ -435,5 +530,68 @@ contract MockVault {
     constructor(address _asset, address _owner) {
         asset = _asset;
         owner = _owner;
+    }
+}
+
+contract MockSecurityOnchainValuerAgent {
+    uint256 internal assets;
+    bool internal healthy;
+
+    function setQuote(uint256 assets_, bool healthy_) external {
+        assets = assets_;
+        healthy = healthy_;
+    }
+
+    function quoteCurrentAssets() external view returns (uint256, bool) {
+        return (assets, healthy);
+    }
+}
+
+contract MockSecuritySnapshotValuer {
+    mapping(bytes32 => IUniversalValuerOffchain.ValueReport) internal reports;
+    bool internal healthCheckFailure;
+
+    function setValue(bytes32 strategyId, uint256 value, uint64 timestamp) external {
+        reports[strategyId] = IUniversalValuerOffchain.ValueReport({
+            value: value,
+            timestamp: timestamp,
+            confidence: 100,
+            nonce: 1,
+            isPush: true,
+            lastUpdater: msg.sender
+        });
+    }
+
+    function setHealthCheckFailure(bool shouldFail) external {
+        healthCheckFailure = shouldFail;
+    }
+
+    function getValue(bytes32 strategyId) external view returns (uint256) {
+        return reports[strategyId].value;
+    }
+
+    function getReport(bytes32 strategyId) external view returns (IUniversalValuerOffchain.ValueReport memory) {
+        return reports[strategyId];
+    }
+
+    function isValuationHealthy(address) external view returns (bool) {
+        if (healthCheckFailure) revert("health check unavailable");
+        return true;
+    }
+}
+
+contract MockSecurityDelegatecallTarget {
+    function forward(address target, bytes calldata data) external returns (bytes memory result) {
+        (bool success, bytes memory returnData) = target.delegatecall(data);
+        require(success, "delegatecall failed");
+        return returnData;
+    }
+}
+
+contract MockSecurityMutatedTarget {
+    uint256 public counter;
+
+    function doSomething() external {
+        counter += 2;
     }
 }

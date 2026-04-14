@@ -19,12 +19,6 @@ out/
 /.claude
 *.md
 
-/venv-keeper
-/src/keepers/__pycache__
-
 !/llms.txt
-/src/keepers/utils/__pycache__
-keeper/keeper_config_looper_test.json
 
 !/docs/*.md
-keeper/keeper_config_options_vault.json

@@ -5,6 +5,10 @@ contract MockValuer {
     mapping(address => uint256) public values;
     mapping(bytes32 => uint256) public strategyValues;
 
+    function isValuationHealthy(address) external pure returns (bool) {
+        return true;
+    }
+
     function setValue(address target, uint256 value) external {
         values[target] = value;
 

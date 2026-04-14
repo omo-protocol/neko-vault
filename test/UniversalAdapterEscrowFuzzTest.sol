@@ -187,12 +187,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.assume(caller != address(vault));
         vm.assume(assets > 0 && assets <= INITIAL_BALANCE);
 
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(caller);
         vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
@@ -204,12 +199,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.assume(caller != address(vault));
         vm.assume(assets > 0);
 
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(caller);
         vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
@@ -217,12 +207,9 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     }
 
     /// @notice Fuzz test: Only owner can call admin functions
-    function testFuzz_OnlyOwnerCanSetStrategy(
-        address caller,
-        bytes32 strategyId,
-        address newAgent,
-        uint256 dailyLimit
-    ) public {
+    function testFuzz_OnlyOwnerCanSetStrategy(address caller, bytes32 strategyId, address newAgent, uint256 dailyLimit)
+        public
+    {
         vm.assume(caller != owner);
 
         vm.prank(caller);
@@ -295,12 +282,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         // Bound to reasonable range
         assets = bound(assets, 1, INITIAL_BALANCE);
 
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         uint256 allocationBefore = escrow.allocations(STRATEGY_ID);
         uint256 totalBefore = escrow.totalAllocations();
@@ -319,12 +301,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: Allocate rejects zero amount
     function testFuzz_AllocateRejectsZeroAmount() public {
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
@@ -336,12 +313,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.assume(inactiveStrategyId != STRATEGY_ID);
         assets = bound(assets, 1, INITIAL_BALANCE);
 
-        bytes memory data = abi.encode(
-            inactiveStrategyId,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(inactiveStrategyId, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.StrategyNotActive.selector);
@@ -355,14 +327,10 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
         IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](numCalls);
         for (uint256 i = 0; i < numCalls; i++) {
-            calls[i] = IUniversalAdapterEscrow.Call({
-                target: address(externalProtocol),
-                data: "",
-                value: 0
-            });
+            calls[i] = IUniversalAdapterEscrow.Call({target: address(externalProtocol), data: "", value: 0});
         }
 
-        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), false, calls);
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), calls);
 
         vm.prank(address(vault));
         vm.expectRevert(IUniversalAdapterEscrow.LiquidityDataMustHaveEmptyCalls.selector);
@@ -377,12 +345,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
             amounts[i] = bound(amounts[i], 1, INITIAL_BALANCE / 10);
             totalExpected += amounts[i];
 
-            bytes memory data = abi.encode(
-                STRATEGY_ID,
-                uint256(0),
-                false,
-                new IUniversalAdapterEscrow.Call[](0)
-            );
+            bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
             vm.prank(address(vault));
             escrow.allocate(data, amounts[i], bytes4(0), address(0));
@@ -403,12 +366,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         deallocateAmount = bound(deallocateAmount, 1, allocateAmount);
 
         // First allocate
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         escrow.allocate(data, allocateAmount, bytes4(0), address(0));
@@ -428,9 +386,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         assertEq(ids[0], STRATEGY_ID);
         assertEq(change, -int256(deallocateAmount));
 
-        uint256 expectedAllocation = allocationBefore > deallocateAmount
-            ? allocationBefore - deallocateAmount
-            : 0;
+        uint256 expectedAllocation = allocationBefore > deallocateAmount ? allocationBefore - deallocateAmount : 0;
         assertEq(escrow.allocations(STRATEGY_ID), expectedAllocation);
 
         _checkInvariants();
@@ -449,12 +405,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         externalAmount = bound(externalAmount, 0, maxExternal < allocateAmount ? maxExternal : allocateAmount - 1);
 
         // Setup allocation
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         escrow.allocate(data, allocateAmount, bytes4(0), address(0));
@@ -491,12 +442,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         deallocateAmount = bound(deallocateAmount, INITIAL_BALANCE + 1, type(uint128).max);
 
         // Allocate first
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         escrow.allocate(data, 1000, bytes4(0), address(0));
@@ -505,9 +451,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(address(vault));
         vm.expectRevert(
             abi.encodeWithSelector(
-                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector,
-                INITIAL_BALANCE,
-                deallocateAmount
+                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, INITIAL_BALANCE, deallocateAmount
             )
         );
         escrow.deallocate(data, deallocateAmount, bytes4(0), address(0));
@@ -543,12 +487,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         allocateAmount = bound(allocateAmount, 1, INITIAL_BALANCE);
 
         // Allocate to strategy
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         escrow.allocate(data, allocateAmount, bytes4(0), address(0));
@@ -581,12 +520,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     // ============================================
 
     /// @notice Fuzz test: Whitelist configuration
-    function testFuzz_WhitelistConfiguration(
-        address target,
-        bytes4 selector,
-        bool allowed,
-        uint256 limit
-    ) public {
+    function testFuzz_WhitelistConfiguration(address target, bytes4 selector, bool allowed, uint256 limit) public {
         vm.prank(owner);
         escrow.updateWhitelist(target, selector, allowed, limit);
 
@@ -625,12 +559,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         depositAmount = bound(depositAmount, 1, maxDeposit);
 
         // First allocate
-        bytes memory allocData = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(allocData, depositAmount * 2, bytes4(0), address(0));
 
@@ -657,12 +586,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         // First do a deposit
         uint256 depositAmount = 1000e18;
 
-        bytes memory allocData = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(allocData, depositAmount * 2, bytes4(0), address(0));
 
@@ -694,12 +618,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         depositAmount = bound(depositAmount, 1000e18, INITIAL_BALANCE / 2);
 
         // Allocate and make a deposit
-        bytes memory allocData = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(allocData, depositAmount * 2, bytes4(0), address(0));
 
@@ -729,12 +648,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         minBalanceIncrease = bound(minBalanceIncrease, 0, withdrawAmount);
 
         // Allocate and deposit
-        bytes memory allocData = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(allocData, depositAmount * 2, bytes4(0), address(0));
 
@@ -811,12 +725,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         vm.prank(owner);
         escrow.setPaused(true);
 
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         // Allocate should fail
         vm.prank(address(vault));
@@ -936,12 +845,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         valuer.setValue(totalId, valuerValue);
 
         // With allocations, should use valuer
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, 1000e18, bytes4(0), address(0));
 
@@ -966,12 +870,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         externalDepositsAmount = bound(externalDepositsAmount, 1000e18, maxDeposit);
 
         // Setup allocations and external deposits
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, externalDepositsAmount * 2, bytes4(0), address(0));
 
@@ -1000,7 +899,8 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         // - totalExternalDeposits = externalDepositsAmount
         // - balance = INITIAL_BALANCE - externalDepositsAmount (tokens sent to external)
         // - allocatedInAdapter = totalAllocations - totalExternalDeposits = externalDepositsAmount
-        // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = externalDepositsAmount (since balance > allocatedInAdapter)
+        // - allocatedInAdapterBounded = min(allocatedInAdapter, balance) = externalDepositsAmount (since balance >
+        // allocatedInAdapter)
         uint256 balance = INITIAL_BALANCE - externalDepositsAmount;
         uint256 allocatedInAdapter = externalDepositsAmount; // totalAllocations - totalExternalDeposits
         uint256 allocatedInAdapterBounded = allocatedInAdapter < balance ? allocatedInAdapter : balance;
@@ -1021,12 +921,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         valuerValue = bound(valuerValue, 0, depositAmount * 2);
 
         // Setup allocation and external deposit
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1068,22 +963,14 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: syncExternalDepositsPerStrategy reduces deposits
     /// @dev Uses bypass circuit breaker to allow deposits for testing
-    function testFuzz_SyncExternalDepositsPerStrategy(
-        uint256 depositAmount,
-        uint256 reduction
-    ) public {
+    function testFuzz_SyncExternalDepositsPerStrategy(uint256 depositAmount, uint256 reduction) public {
         // Limit deposit to avoid circuit breaker
         uint256 maxDeposit = INITIAL_BALANCE / 10 - 1;
         depositAmount = bound(depositAmount, 1000e18, maxDeposit);
         reduction = bound(reduction, 0, depositAmount);
 
         // Setup
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1115,22 +1002,14 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: syncExternalDepositsPerStrategy rejects increase
     /// @dev Uses bypass circuit breaker to allow deposits for testing
-    function testFuzz_SyncExternalDepositsRejectsIncrease(
-        uint256 depositAmount,
-        uint256 increase
-    ) public {
+    function testFuzz_SyncExternalDepositsRejectsIncrease(uint256 depositAmount, uint256 increase) public {
         // Limit deposit to avoid circuit breaker
         uint256 maxDeposit = INITIAL_BALANCE / 10 - 1;
         depositAmount = bound(depositAmount, 1000e18, maxDeposit);
         increase = bound(increase, 1, INITIAL_BALANCE);
 
         // Setup
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1156,22 +1035,14 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: reduceExternalDeposits works correctly
     /// @dev Uses bypass circuit breaker to allow deposits for testing
-    function testFuzz_ReduceExternalDeposits(
-        uint256 depositAmount,
-        uint256 newValue
-    ) public {
+    function testFuzz_ReduceExternalDeposits(uint256 depositAmount, uint256 newValue) public {
         // Limit deposit to avoid circuit breaker
         uint256 maxDeposit = INITIAL_BALANCE / 10 - 1;
         depositAmount = bound(depositAmount, 1000e18, maxDeposit);
         newValue = bound(newValue, 0, depositAmount);
 
         // Setup
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1197,22 +1068,14 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Fuzz test: reduceExternalDeposits rejects increase
     /// @dev Uses bypass circuit breaker to allow deposits for testing
-    function testFuzz_ReduceExternalDepositsRejectsIncrease(
-        uint256 depositAmount,
-        uint256 increase
-    ) public {
+    function testFuzz_ReduceExternalDepositsRejectsIncrease(uint256 depositAmount, uint256 increase) public {
         // Limit deposit to avoid circuit breaker
         uint256 maxDeposit = INITIAL_BALANCE / 10 - 1;
         depositAmount = bound(depositAmount, 1000e18, maxDeposit);
         increase = bound(increase, 1, INITIAL_BALANCE);
 
         // Setup with deposit
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1241,12 +1104,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         allocAmount = bound(allocAmount, 1000e18, INITIAL_BALANCE / 2);
 
         // Setup some allocation first
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
@@ -1274,12 +1132,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         uint256 allocAmount = 1000e18;
 
         // Setup and refresh
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, allocAmount, bytes4(0), address(0));
 
@@ -1294,7 +1147,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         // Warp time
         vm.warp(block.timestamp + timeElapsed);
 
-        (, , bool isStale) = escrow.getCachedValuation();
+        (,, bool isStale) = escrow.getCachedValuation();
         assertTrue(isStale);
     }
 
@@ -1343,12 +1196,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         externalAmount = bound(externalAmount, 0, maxExternal < allocateAmount / 2 ? maxExternal : allocateAmount / 2);
 
         // Allocate
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, allocateAmount, bytes4(0), address(0));
 
@@ -1391,12 +1239,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
             escrow.setStrategy(stratId, agent, "", type(uint256).max);
 
             // Allocate to make active
-            bytes memory data = abi.encode(
-                stratId,
-                uint256(0),
-                false,
-                new IUniversalAdapterEscrow.Call[](0)
-            );
+            bytes memory data = abi.encode(stratId, uint256(0), new IUniversalAdapterEscrow.Call[](0));
             vm.prank(address(vault));
             escrow.allocate(data, 100e18, bytes4(0), address(0));
         }
@@ -1415,12 +1258,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
     /// @notice Test allocation with max uint256
     function test_AllocateMaxUint() public {
         // This should overflow or handle gracefully
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         // Allocate max - should work but balance check matters
         vm.prank(address(vault));
@@ -1431,12 +1269,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
     /// @notice Test allocation with 1 wei
     function test_AllocateMinimum() public {
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         escrow.allocate(data, 1, bytes4(0), address(0));
@@ -1480,12 +1313,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
 
         for (uint256 i = 0; i < 3; i++) {
             // Allocate
-            bytes memory data = abi.encode(
-                STRATEGY_ID,
-                uint256(0),
-                false,
-                new IUniversalAdapterEscrow.Call[](0)
-            );
+            bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
             vm.prank(address(vault));
             escrow.allocate(data, allocAmounts[i], bytes4(0), address(0));
             totalAllocated += allocAmounts[i];
@@ -1539,12 +1367,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         minBalanceIncrease = bound(minBalanceIncrease, 1, withdrawAmount);
 
         // Setup allocation and external deposit
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 
@@ -1591,12 +1414,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         depositAmount = bound(depositAmount, 1000e18, INITIAL_BALANCE / 4);
 
         // Setup allocation
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 3, bytes4(0), address(0));
 
@@ -1621,12 +1439,7 @@ contract UniversalAdapterEscrowFuzzTest is Test {
         uint256 depositAmount = 1000e18;
 
         // Setup and deposit
-        bytes memory data = abi.encode(
-            STRATEGY_ID,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(STRATEGY_ID, uint256(0), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         escrow.allocate(data, depositAmount * 2, bytes4(0), address(0));
 

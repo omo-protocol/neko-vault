@@ -23,7 +23,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
     address public user = address(0x2);
 
     bytes32 public constant STRATEGY_ID = keccak256("STRATEGY_1");
-    
+
     // Function selectors for vault calls
     bytes4 public constant DEALLOCATE_SELECTOR = 0x4b219d16;
     bytes4 public constant FORCE_DEALLOCATE_SELECTOR = 0xe4d38cd8;
@@ -55,11 +55,11 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
 
         // Mint assets to vault
         asset.mint(address(vault), 1000e18);
-        
+
         // Give vault approval to pull from adapter
         vm.prank(address(adapter));
         asset.approve(address(vault), type(uint256).max);
-        
+
         // Give protocol approval to pull from adapter (for deposits)
         vm.prank(address(adapter));
         asset.approve(address(protocol), type(uint256).max);
@@ -75,9 +75,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup: Allocate assets to strategy
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Deallocate should succeed since balance covers the request
@@ -85,17 +85,13 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         assertEq(balanceBefore, allocAmount);
 
         vm.prank(address(vault));
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
         vm.expectEmit(true, false, false, true);
         emit AllocationUpdated(STRATEGY_ID, allocAmount - deallocAmount, -int256(deallocAmount));
-        
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocData,
-            deallocAmount,
-            DEALLOCATE_SELECTOR,
-            address(0)
-        );
+
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
 
         // Verify results
         assertEq(ids.length, 1);
@@ -113,27 +109,92 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup: Allocate assets
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Attempt to deallocate more than available
         vm.prank(address(vault));
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
         vm.expectRevert(
             abi.encodeWithSelector(
-                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector,
-                allocAmount,
-                deallocAmount
+                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, allocAmount, deallocAmount
             )
         );
-        
+
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
     }
 
+    function test_deallocate_UserExitSelectorTriggersAutoWithdrawal() public {
+        uint256 allocAmount = 100e18;
+        MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
+
+        adapter.setStrategy(STRATEGY_ID, address(controller), "", 0);
+
+        vm.prank(address(vault));
+        asset.transfer(address(adapter), allocAmount);
+
+        vm.prank(address(vault));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
+
+        IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
+        depositCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(protocol),
+            data: abi.encodeWithSelector(protocol.deposit.selector, 40e18),
+            value: 0
+        });
+
+        vm.prank(owner);
+        adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
+
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
+        bytes4 withdrawSelector = bytes4(keccak256("withdraw(uint256,address,address)"));
+
+        vm.prank(address(vault));
+        adapter.deallocate(deallocData, 80e18, withdrawSelector, address(0));
+
+        assertEq(protocol.balanceOf(address(adapter)), 20e18);
+        assertEq(asset.balanceOf(address(adapter)), 80e18);
+    }
+
+    function test_deallocate_RedeemSelectorTriggersAutoWithdrawal() public {
+        uint256 allocAmount = 100e18;
+        MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
+
+        adapter.setStrategy(STRATEGY_ID, address(controller), "", 0);
+
+        vm.prank(address(vault));
+        asset.transfer(address(adapter), allocAmount);
+
+        vm.prank(address(vault));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+        adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
+
+        IUniversalAdapterEscrow.Call[] memory depositCalls = new IUniversalAdapterEscrow.Call[](1);
+        depositCalls[0] = IUniversalAdapterEscrow.Call({
+            target: address(protocol),
+            data: abi.encodeWithSelector(protocol.deposit.selector, 50e18),
+            value: 0
+        });
+
+        vm.prank(owner);
+        adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
+
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
+        bytes4 redeemSelector = bytes4(keccak256("redeem(uint256,address,address)"));
+
+        vm.prank(address(vault));
+        adapter.deallocate(deallocData, 75e18, redeemSelector, address(0));
+
+        assertEq(protocol.balanceOf(address(adapter)), 25e18);
+        assertEq(asset.balanceOf(address(adapter)), 75e18);
+    }
+
     /// @notice Test deallocate ignores withdrawCalls (backward compatibility)
+
     function test_deallocate_IgnoresWithdrawCalls() public {
         uint256 allocAmount = 100e18;
         uint256 deallocAmount = 50e18;
@@ -141,9 +202,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Create deallocData with withdrawCalls (should be ignored)
@@ -154,16 +215,12 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
             value: 0
         });
 
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, withdrawCalls);
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, withdrawCalls);
 
         // Deallocate should succeed WITHOUT executing withdrawCalls
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocData,
-            deallocAmount,
-            DEALLOCATE_SELECTOR,
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
 
         // Verify withdrawCalls were NOT executed (protocol balance unchanged)
         assertEq(protocol.balanceOf(address(adapter)), 0);
@@ -180,9 +237,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup: Allocate and partially deploy to external protocol
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Agent deploys some to external protocol (use bypass for large deposits)
@@ -206,17 +263,13 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Since slack == availableBalance, this is NOT a partial deallocate (full fulfillment)
         uint256 slack = allocAmount - adapter.externalDeposits(STRATEGY_ID);
         assertEq(slack, availableBalance); // Verify test setup
-        
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
         // No PartialDeallocate event expected since we can fulfill the full request
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocData,
-            slack,
-            FORCE_DEALLOCATE_SELECTOR,
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocData, slack, FORCE_DEALLOCATE_SELECTOR, address(0));
 
         // Verify full fulfillment
         assertEq(ids.length, 1);
@@ -224,7 +277,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - slack);
     }
 
-    /// @notice Test force deallocate with true partial fulfillment (slack > available balance)
+    /// @notice Test force deallocate reverts when slack exceeds available balance
     function test_forceDeallocate_TruePartialFulfillment() public {
         uint256 allocAmount = 100e18;
         uint256 depositAmount = 70e18;
@@ -233,9 +286,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup: Allocate and partially deploy to external protocol
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Agent deploys to external protocol
@@ -258,32 +311,23 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // We want slack > availableBalance, so let's transfer 10e18 out
         vm.prank(address(adapter));
         asset.transfer(address(0xdead), 10e18);
-        
+
         uint256 newAvailableBalance = 20e18;
         assertEq(asset.balanceOf(address(adapter)), newAvailableBalance);
-        
+
         // Now slack (30e18) > available balance (20e18)
         uint256 slack = allocAmount - adapter.externalDeposits(STRATEGY_ID);
         assertEq(slack, 30e18);
-        
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
-        // Should emit PartialDeallocate since slack > available balance
-        vm.expectEmit(true, false, false, true);
-        emit PartialDeallocate(STRATEGY_ID, slack, newAvailableBalance);
-        
-        vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocData,
-            slack,
-            FORCE_DEALLOCATE_SELECTOR,
-            address(0)
-        );
 
-        // Verify partial fulfillment - returns only what's available
-        assertEq(ids.length, 1);
-        assertEq(change, -int256(newAvailableBalance)); // Returns available (20e18), not requested (30e18)
-        assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - newAvailableBalance);
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
+        vm.prank(address(vault));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, newAvailableBalance, slack
+            )
+        );
+        adapter.deallocate(deallocData, slack, FORCE_DEALLOCATE_SELECTOR, address(0));
     }
 
     /* ========== WITHDRAW FROM STRATEGY TESTS ========== */
@@ -297,9 +341,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup: Allocate and deploy to protocol
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Deploy to protocol (use bypass for large deposits >10%)
@@ -350,9 +394,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Deploy to protocol (use bypass for large deposits >10%)
@@ -375,7 +419,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         });
 
         vm.expectRevert(IUniversalAdapterEscrow.SlippageTooHigh.selector);
-        
+
         vm.prank(agent);
         adapter.withdrawFromStrategy(STRATEGY_ID, withdrawCalls, minBalanceIncrease);
     }
@@ -387,9 +431,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Attempt withdrawal with calls that don't increase balance
@@ -401,7 +445,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         });
 
         vm.expectRevert(IUniversalAdapterEscrow.InvalidAmount.selector);
-        
+
         vm.prank(agent);
         adapter.withdrawFromStrategy(STRATEGY_ID, withdrawCalls, 0);
     }
@@ -413,9 +457,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Unauthorized user attempts withdrawal
@@ -427,7 +471,7 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         });
 
         vm.expectRevert(IUniversalAdapterEscrow.NotAuthorized.selector);
-        
+
         vm.prank(user);
         adapter.withdrawFromStrategy(STRATEGY_ID, withdrawCalls, 50e18);
     }
@@ -442,21 +486,21 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Benchmark deallocate gas
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
         uint256 gasBefore = gasleft();
-        
+
         vm.prank(address(vault));
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
-        
+
         uint256 gasUsed = gasBefore - gasleft();
-        
+
         // Gas should be < 100k (significantly less than old implementation)
         // Old implementation with multicalls could use 200k-3M+ gas
         emit log_named_uint("Simplified deallocate() gas:", gasUsed);
@@ -472,9 +516,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Setup
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Deploy to protocol (use bypass for large deposits >10%)
@@ -500,12 +544,12 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         });
 
         uint256 gasBefore = gasleft();
-        
+
         vm.prank(agent);
         adapter.withdrawFromStrategy(STRATEGY_ID, withdrawCalls, withdrawAmount);
-        
+
         uint256 gasUsed = gasBefore - gasleft();
-        
+
         // This function can use more gas since it's not in user withdrawal path
         emit log_named_uint("withdrawFromStrategy() gas:", gasUsed);
     }
@@ -521,9 +565,9 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         // Step 1: Vault allocates to adapter
         vm.prank(address(vault));
         asset.transfer(address(adapter), allocAmount);
-        
+
         vm.prank(address(vault));
-        bytes memory allocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
         adapter.allocate(allocData, allocAmount, bytes4(0), address(0));
 
         // Step 2: Agent deploys to external protocol (use bypass for large deposits)
@@ -543,16 +587,14 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
 
         // Step 3: User attempts withdrawal - SHOULD FAIL (insufficient balance)
         vm.prank(address(vault));
-        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, false, new IUniversalAdapterEscrow.Call[](0));
-        
+        bytes memory deallocData = abi.encode(STRATEGY_ID, 0, new IUniversalAdapterEscrow.Call[](0));
+
         vm.expectRevert(
             abi.encodeWithSelector(
-                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector,
-                allocAmount - depositAmount,
-                deallocAmount
+                IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, allocAmount - depositAmount, deallocAmount
             )
         );
-        
+
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
 
         // Step 4: Agent monitors and withdraws from protocol to refill adapter
@@ -573,15 +615,32 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
 
         // Step 5: User retries withdrawal - SHOULD SUCCEED
         vm.prank(address(vault));
-        (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            deallocData,
-            deallocAmount,
-            DEALLOCATE_SELECTOR,
-            address(0)
-        );
+        (bytes32[] memory ids, int256 change) =
+            adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
 
         assertEq(ids.length, 1);
         assertEq(change, -int256(deallocAmount));
         assertEq(adapter.getAllocation(STRATEGY_ID), allocAmount - deallocAmount);
+    }
+}
+
+contract MockAutoWithdrawController {
+    address public immutable protocol;
+
+    constructor(address _protocol) {
+        protocol = _protocol;
+    }
+
+    function quoteAutomaticWithdrawal(uint256 amount)
+        external
+        view
+        returns (IUniversalAdapterEscrow.Call[] memory calls)
+    {
+        calls = new IUniversalAdapterEscrow.Call[](1);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: protocol,
+            data: abi.encodeWithSelector(MockProtocol.withdraw.selector, amount),
+            value: 0
+        });
     }
 }

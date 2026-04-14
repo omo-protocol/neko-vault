@@ -37,11 +37,7 @@ contract ZeroAllocationDeallocateTest is Test {
         valuer = new MockValuer();
         vault = new MockVaultV2(address(asset), owner);
 
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            false
-        );
+        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
 
         vm.startPrank(owner);
         vault.addAdapter(address(adapter));
@@ -59,12 +55,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Setup: Allocate to STRATEGY_1, but not STRATEGY_2
         asset.mint(address(adapter), 500e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            500e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 500e6, bytes4(0), address(0));
 
         // Verify initial state
         assertEq(adapter.getAllocation(STRATEGY_1), 500e6, "Strategy 1 should have allocation");
@@ -79,10 +70,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // The tokens can still be transferred by VaultV2, but cap accounting stays accurate
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_2, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            100e6,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_2, 0, new IUniversalAdapterEscrow.Call[](0)), 100e6, bytes4(0), address(0)
         );
 
         // change=0 because allocationDecrease=min(100e6, 0)=0
@@ -100,12 +88,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Setup: Allocate 300e6 to STRATEGY_1
         asset.mint(address(adapter), 300e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            300e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 300e6, bytes4(0), address(0));
 
         // Add profits/yield - 200e6 extra
         asset.mint(address(adapter), 200e6);
@@ -114,10 +97,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Try to withdraw 450e6 from STRATEGY_1 (more than allocated, but less than balance)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            450e6,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 450e6, bytes4(0), address(0)
         );
 
         // SECURITY FIX: change is capped at allocation (300e6), not requested (450e6)
@@ -143,10 +123,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Deallocate from strategy with 0 allocation
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            100e6,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 100e6, bytes4(0), address(0)
         );
 
         // SECURITY FIX: change=0 because no allocation to decrease
@@ -164,12 +141,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Setup: Normal operation with allocation
         asset.mint(address(adapter), 400e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            400e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 400e6, bytes4(0), address(0));
 
         // Add extra balance (profits/yield)
         asset.mint(address(adapter), 100e6);
@@ -180,10 +152,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Try emergency withdrawal from STRATEGY_2 (which has 0 allocation)
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_2, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            500e6,
-            bytes4(0),
-            address(0)
+            abi.encode(STRATEGY_2, 0, new IUniversalAdapterEscrow.Call[](0)), 500e6, bytes4(0), address(0)
         );
 
         // SECURITY FIX: change=0 because STRATEGY_2 has 0 allocation
@@ -203,12 +172,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Setup: Normal operation with allocation
         asset.mint(address(adapter), 400e6);
         vm.prank(address(vault));
-        adapter.allocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
-            400e6,
-            bytes4(0),
-            address(0)
-        );
+        adapter.allocate(abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)), 400e6, bytes4(0), address(0));
 
         // Add extra balance (profits/yield)
         asset.mint(address(adapter), 100e6);
@@ -216,7 +180,7 @@ contract ZeroAllocationDeallocateTest is Test {
         // Proper approach: withdraw from STRATEGY_1 which has the allocation
         vm.prank(address(vault));
         (bytes32[] memory ids, int256 change) = adapter.deallocate(
-            abi.encode(STRATEGY_1, 0, false, new IUniversalAdapterEscrow.Call[](0)),
+            abi.encode(STRATEGY_1, 0, new IUniversalAdapterEscrow.Call[](0)),
             500e6, // Request more than allocation
             bytes4(0),
             address(0)

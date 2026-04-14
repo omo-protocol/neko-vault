@@ -188,11 +188,11 @@ contract VaultV2 is IVaultV2 {
     using MathLib for uint128;
     using MathLib for int256;
 
-    /* IMMUTABLE */
+    address public asset;
+    uint8 public decimals;
+    uint256 public virtualShares;
 
-    address public immutable asset;
-    uint8 public immutable decimals;
-    uint256 public immutable virtualShares;
+    bool private _initialized;
 
     /* ROLES STORAGE */
 
@@ -233,6 +233,7 @@ contract VaultV2 is IVaultV2 {
 
     address public liquidityAdapter;
     bytes public liquidityData;
+    uint256 internal adapterInteractionLock;
 
     /* TIMELOCKS STORAGE */
 
@@ -293,6 +294,22 @@ contract VaultV2 is IVaultV2 {
     /* CONSTRUCTOR */
 
     constructor(address _owner, address _asset) {
+        if (_owner == address(0) && _asset == address(0)) {
+            _initialized = true;
+            return;
+        }
+        _initialize(_owner, _asset);
+    }
+
+    function initialize(address _owner, address _asset) external {
+        _initialize(_owner, _asset);
+    }
+
+    function _initialize(address _owner, address _asset) internal {
+        require(!_initialized, ErrorsLib.Unauthorized());
+        require(_owner != address(0) && _asset != address(0), ErrorsLib.ZeroAddress());
+
+        _initialized = true;
         asset = _asset;
         owner = _owner;
         lastUpdate = uint64(block.timestamp);
@@ -357,6 +374,13 @@ contract VaultV2 is IVaultV2 {
         require(!abdicated[selector], ErrorsLib.Abdicated());
         executableAt[msg.data] = 0;
         emit EventsLib.Accept(selector, msg.data);
+    }
+
+    modifier adapterInteractionGuard() {
+        require(adapterInteractionLock == 0, ErrorsLib.Reentrancy());
+        adapterInteractionLock = 1;
+        _;
+        adapterInteractionLock = 0;
     }
 
     function revoke(bytes calldata data) external {
@@ -568,7 +592,7 @@ contract VaultV2 is IVaultV2 {
         allocateInternal(adapter, data, assets);
     }
 
-    function allocateInternal(address adapter, bytes memory data, uint256 assets) internal {
+    function allocateInternal(address adapter, bytes memory data, uint256 assets) internal adapterInteractionGuard {
         require(isAdapter[adapter], ErrorsLib.NotAdapter());
 
         accrueInterest();
@@ -597,6 +621,7 @@ contract VaultV2 is IVaultV2 {
 
     function deallocateInternal(address adapter, bytes memory data, uint256 assets)
         internal
+        adapterInteractionGuard
         returns (bytes32[] memory)
     {
         require(isAdapter[adapter], ErrorsLib.NotAdapter());
