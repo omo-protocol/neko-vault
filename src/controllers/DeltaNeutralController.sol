@@ -8,10 +8,9 @@ import {IERC20} from "../interfaces/IERC20.sol";
 import {
     IAsyncWithdrawalController,
     IAutomatedWithdrawalController,
-    IOnchainStrategyValuer,
-    IRemotePpsSnapshotStore,
-    IWithdrawalReserveSource
+    IOnchainStrategyValuer
 } from "./StrategyControllerInterfaces.sol";
+import {ControllerLiquidityLib} from "./libraries/ControllerLiquidityLib.sol";
 import {DeltaNeutralKellyLib} from "./libraries/DeltaNeutralKellyLib.sol";
 import {L1Read} from "./venue_specific/hyperliquid/L1Read.sol";
 import {
@@ -28,7 +27,6 @@ import {
     KellyLinearState,
     DeltaNeutralKellyRebalanceQuote,
     DeltaNeutralUnwindPlan,
-    ChainManifest,
     VenueConfig
 } from "../strategies/StrategyTypes.sol";
 
@@ -38,6 +36,8 @@ contract DeltaNeutralController is
     IAsyncWithdrawalController,
     IOnchainStrategyValuer
 {
+    using ControllerLiquidityLib for address;
+
     bytes32 public constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
     uint256 internal constant BPS = 10_000;
 
@@ -45,7 +45,6 @@ contract DeltaNeutralController is
     error NotVaultManager();
     error InvalidAddress();
     error InvalidReserveConfig();
-    error InvalidChainManifest();
     error InvalidVenue();
     error InvalidDeltaConfig();
     error InvalidKellyConfig();
@@ -69,16 +68,12 @@ contract DeltaNeutralController is
     address public immutable vaultManager;
     IVaultV2 public immutable vault;
     IUniversalAdapterEscrow public immutable sleeve;
-    address public immutable remotePpsSnapshotStore;
     address public immutable asset;
     bytes32 public immutable strategyId;
     uint256 public immutable targetReserveBps;
     bytes32 public immutable venueId;
     address public immutable venue;
     address public immutable helper;
-    bool public immutable venueUsesLayerZero;
-
-    ChainManifest[] internal _chainManifests;
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -137,11 +132,9 @@ contract DeltaNeutralController is
         address vaultManager_,
         address vault_,
         address sleeve_,
-        address remotePpsSnapshotStore_,
         bytes32 strategyId_,
         uint256 targetReserveBps_,
         VenueConfig memory venueConfig_,
-        ChainManifest[] memory chainManifests_,
         SpotSideMode spotSideMode_,
         uint256 maxDeltaBps_,
         DeltaNeutralKellyConfig memory kellyConfig_,
@@ -170,15 +163,12 @@ contract DeltaNeutralController is
         vaultManager = vaultManager_;
         vault = IVaultV2(vault_);
         sleeve = IUniversalAdapterEscrow(sleeve_);
-        remotePpsSnapshotStore = remotePpsSnapshotStore_;
         asset = IVaultV2(vault_).asset();
         strategyId = strategyId_;
         targetReserveBps = targetReserveBps_;
         venueId = venueConfig_.venueId;
         venue = venueConfig_.venue;
         helper = venueConfig_.helper;
-        venueUsesLayerZero = venueConfig_.usesLayerZero;
-        _storeChainManifests(chainManifests_, sleeve_);
 
         spotSideMode = spotSideMode_;
         maxDeltaBps = maxDeltaBps_;
@@ -233,50 +223,25 @@ contract DeltaNeutralController is
     }
 
     function getVenueConfig() external view returns (VenueConfig memory) {
-        return VenueConfig({venueId: venueId, venue: venue, helper: helper, usesLayerZero: venueUsesLayerZero});
-    }
-
-    function chainManifestCount() external view returns (uint256) {
-        return _chainManifests.length;
-    }
-
-    function getChainManifest(uint256 index) external view returns (ChainManifest memory) {
-        return _chainManifests[index];
-    }
-
-    function remoteChainCount() external view returns (uint256 count) {
-        for (uint256 i; i < _chainManifests.length; i++) {
-            if (!_chainManifests[i].isHomeChain) count++;
-        }
+        return VenueConfig({venueId: venueId, venue: venue, helper: helper});
     }
 
     function reserveTarget(uint256 totalAssets) public view returns (uint256) {
-        return totalAssets * targetReserveBps / BPS;
+        return ControllerLiquidityLib.reserveTarget(totalAssets, targetReserveBps);
     }
 
     function protectedWithdrawalLiquidity() public view returns (uint256 assets) {
-        address queue = _settlementQueue();
-        if (queue == address(0)) return 0;
-
-        (bool success, bytes memory data) =
-            queue.staticcall(abi.encodeWithSelector(IWithdrawalReserveSource.totalProtectedAssets.selector));
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
+        return address(sleeve).protectedWithdrawalLiquidity();
     }
 
     function requiredLocalLiquidity(uint256 totalAssets) public view returns (uint256) {
-        uint256 targetReserve = reserveTarget(totalAssets);
-        uint256 protectedAssets = protectedWithdrawalLiquidity();
-        return targetReserve > protectedAssets ? targetReserve : protectedAssets;
+        return ControllerLiquidityLib.requiredLocalLiquidity(address(sleeve), totalAssets, targetReserveBps);
     }
 
     function availableToAllocate(uint256 idleAssets, uint256 totalAssets) public view returns (uint256) {
-        uint256 requiredLiquidity = requiredLocalLiquidity(totalAssets);
-        uint256 totalLiquidAssets = IERC20(asset).balanceOf(address(vault)) + idleAssets;
-        if (totalLiquidAssets <= requiredLiquidity) return 0;
-
-        uint256 allocatableAssets = totalLiquidAssets - requiredLiquidity;
-        return allocatableAssets < idleAssets ? allocatableAssets : idleAssets;
+        return ControllerLiquidityLib.availableToAllocate(
+            asset, address(vault), address(sleeve), idleAssets, totalAssets, targetReserveBps
+        );
     }
 
     function liquidityData() public view returns (bytes memory) {
@@ -321,12 +286,11 @@ contract DeltaNeutralController is
     }
 
     function initiateAsyncWithdrawal(uint256 shortfallAssets) external nonReentrant returns (bool initiated) {
-        if (_hasRemoteChain()) revert AutomaticSyncUnavailable();
         if (shortfallAssets == 0) return false;
 
         HyperliquidLiveState memory live = _liveState();
         HyperliquidUnwindSizing memory sizing =
-            _quoteUnwindExecution(0, shortfallAssets, live.spotAssets, live.hedgeCollateralAssets, false);
+            _quoteUnwindExecution(0, shortfallAssets, live.spotAssets, live.hedgeCollateralAssets);
         IUniversalAdapterEscrow.Call[] memory calls = _buildUnwindCalls(live, sizing);
         if (calls.length == 0) return false;
 
@@ -349,34 +313,28 @@ contract DeltaNeutralController is
         override
         returns (IUniversalAdapterEscrow.Call[] memory)
     {
-        if (_hasRemoteChain()) revert AutomaticSyncUnavailable();
         if (shortfallAssets == 0) return new IUniversalAdapterEscrow.Call[](0);
 
         HyperliquidLiveState memory live = _liveState();
         HyperliquidUnwindSizing memory sizing =
-            _quoteUnwindExecution(0, shortfallAssets, live.spotAssets, live.hedgeCollateralAssets, false);
+            _quoteUnwindExecution(0, shortfallAssets, live.spotAssets, live.hedgeCollateralAssets);
         return _buildUnwindCalls(live, sizing);
     }
 
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         HyperliquidLiveState memory live = _liveState();
-        (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
         uint256 hedgeEquityAssets =
             live.marginSummary.accountValue > 0 ? uint256(uint64(live.marginSummary.accountValue)) : 0;
-        return (
-            live.idleAssets + live.spotAssets + hedgeEquityAssets + remoteAssets,
-            !_isRiskDegraded(live) && remoteHealthy
-        );
+        return (live.idleAssets + live.spotAssets + hedgeEquityAssets, !_isRiskDegraded(live));
     }
 
     function quoteUnwindExecution(
         uint256 idleAssets,
         uint256 requestedAssets,
         uint256 spotAssets,
-        uint256 hedgeCollateralAssets,
-        bool remoteHedge
+        uint256 hedgeCollateralAssets
     ) external view returns (HyperliquidUnwindSizing memory sizing) {
-        return _quoteUnwindExecution(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets, remoteHedge);
+        return _quoteUnwindExecution(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets);
     }
 
     function withinDeltaBand(uint256 spotAssets, uint256 hedgeCollateralAssets) public view returns (bool) {
@@ -423,14 +381,12 @@ contract DeltaNeutralController is
         return DeltaNeutralKellyLib.quoteRebalance(state, spotAssets, hedgeCollateralAssets);
     }
 
-    function planWithdrawal(
-        uint256 idleAssets,
-        uint256 requestedAssets,
-        uint256 spotAssets,
-        uint256 hedgeCollateralAssets,
-        bool remoteHedge
-    ) external pure returns (DeltaNeutralUnwindPlan memory) {
-        return _planWithdrawal(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets, remoteHedge);
+    function planWithdrawal(uint256 idleAssets, uint256 requestedAssets, uint256 spotAssets, uint256 hedgeCollateralAssets)
+        external
+        pure
+        returns (DeltaNeutralUnwindPlan memory)
+    {
+        return _planWithdrawal(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets);
     }
 
     function _quoteSync(HyperliquidLiveState memory live)
@@ -466,8 +422,7 @@ contract DeltaNeutralController is
         uint256 idleAssets,
         uint256 requestedAssets,
         uint256 spotAssets,
-        uint256 hedgeCollateralAssets,
-        bool remoteHedge
+        uint256 hedgeCollateralAssets
     ) internal pure returns (DeltaNeutralUnwindPlan memory) {
         uint256 shortfallAssets = requestedAssets > idleAssets ? requestedAssets - idleAssets : 0;
         if (shortfallAssets == 0) {
@@ -479,7 +434,6 @@ contract DeltaNeutralController is
                 hedgeReductionAssets: 0,
                 releaseableAssets: 0,
                 unmetAssets: 0,
-                requiresLayerZero: false,
                 requiresEmergencyExit: false
             });
         }
@@ -509,7 +463,6 @@ contract DeltaNeutralController is
             hedgeReductionAssets: hedgeReductionAssets,
             releaseableAssets: releaseableAssets,
             unmetAssets: unmetAssets,
-            requiresLayerZero: remoteHedge && hedgeReductionAssets > 0,
             requiresEmergencyExit: unmetAssets > 0
         });
     }
@@ -518,11 +471,9 @@ contract DeltaNeutralController is
         uint256 idleAssets,
         uint256 requestedAssets,
         uint256 spotAssets,
-        uint256 hedgeCollateralAssets,
-        bool remoteHedge
+        uint256 hedgeCollateralAssets
     ) internal view returns (HyperliquidUnwindSizing memory sizing) {
-        DeltaNeutralUnwindPlan memory plan =
-            _planWithdrawal(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets, remoteHedge);
+        DeltaNeutralUnwindPlan memory plan = _planWithdrawal(idleAssets, requestedAssets, spotAssets, hedgeCollateralAssets);
 
         uint64 liveSpotPx = L1Read(helper).spotPx(spotPriceIndex);
         uint64 liveMarkPx = L1Read(helper).markPx(perpAssetIndex);
@@ -538,7 +489,6 @@ contract DeltaNeutralController is
             markPx: liveMarkPx,
             spotSizeToSell: uint64(_mulDivUp(plan.spotReductionAssets, spotBaseUnits, liveSpotPx)),
             perpSizeToClose: uint64(_mulDivUp(plan.hedgeReductionAssets, perpBaseUnits, liveMarkPx)),
-            requiresLayerZero: plan.requiresLayerZero,
             requiresEmergencyExit: plan.requiresEmergencyExit
         });
     }
@@ -708,21 +658,8 @@ contract DeltaNeutralController is
         return (larger - smaller) * BPS <= larger * maxBandBps;
     }
 
-    function _hasRemoteChain() internal view returns (bool hasRemote) {
-        for (uint256 i; i < _chainManifests.length; i++) {
-            if (!_chainManifests[i].isHomeChain) return true;
-        }
-    }
-
-    function _quoteRemoteAssets() internal view returns (uint256 assets, bool healthy) {
-        if (remotePpsSnapshotStore == address(0)) return (0, true);
-        return IRemotePpsSnapshotStore(remotePpsSnapshotStore).quoteRemoteAssets();
-    }
-
     function _settlementQueue() internal view returns (address queue) {
-        (bool success, bytes memory data) = address(sleeve).staticcall(abi.encodeWithSignature("settlementQueue()"));
-        if (!success || data.length < 32) return address(0);
-        return abi.decode(data, (address));
+        return ControllerLiquidityLib.settlementQueue(address(sleeve));
     }
 
     function _orderCloid(uint128 salt) internal view returns (uint128) {
@@ -731,40 +668,6 @@ contract DeltaNeutralController is
 
     function _automationFlags() internal pure returns (uint256) {
         return 1;
-    }
-
-    function _storeChainManifests(ChainManifest[] memory manifests, address homeSleeve) internal {
-        if (manifests.length == 0) {
-            if (venueUsesLayerZero) revert InvalidChainManifest();
-            _chainManifests.push(
-                ChainManifest({
-                    chainId: block.chainid,
-                    lzEid: 0,
-                    sleeve: homeSleeve,
-                    assetOFT: address(0),
-                    shareOFT: address(0),
-                    isHomeChain: true
-                })
-            );
-            return;
-        }
-
-        bool seenHomeChain;
-        bool seenRemoteChain;
-        for (uint256 i; i < manifests.length; i++) {
-            if (manifests[i].isHomeChain) {
-                if (seenHomeChain) revert InvalidChainManifest();
-                seenHomeChain = true;
-                manifests[i].sleeve = homeSleeve;
-            } else {
-                if (manifests[i].sleeve == address(0) || manifests[i].lzEid == 0) revert InvalidChainManifest();
-                seenRemoteChain = true;
-            }
-            _chainManifests.push(manifests[i]);
-        }
-
-        if (!seenHomeChain) revert InvalidChainManifest();
-        if (venueUsesLayerZero && !seenRemoteChain) revert InvalidChainManifest();
     }
 
     function _mulDivUp(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256) {

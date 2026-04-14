@@ -39,20 +39,10 @@ struct StrategySpec {
     uint256 targetReserveBps;
 }
 
-struct ChainManifest {
-    uint256 chainId;
-    uint32 lzEid;
-    address sleeve;
-    address assetOFT;
-    address shareOFT;
-    bool isHomeChain;
-}
-
 struct VenueConfig {
     bytes32 venueId;
     address venue;
     address helper;
-    bool usesLayerZero;
 }
 
 struct DeltaNeutralKellyConfig {
@@ -130,7 +120,6 @@ struct DeltaNeutralDeploymentParams {
     address vaultManager;
     address curator;
     bool enableTimelock;
-    bool enableOmnichainVault;
     address asset;
     address valuer;
     string name;
@@ -146,7 +135,6 @@ struct DeltaNeutralDeploymentParams {
     bytes32 salt;
     bool useOffchainValuer;
     VenueConfig venueConfig;
-    ChainManifest[] chainManifests;
 }
 
 struct PTLoopDeploymentParams {
@@ -154,7 +142,6 @@ struct PTLoopDeploymentParams {
     address vaultManager;
     address curator;
     bool enableTimelock;
-    bool enableOmnichainVault;
     address asset;
     address market;
     address ptToken;
@@ -170,7 +157,6 @@ struct PTLoopDeploymentParams {
     bytes32 salt;
     bool useOffchainValuer;
     VenueConfig venueConfig;
-    ChainManifest[] chainManifests;
 }
 
 struct DeltaNeutralUnwindPlan {
@@ -181,7 +167,6 @@ struct DeltaNeutralUnwindPlan {
     uint256 hedgeReductionAssets;
     uint256 releaseableAssets;
     uint256 unmetAssets;
-    bool requiresLayerZero;
     bool requiresEmergencyExit;
 }
 
@@ -242,10 +227,8 @@ struct PTLoopUnwindPlan {
     uint256 requestedAssets;
     uint256 shortfallAssets;
     uint256 localReductionAssets;
-    uint256 remoteReductionAssets;
     uint256 releaseableAssets;
     uint256 unmetAssets;
-    bool requiresLayerZero;
     bool requiresEmergencyExit;
 }
 

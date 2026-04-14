@@ -285,7 +285,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
 
     /**
      * @notice Burn unlocked vTokens and receive the underlying VaultV2 shares directly.
-     * @dev Enables async withdrawal queues, omnichain share bridging, and any other share-based flow after lock expiry.
+     * @dev Enables async withdrawal queues and other share-based flows after lock expiry.
      */
     function unwrap(uint256 vTokens, address receiver, address onBehalf)
         external

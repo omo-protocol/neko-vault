@@ -7,10 +7,9 @@ import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {
     IAutomatedWithdrawalController,
-    IOnchainStrategyValuer,
-    IRemotePpsSnapshotStore,
-    IWithdrawalReserveSource
+    IOnchainStrategyValuer
 } from "./StrategyControllerInterfaces.sol";
+import {ControllerLiquidityLib} from "./libraries/ControllerLiquidityLib.sol";
 import {
     PendleLib,
     IPendleStaticQuoter,
@@ -23,11 +22,12 @@ import {
     PTLoopAutomationConfig,
     PTLoopUnwindPlan,
     PTLoopUnloopQuote,
-    ChainManifest,
     VenueConfig
 } from "../strategies/StrategyTypes.sol";
 
 contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IOnchainStrategyValuer {
+    using ControllerLiquidityLib for address;
+
     uint256 internal constant BPS = 10_000;
     uint256 internal constant WAD = 1e18;
 
@@ -37,7 +37,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     error NotVaultManager();
     error InvalidAddress();
     error InvalidReserveConfig();
-    error InvalidChainManifest();
     error InvalidVenue();
     error InvalidSlippageConfig();
     error InvalidMarketConfig();
@@ -50,21 +49,17 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     address public immutable vaultManager;
     IVaultV2 public immutable vault;
     IUniversalAdapterEscrow public immutable sleeve;
-    address public immutable remotePpsSnapshotStore;
     address public immutable asset;
     bytes32 public immutable strategyId;
     uint256 public immutable targetReserveBps;
     bytes32 public immutable venueId;
     address public immutable venue;
     address public immutable helper;
-    bool public immutable venueUsesLayerZero;
 
     uint256 public immutable maxEntrySlippageBps;
     uint256 public immutable maxUnwindSlippageBps;
     address public immutable market;
     address public immutable ptToken;
-
-    ChainManifest[] internal _chainManifests;
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -81,13 +76,11 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         address vaultManager_,
         address vault_,
         address sleeve_,
-        address remotePpsSnapshotStore_,
         address market_,
         address ptToken_,
         bytes32 strategyId_,
         uint256 targetReserveBps_,
         VenueConfig memory venueConfig_,
-        ChainManifest[] memory chainManifests_,
         PTLoopAutomationConfig memory automationConfig_,
         uint256 maxUnwindSlippageBps_
     ) {
@@ -106,15 +99,12 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         vaultManager = vaultManager_;
         vault = IVaultV2(vault_);
         sleeve = IUniversalAdapterEscrow(sleeve_);
-        remotePpsSnapshotStore = remotePpsSnapshotStore_;
         asset = IVaultV2(vault_).asset();
         strategyId = strategyId_;
         targetReserveBps = targetReserveBps_;
         venueId = venueConfig_.venueId;
         venue = venueConfig_.venue;
         helper = venueConfig_.helper;
-        venueUsesLayerZero = venueConfig_.usesLayerZero;
-        _storeChainManifests(chainManifests_, sleeve_);
 
         maxEntrySlippageBps = automationConfig_.maxEntrySlippageBps;
         maxUnwindSlippageBps = maxUnwindSlippageBps_;
@@ -132,50 +122,25 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
     }
 
     function getVenueConfig() external view returns (VenueConfig memory) {
-        return VenueConfig({venueId: venueId, venue: venue, helper: helper, usesLayerZero: venueUsesLayerZero});
-    }
-
-    function chainManifestCount() external view returns (uint256) {
-        return _chainManifests.length;
-    }
-
-    function getChainManifest(uint256 index) external view returns (ChainManifest memory) {
-        return _chainManifests[index];
-    }
-
-    function remoteChainCount() external view returns (uint256 count) {
-        for (uint256 i; i < _chainManifests.length; i++) {
-            if (!_chainManifests[i].isHomeChain) count++;
-        }
+        return VenueConfig({venueId: venueId, venue: venue, helper: helper});
     }
 
     function reserveTarget(uint256 totalAssets) public view returns (uint256) {
-        return totalAssets * targetReserveBps / BPS;
+        return ControllerLiquidityLib.reserveTarget(totalAssets, targetReserveBps);
     }
 
     function protectedWithdrawalLiquidity() public view returns (uint256 assets) {
-        address queue = _settlementQueue();
-        if (queue == address(0)) return 0;
-
-        (bool success, bytes memory data) =
-            queue.staticcall(abi.encodeWithSelector(IWithdrawalReserveSource.totalProtectedAssets.selector));
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
+        return address(sleeve).protectedWithdrawalLiquidity();
     }
 
     function requiredLocalLiquidity(uint256 totalAssets) public view returns (uint256) {
-        uint256 targetReserve = reserveTarget(totalAssets);
-        uint256 protectedAssets = protectedWithdrawalLiquidity();
-        return targetReserve > protectedAssets ? targetReserve : protectedAssets;
+        return ControllerLiquidityLib.requiredLocalLiquidity(address(sleeve), totalAssets, targetReserveBps);
     }
 
     function availableToAllocate(uint256 idleAssets, uint256 totalAssets) public view returns (uint256) {
-        uint256 requiredLiquidity = requiredLocalLiquidity(totalAssets);
-        uint256 totalLiquidAssets = IERC20(asset).balanceOf(address(vault)) + idleAssets;
-        if (totalLiquidAssets <= requiredLiquidity) return 0;
-
-        uint256 allocatableAssets = totalLiquidAssets - requiredLiquidity;
-        return allocatableAssets < idleAssets ? allocatableAssets : idleAssets;
+        return ControllerLiquidityLib.availableToAllocate(
+            asset, address(vault), address(sleeve), idleAssets, totalAssets, targetReserveBps
+        );
     }
 
     function liquidityData() public view returns (bytes memory) {
@@ -245,7 +210,6 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         override
         returns (IUniversalAdapterEscrow.Call[] memory)
     {
-        if (_hasRemoteChain()) revert AutomaticSyncUnavailable();
         if (shortfallAssets == 0) return new IUniversalAdapterEscrow.Call[](0);
 
         PTLoopUnloopQuote memory quote = quoteUnloopForAssets(shortfallAssets);
@@ -254,16 +218,14 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
 
     function quoteCurrentAssets() external view override returns (uint256 assets, bool healthy) {
         assets = IERC20(asset).balanceOf(address(sleeve));
-        (uint256 remoteAssets, bool remoteHealthy) = _quoteRemoteAssets();
-
         uint256 ptBalance = IERC20(ptToken).balanceOf(address(sleeve));
-        if (ptBalance == 0) return (assets + remoteAssets, remoteHealthy);
+        if (ptBalance == 0) return (assets, true);
 
         uint256 rate = IPendleStaticQuoter(helper).getPtToAssetRate(market);
-        if (rate == 0) return (assets + remoteAssets, false);
+        if (rate == 0) return (assets, false);
 
         uint256 ptAssets = ptBalance * rate / WAD;
-        return (assets + ptAssets + remoteAssets, remoteHealthy);
+        return (assets + ptAssets, true);
     }
 
     function quoteUnloopForAssets(uint256 requestedAssets) public view returns (PTLoopUnloopQuote memory quote) {
@@ -285,20 +247,11 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         });
     }
 
-    function withinUnwindSlippage(uint256 expectedAssets, uint256 actualAssets) external view returns (bool) {
-        if (expectedAssets == 0) return actualAssets == 0;
-        if (actualAssets >= expectedAssets) return true;
-
-        uint256 slippageBps = (expectedAssets - actualAssets) * BPS / expectedAssets;
-        return slippageBps <= maxUnwindSlippageBps;
-    }
-
-    function planWithdrawal(
-        uint256 idleAssets,
-        uint256 requestedAssets,
-        uint256 localLoopAssets,
-        uint256 remoteLoopAssets
-    ) external pure returns (PTLoopUnwindPlan memory) {
+    function planWithdrawal(uint256 idleAssets, uint256 requestedAssets, uint256 localLoopAssets)
+        external
+        pure
+        returns (PTLoopUnwindPlan memory)
+    {
         uint256 shortfallAssets = requestedAssets > idleAssets ? requestedAssets - idleAssets : 0;
         if (shortfallAssets == 0) {
             return PTLoopUnwindPlan({
@@ -306,42 +259,33 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
                 requestedAssets: requestedAssets,
                 shortfallAssets: 0,
                 localReductionAssets: 0,
-                remoteReductionAssets: 0,
                 releaseableAssets: 0,
                 unmetAssets: 0,
-                requiresLayerZero: false,
                 requiresEmergencyExit: false
             });
         }
 
-        uint256 totalReleasable = localLoopAssets + remoteLoopAssets;
+        uint256 totalReleasable = localLoopAssets;
         uint256 releaseableAssets = shortfallAssets > totalReleasable ? totalReleasable : shortfallAssets;
         uint256 unmetAssets = shortfallAssets - releaseableAssets;
-
-        uint256 localReductionAssets;
-        uint256 remoteReductionAssets;
-
-        if (releaseableAssets > 0 && totalReleasable > 0) {
-            localReductionAssets = releaseableAssets * localLoopAssets / totalReleasable;
-            remoteReductionAssets = releaseableAssets - localReductionAssets;
-
-            if (remoteReductionAssets > remoteLoopAssets) {
-                remoteReductionAssets = remoteLoopAssets;
-                localReductionAssets = releaseableAssets - remoteReductionAssets;
-            }
-        }
 
         return PTLoopUnwindPlan({
             idleAssets: idleAssets,
             requestedAssets: requestedAssets,
             shortfallAssets: shortfallAssets,
-            localReductionAssets: localReductionAssets,
-            remoteReductionAssets: remoteReductionAssets,
+            localReductionAssets: releaseableAssets,
             releaseableAssets: releaseableAssets,
             unmetAssets: unmetAssets,
-            requiresLayerZero: remoteReductionAssets > 0,
             requiresEmergencyExit: unmetAssets > 0
         });
+    }
+
+    function withinUnwindSlippage(uint256 expectedAssets, uint256 actualAssets) external view returns (bool) {
+        if (expectedAssets == 0) return actualAssets == 0;
+        if (actualAssets >= expectedAssets) return true;
+
+        uint256 slippageBps = (expectedAssets - actualAssets) * BPS / expectedAssets;
+        return slippageBps <= maxUnwindSlippageBps;
     }
 
     function _quoteExactPtInForAssets(uint256 grossAssetTarget, uint256 ptBalance) internal view returns (uint256) {
@@ -449,55 +393,8 @@ contract PTLoopController is ReentrancyGuard, IAutomatedWithdrawalController, IO
         return 3;
     }
 
-    function _hasRemoteChain() internal view returns (bool hasRemote) {
-        for (uint256 i; i < _chainManifests.length; i++) {
-            if (!_chainManifests[i].isHomeChain) return true;
-        }
-    }
-
-    function _quoteRemoteAssets() internal view returns (uint256 assets, bool healthy) {
-        if (remotePpsSnapshotStore == address(0)) return (0, true);
-        return IRemotePpsSnapshotStore(remotePpsSnapshotStore).quoteRemoteAssets();
-    }
-
     function _settlementQueue() internal view returns (address queue) {
-        (bool success, bytes memory data) = address(sleeve).staticcall(abi.encodeWithSignature("settlementQueue()"));
-        if (!success || data.length < 32) return address(0);
-        return abi.decode(data, (address));
-    }
-
-    function _storeChainManifests(ChainManifest[] memory manifests, address homeSleeve) internal {
-        if (manifests.length == 0) {
-            if (venueUsesLayerZero) revert InvalidChainManifest();
-            _chainManifests.push(
-                ChainManifest({
-                    chainId: block.chainid,
-                    lzEid: 0,
-                    sleeve: homeSleeve,
-                    assetOFT: address(0),
-                    shareOFT: address(0),
-                    isHomeChain: true
-                })
-            );
-            return;
-        }
-
-        bool seenHomeChain;
-        bool seenRemoteChain;
-        for (uint256 i; i < manifests.length; i++) {
-            if (manifests[i].isHomeChain) {
-                if (seenHomeChain) revert InvalidChainManifest();
-                seenHomeChain = true;
-                manifests[i].sleeve = homeSleeve;
-            } else {
-                if (manifests[i].sleeve == address(0) || manifests[i].lzEid == 0) revert InvalidChainManifest();
-                seenRemoteChain = true;
-            }
-            _chainManifests.push(manifests[i]);
-        }
-
-        if (!seenHomeChain) revert InvalidChainManifest();
-        if (venueUsesLayerZero && !seenRemoteChain) revert InvalidChainManifest();
+        return ControllerLiquidityLib.settlementQueue(address(sleeve));
     }
 
     function _mulDivUp(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256) {

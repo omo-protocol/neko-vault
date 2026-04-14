@@ -12,29 +12,16 @@ import {PTLoopController} from "../../src/controllers/PTLoopController.sol";
 import {CoreWriter} from "../../src/controllers/venue_specific/hyperliquid/CoreWriter.sol";
 import {L1Read} from "../../src/controllers/venue_specific/hyperliquid/L1Read.sol";
 import {
-    HyperliquidLib,
-    HyperliquidOpenHedgeRequest,
-    HyperliquidCloseHedgeRequest,
-    HyperliquidOrderRequest,
-    HyperliquidPositionSnapshot,
     HyperliquidUnwindSizing
 } from "../../src/controllers/venue_specific/hyperliquid/HyperliquidLib.sol";
 import {
     IPendleRouter,
-    IPendleStaticQuoter,
-    PendleLib,
-    PTLoopSwapExactTokenForPtRequest,
-    PTLoopSwapExactPtForTokenRequest,
-    PTLoopOpenRequest,
-    PTLoopCloseRequest
+    IPendleStaticQuoter
 } from "../../src/controllers/venue_specific/pendle/PendleLib.sol";
 import {StrategyVaultFactory} from "../../src/factories/StrategyVaultFactory.sol";
 import {AsyncWithdrawalQueue} from "../../src/queues/AsyncWithdrawalQueue.sol";
-import {AsyncWithdrawalSettlementComposer} from "../../src/ovault/AsyncWithdrawalSettlementComposer.sol";
-import {RemotePpsSnapshotStore} from "../../src/ovault/RemotePpsSnapshotStore.sol";
 import {VaultTimeLockWrapper} from "../../src/VaultTimeLockWrapper.sol";
 import {
-    ChainManifest,
     DeltaNeutralAutomationConfig,
     DeltaNeutralKellyConfig,
     DeltaNeutralRebalanceDirection,
@@ -44,18 +31,13 @@ import {
     Deployment,
     PTLoopAutomationConfig,
     PTLoopDeploymentParams,
-    PTLoopUnloopQuote,
-    PTLoopUnwindPlan,
     SpotSideMode,
     VenueConfig,
     WithdrawalRequest,
     WithdrawalRequestStatus
 } from "../../src/strategies/StrategyTypes.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockTarget} from "../mocks/MockTarget.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
-import {OFTComposeMsgCodec} from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
-import {Origin} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 
 contract StrategyControllersTest is Test {
     bytes32 internal constant HYPERLIQUID_VENUE_ID = keccak256("HYPERLIQUID");
@@ -71,17 +53,13 @@ contract StrategyControllersTest is Test {
     address internal constant SPOT_PX_PRECOMPILE = 0x0000000000000000000000000000000000000808;
     address internal constant PERP_ASSET_INFO_PRECOMPILE = 0x000000000000000000000000000000000000080a;
 
-    event RawAction(address indexed user, bytes data);
-
     address internal owner = makeAddr("owner");
     address internal user = makeAddr("user");
 
     MockERC20 internal asset;
     MockERC20 internal ptAsset;
     MockValuer internal valuer;
-    MockTarget internal protocol;
     MockPendleRouter internal pendleRouter;
-    MockAssetOFTView internal assetOFT;
     CoreWriter internal coreWriter;
     L1Read internal l1Read;
     VaultV2Factory internal vaultFactory;
@@ -92,9 +70,7 @@ contract StrategyControllersTest is Test {
         asset = new MockERC20("USD Coin", "USDC", 6);
         ptAsset = new MockERC20("Pendle PT", "PT", 6);
         valuer = new MockValuer();
-        protocol = new MockTarget(address(asset));
         pendleRouter = new MockPendleRouter(address(asset), address(ptAsset));
-        assetOFT = new MockAssetOFTView(address(asset), address(this));
         coreWriter = new CoreWriter();
         l1Read = new L1Read();
         vaultFactory = new VaultV2Factory();
@@ -116,23 +92,18 @@ contract StrategyControllersTest is Test {
         vm.stopPrank();
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bytes[] memory rawActions = new bytes[](2);
         uint256 found;
         for (uint256 i; i < entries.length; i++) {
-            if (entries[i].emitter == address(coreWriter)) {
-                rawActions[found++] = abi.decode(entries[i].data, (bytes));
-                if (found == 2) break;
-            }
+            if (entries[i].emitter == address(coreWriter)) found++;
         }
         assertEq(found, 0);
         assertEq(asset.balanceOf(deployment.sleeve), 1_000e6);
 
-        DeltaNeutralUnwindPlan memory plan = controller.planWithdrawal(200e6, 500e6, 800e6, 800e6, false);
+        DeltaNeutralUnwindPlan memory plan = controller.planWithdrawal(200e6, 500e6, 800e6, 800e6);
         assertEq(plan.shortfallAssets, 300e6);
         assertEq(plan.spotReductionAssets, 150e6);
         assertEq(plan.hedgeReductionAssets, 150e6);
         assertEq(plan.releaseableAssets, 300e6);
-        assertFalse(plan.requiresLayerZero);
         assertTrue(controller.withinDeltaBand(800e6, 790e6));
         assertFalse(controller.withinDeltaBand(800e6, 500e6));
 
@@ -145,9 +116,7 @@ contract StrategyControllersTest is Test {
         entries = vm.getRecordedLogs();
         found = 0;
         for (uint256 i; i < entries.length; i++) {
-            if (entries[i].emitter == address(coreWriter)) {
-                found++;
-            }
+            if (entries[i].emitter == address(coreWriter)) found++;
         }
         assertEq(found, 2);
     }
@@ -158,7 +127,7 @@ contract StrategyControllersTest is Test {
 
         _mockHyperliquidReads(deployment.sleeve);
 
-        HyperliquidUnwindSizing memory sizing = controller.quoteUnwindExecution(200e6, 500e6, 800e6, 800e6, false);
+        HyperliquidUnwindSizing memory sizing = controller.quoteUnwindExecution(200e6, 500e6, 800e6, 800e6);
 
         assertEq(sizing.shortfallAssets, 300e6);
         assertEq(sizing.spotReductionAssets, 150e6);
@@ -167,7 +136,6 @@ contract StrategyControllersTest is Test {
         assertEq(sizing.markPx, 109_500_000);
         assertEq(sizing.spotSizeToSell, 1_500_000);
         assertEq(sizing.perpSizeToClose, 1_369_864);
-        assertFalse(sizing.requiresLayerZero);
         assertFalse(sizing.requiresEmergencyExit);
     }
 
@@ -395,7 +363,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopAutomatesLoopingAndSupportsDirectUserExitUnwinds() public {
-        Deployment memory deployment = _deployPTLoop(false);
+        Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
 
@@ -424,7 +392,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -443,7 +411,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testPTLoopOnchainSnapshotStateDoesNotMintFreshTimestamp() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -463,26 +431,8 @@ contract StrategyControllersTest is Test {
         assertFalse(healthy);
     }
 
-    function testPTLoopRemoteSnapshotUnhealthyUsesHaircuttedLocalValue() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
-        PTLoopController controller = PTLoopController(deployment.controller);
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
-        IVaultV2 vault = IVaultV2(deployment.vault);
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        assertEq(sleeve.realAssets(), 909_625_000);
-    }
-
     function testPTLoopValuationIgnoresConservativeStaticRedeemQuote() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -501,7 +451,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testValuerSnapshotOverridesOnchainQuoteWhenConfigured() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(false, address(valuer));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(valuer));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -524,7 +474,7 @@ contract StrategyControllersTest is Test {
     }
 
     function testSyncPPSRefreshesCachedValuationFromOnchainState() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(false, address(0));
+        Deployment memory deployment = _deployPTLoopWithValuer(address(0));
         PTLoopController controller = PTLoopController(deployment.controller);
         UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -544,403 +494,6 @@ contract StrategyControllersTest is Test {
         assertFalse(isStale);
     }
 
-    function testCrossChainWithdrawalQueueEscrowsSharesAndClaimsAfterSettlement() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        PTLoopController controller = PTLoopController(deployment.controller);
-        IVaultV2 vault = IVaultV2(deployment.vault);
-        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        uint256 externalBefore = sleeve.externalDeposits(deployment.strategyId);
-
-        vm.startPrank(user);
-        uint256 sharesNeeded = vault.previewWithdraw(700e6);
-        vault.approve(address(queue), sharesNeeded);
-        uint256 requestId = queue.requestWithdraw(700e6, user);
-        vm.stopPrank();
-
-        WithdrawalRequest memory request = queue.getRequest(requestId);
-        assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Pending));
-        assertEq(request.reservedLocalAssets, 150e6);
-        assertEq(vault.balanceOf(address(queue)), sharesNeeded);
-
-        vm.expectRevert(AsyncWithdrawalQueue.RequestNotClaimable.selector);
-        queue.claim(requestId);
-
-        asset.mint(address(composer), 700e6);
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(requestId))
-        );
-
-        composer.lzCompose(address(assetOFT), bytes32("remote-fill"), message, address(this), "");
-
-        request = queue.getRequest(requestId);
-        assertEq(uint8(request.status), uint8(WithdrawalRequestStatus.Claimable));
-        assertEq(request.assetsFunded, 700e6);
-        assertEq(asset.balanceOf(deployment.sleeve), 850e6);
-        assertLt(sleeve.externalDeposits(deployment.strategyId), externalBefore);
-
-        queue.claim(requestId);
-
-        assertEq(vault.balanceOf(address(queue)), 0);
-        assertEq(asset.balanceOf(user), 700e6);
-    }
-
-    function testPTLoopSyncPreservesProtectedSettlementLiquidity() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        PTLoopController controller = PTLoopController(deployment.controller);
-        IVaultV2 vault = IVaultV2(deployment.vault);
-        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        vm.startPrank(user);
-        uint256 sharesNeeded = vault.previewWithdraw(700e6);
-        vault.approve(address(queue), sharesNeeded);
-        uint256 requestId = queue.requestWithdraw(700e6, user);
-        vm.stopPrank();
-
-        assertEq(queue.totalProtectedAssets(), 150e6);
-
-        asset.mint(address(composer), 700e6);
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(requestId))
-        );
-        composer.lzCompose(address(assetOFT), bytes32("remote-fill-2"), message, address(this), "");
-
-        assertEq(queue.totalProtectedAssets(), 850e6);
-
-        vm.prank(owner);
-        assertFalse(controller.sync());
-
-        queue.claim(requestId);
-
-        assertEq(queue.totalProtectedAssets(), 0);
-        assertEq(asset.balanceOf(user), 700e6);
-    }
-
-    function testCrossChainPpsSnapshotPropagatesToHomeSyncPps() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
-        PTLoopController controller = PTLoopController(deployment.controller);
-        UniversalAdapterEscrow sleeve = UniversalAdapterEscrow(payable(deployment.sleeve));
-        IVaultV2 vault = IVaultV2(deployment.vault);
-        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
-        address remoteReporter = makeAddr("remoteReporter");
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        vm.prank(owner);
-        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
-
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
-            bytes32("pps"),
-            abi.encode(uint256(300e6), uint64(block.timestamp)),
-            address(0),
-            ""
-        );
-
-        vm.prank(owner);
-        uint256 cachedAssets = controller.syncPPS();
-
-        assertEq(cachedAssets, 1_257_500_000);
-        assertEq(sleeve.realAssets(), 1_257_500_000);
-    }
-
-    function testCrossChainSettlementComposerStoresRecoverablePendingSettlement() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        asset.mint(address(composer), 700e6);
-        bytes32 guid = bytes32("bad-request");
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(999))
-        );
-
-        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
-
-        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
-        assertEq(requestId, 999);
-        assertEq(amountReceived, 700e6);
-
-        vm.prank(owner);
-        composer.recoverPendingSettlement(guid, user);
-
-        (, amountReceived) = composer.pendingSettlements(guid);
-        assertEq(amountReceived, 0);
-        assertEq(asset.balanceOf(user), 700e6);
-    }
-
-    function testCrossChainSettlementComposerStoresUndecodablePayloadForRecovery() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        asset.mint(address(composer), 700e6);
-        bytes32 guid = bytes32("decode-fail");
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), hex"1234")
-        );
-
-        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
-
-        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
-        assertEq(requestId, 0);
-        assertEq(amountReceived, 700e6);
-
-        vm.prank(owner);
-        composer.recoverPendingSettlement(guid, user);
-
-        (, amountReceived) = composer.pendingSettlements(guid);
-        assertEq(amountReceived, 0);
-        assertEq(asset.balanceOf(user), 700e6);
-    }
-
-    function testCrossChainSettlementComposerRejectsZeroAmountCompose() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 0, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(uint256(1)))
-        );
-
-        vm.expectRevert(AsyncWithdrawalSettlementComposer.InvalidRequest.selector);
-        composer.lzCompose(address(assetOFT), bytes32("zero-settlement"), message, address(this), "");
-    }
-
-    function testCrossChainSettlementComposerRetrySettlementPreservesPendingOnFailure() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        asset.mint(address(composer), 700e6);
-        bytes32 guid = bytes32("retry-fail");
-        bytes memory message = OFTComposeMsgCodec.encode(
-            1, 30_102, 700e6, abi.encodePacked(bytes32(uint256(uint160(address(this)))), abi.encode(uint256(999)))
-        );
-
-        composer.lzCompose(address(assetOFT), guid, message, address(this), "");
-
-        vm.expectRevert();
-        composer.retrySettlement(guid);
-
-        (uint256 requestId, uint256 amountReceived) = composer.pendingSettlements(guid);
-        assertEq(requestId, 999);
-        assertEq(amountReceived, 700e6);
-        assertEq(asset.balanceOf(address(composer)), 700e6);
-    }
-
-    function testCrossChainSettlementComposerRecoverNative() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        AsyncWithdrawalSettlementComposer composer =
-            AsyncWithdrawalSettlementComposer(childFactory.withdrawalSettlementComposerOf(deployment.vault));
-
-        vm.deal(address(composer), 1 ether);
-
-        vm.prank(owner);
-        composer.recoverNative(user);
-
-        assertEq(address(composer).balance, 0);
-        assertEq(user.balance, 1 ether);
-    }
-
-    function testAsyncWithdrawalQueueRechecksFifoOnClaim() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        PTLoopController controller = PTLoopController(deployment.controller);
-        IVaultV2 vault = IVaultV2(deployment.vault);
-        AsyncWithdrawalQueue queue = AsyncWithdrawalQueue(childFactory.withdrawalQueueOf(deployment.vault));
-
-        asset.mint(user, 1_000e6);
-        vm.startPrank(user);
-        asset.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, user);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        assertTrue(controller.sync());
-
-        vm.startPrank(user);
-        uint256 firstShares = vault.previewWithdraw(700e6);
-        vault.approve(address(queue), type(uint256).max);
-        uint256 firstRequestId = queue.requestWithdraw(700e6, user);
-        vm.stopPrank();
-
-        asset.mint(deployment.sleeve, 100e6);
-
-        vm.startPrank(user);
-        uint256 secondShares = vault.previewWithdraw(100e6);
-        uint256 secondRequestId = queue.requestWithdraw(100e6, user);
-        vm.stopPrank();
-
-        WithdrawalRequest memory firstRequest = queue.getRequest(firstRequestId);
-        WithdrawalRequest memory secondRequest = queue.getRequest(secondRequestId);
-        assertEq(firstRequest.sharesEscrowed, firstShares);
-        assertEq(secondRequest.sharesEscrowed, secondShares);
-        assertEq(uint8(secondRequest.status), uint8(WithdrawalRequestStatus.Claimable));
-
-        vm.expectRevert(AsyncWithdrawalQueue.RequestNotClaimable.selector);
-        queue.claim(secondRequestId);
-    }
-
-    function testRemotePpsSnapshotStoreAcceptsNewerNonceWithOlderTimestampAndClearsOnPeerChange() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
-        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
-        address remoteReporter = makeAddr("remoteReporter");
-        address newRemoteReporter = makeAddr("newRemoteReporter");
-        uint64 firstTimestamp = uint64(block.timestamp);
-
-        vm.prank(owner);
-        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
-
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
-            bytes32("pps-1"),
-            abi.encode(uint256(300e6), firstTimestamp),
-            address(0),
-            ""
-        );
-
-        uint64 maxAllowedTimestamp = uint64(block.timestamp + store.MAX_CLOCK_SKEW());
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                RemotePpsSnapshotStore.FutureSnapshotTimestamp.selector,
-                30_102,
-                maxAllowedTimestamp + 1,
-                maxAllowedTimestamp
-            )
-        );
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 2}),
-            bytes32("pps-future"),
-            abi.encode(uint256(250e6), maxAllowedTimestamp + 1),
-            address(0),
-            ""
-        );
-
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 3}),
-            bytes32("pps-2"),
-            abi.encode(uint256(200e6), firstTimestamp - 1),
-            address(0),
-            ""
-        );
-
-        (uint256 secondAssets, uint64 secondTimestamp,, uint64 secondNonce) = store.snapshots(30_102);
-        assertEq(secondAssets, 200e6);
-        assertEq(secondTimestamp, firstTimestamp - 1);
-        assertEq(secondNonce, 3);
-
-        vm.prank(owner);
-        store.setPeer(30_102, bytes32(uint256(uint160(newRemoteReporter))));
-
-        (uint256 assetsStored, uint64 snapshotTimestamp, uint64 receivedAt, uint64 nonce) = store.snapshots(30_102);
-        assertEq(assetsStored, 0);
-        assertEq(snapshotTimestamp, 0);
-        assertEq(receivedAt, 0);
-        assertEq(nonce, 0);
-    }
-
-    function testRemotePpsSnapshotStoreRejectsInvalidMessageLength() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
-        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
-        address remoteReporter = makeAddr("remoteReporter");
-
-        vm.prank(owner);
-        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
-
-        vm.expectRevert(abi.encodeWithSelector(RemotePpsSnapshotStore.InvalidMessageLength.selector, uint256(32)));
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
-            bytes32("bad-length"),
-            abi.encode(uint256(123e6)),
-            address(0),
-            ""
-        );
-    }
-
-    function testRemotePpsSnapshotStoreRejectsDuplicateRemoteEids() public {
-        uint32[] memory remoteEids = new uint32[](2);
-        remoteEids[0] = 30_102;
-        remoteEids[1] = 30_102;
-
-        vm.expectRevert(abi.encodeWithSelector(RemotePpsSnapshotStore.DuplicateRemoteEid.selector, 30_102));
-        new RemotePpsSnapshotStore(owner, address(this), remoteEids);
-    }
-
-    function testRemotePpsSnapshotStoreExcludesStaleSnapshotsFromAssets() public {
-        Deployment memory deployment = _deployPTLoopWithValuer(true, address(0));
-        RemotePpsSnapshotStore store = RemotePpsSnapshotStore(childFactory.remotePpsSnapshotStoreOf(deployment.vault));
-        address remoteReporter = makeAddr("remoteReporter");
-
-        vm.prank(owner);
-        store.setPeer(30_102, bytes32(uint256(uint160(remoteReporter))));
-
-        store.lzReceive(
-            Origin({srcEid: 30_102, sender: bytes32(uint256(uint160(remoteReporter))), nonce: 1}),
-            bytes32("pps"),
-            abi.encode(uint256(300e6), uint64(block.timestamp)),
-            address(0),
-            ""
-        );
-
-        (uint256 freshAssets, bool freshHealthy) = store.quoteRemoteAssets();
-        assertEq(freshAssets, 300e6);
-        assertTrue(freshHealthy);
-
-        vm.warp(block.timestamp + store.MAX_SNAPSHOT_AGE() + 1);
-
-        (uint256 staleAssets, bool staleHealthy) = store.quoteRemoteAssets();
-        assertEq(staleAssets, 0);
-        assertFalse(staleHealthy);
-    }
-
-    function testPTLoopControllerSupportsCrossChainPlanning() public {
-        Deployment memory deployment = _deployPTLoop(true);
-        PTLoopController controller = PTLoopController(deployment.controller);
-
-        PTLoopUnwindPlan memory plan = controller.planWithdrawal(100e6, 600e6, 200e6, 200e6);
-        assertEq(plan.shortfallAssets, 500e6);
-        assertEq(plan.localReductionAssets, 200e6);
-        assertEq(plan.remoteReductionAssets, 200e6);
-        assertEq(plan.releaseableAssets, 400e6);
-        assertEq(plan.unmetAssets, 100e6);
-        assertTrue(plan.requiresLayerZero);
-        assertTrue(plan.requiresEmergencyExit);
-
-        assertTrue(controller.withinUnwindSlippage(1_000e6, 950e6));
-        assertFalse(controller.withinUnwindSlippage(1_000e6, 900e6));
-        assertEq(controller.remoteChainCount(), 1);
-    }
-
     function _deployDeltaNeutral(bool enableTimelock) internal returns (Deployment memory) {
         return _deployDeltaNeutralWithValuer(enableTimelock, address(valuer));
     }
@@ -954,7 +507,6 @@ contract StrategyControllersTest is Test {
             vaultManager: owner,
             curator: owner,
             enableTimelock: enableTimelock,
-            enableOmnichainVault: false,
             asset: address(asset),
             valuer: valuerAddress,
             name: "Delta Neutral Vault",
@@ -972,10 +524,8 @@ contract StrategyControllersTest is Test {
             venueConfig: VenueConfig({
                 venueId: HYPERLIQUID_VENUE_ID,
                 venue: address(coreWriter),
-                helper: address(l1Read),
-                usesLayerZero: false
-            }),
-            chainManifests: _homeManifest()
+                helper: address(l1Read)
+            })
         });
 
         return childFactory.createDeltaNeutralVault(params);
@@ -1026,17 +576,16 @@ contract StrategyControllersTest is Test {
         return PTLoopAutomationConfig({maxEntrySlippageBps: 600});
     }
 
-    function _deployPTLoop(bool usesLayerZero) internal returns (Deployment memory) {
-        return _deployPTLoopWithValuer(usesLayerZero, address(valuer));
+    function _deployPTLoop() internal returns (Deployment memory) {
+        return _deployPTLoopWithValuer(address(valuer));
     }
 
-    function _deployPTLoopWithValuer(bool usesLayerZero, address valuerAddress) internal returns (Deployment memory) {
+    function _deployPTLoopWithValuer(address valuerAddress) internal returns (Deployment memory) {
         PTLoopDeploymentParams memory params = PTLoopDeploymentParams({
             owner: owner,
             vaultManager: owner,
             curator: owner,
             enableTimelock: false,
-            enableOmnichainVault: false,
             asset: address(asset),
             market: PENDLE_MARKET,
             ptToken: address(ptAsset),
@@ -1054,53 +603,11 @@ contract StrategyControllersTest is Test {
             venueConfig: VenueConfig({
                 venueId: PENDLE_VENUE_ID,
                 venue: address(pendleRouter),
-                helper: address(pendleRouter),
-                usesLayerZero: usesLayerZero
-            }),
-            chainManifests: usesLayerZero ? _homeAndRemoteManifest() : _homeManifest()
+                helper: address(pendleRouter)
+            })
         });
 
         return childFactory.createPTLoopVault(params);
-    }
-
-    function _homeManifest() internal view returns (ChainManifest[] memory manifests) {
-        manifests = new ChainManifest[](1);
-        manifests[0] = ChainManifest({
-            chainId: block.chainid,
-            lzEid: 30_184,
-            sleeve: address(0),
-            assetOFT: address(assetOFT),
-            shareOFT: address(0),
-            isHomeChain: true
-        });
-    }
-
-    function _homeAndRemoteManifest() internal view returns (ChainManifest[] memory manifests) {
-        manifests = new ChainManifest[](2);
-        manifests[0] = ChainManifest({
-            chainId: block.chainid,
-            lzEid: 30_184,
-            sleeve: address(0),
-            assetOFT: address(assetOFT),
-            shareOFT: address(0),
-            isHomeChain: true
-        });
-        manifests[1] = ChainManifest({
-            chainId: 56,
-            lzEid: 30_102,
-            sleeve: address(0xBEEF),
-            assetOFT: address(0xCAFE),
-            shareOFT: address(0),
-            isHomeChain: false
-        });
-    }
-
-    function _venueConfig(bytes32 venueId, address venue, bool usesLayerZero)
-        internal
-        pure
-        returns (VenueConfig memory)
-    {
-        return VenueConfig({venueId: venueId, venue: venue, helper: address(0), usesLayerZero: usesLayerZero});
     }
 
     function _mockHyperliquidReads(address account) internal {
@@ -1152,10 +659,12 @@ contract StrategyControllersTest is Test {
         vm.mockCall(
             SPOT_BALANCE_PRECOMPILE,
             abi.encode(account, uint64(100)),
-            abi.encode(L1Read.SpotBalance({total: spotTotal, hold: 0, entryNtl: spotTotal}))
+            abi.encode(L1Read.SpotBalance({total: spotTotal, hold: 0, entryNtl: 0}))
         );
         vm.mockCall(
-            WITHDRAWABLE_PRECOMPILE, abi.encode(account), abi.encode(L1Read.Withdrawable({withdrawable: withdrawable}))
+            WITHDRAWABLE_PRECOMPILE,
+            abi.encode(account),
+            abi.encode(L1Read.Withdrawable({withdrawable: withdrawable}))
         );
         vm.mockCall(
             ACCOUNT_MARGIN_PRECOMPILE,
@@ -1164,15 +673,11 @@ contract StrategyControllersTest is Test {
                 L1Read.AccountMarginSummary({
                     accountValue: accountValue,
                     marginUsed: marginUsed,
-                    ntlPos: uint64(shortSize < 0 ? uint64(-shortSize) * markPx / 1e6 : 0),
-                    rawUsd: accountValue - int64(marginUsed)
+                    ntlPos: 0,
+                    rawUsd: 0
                 })
             )
         );
-    }
-
-    function _cloid(bytes32 strategyId, uint128 salt) internal pure returns (uint128) {
-        return uint128(uint256(keccak256(abi.encodePacked(strategyId, salt))));
     }
 }
 
@@ -1246,23 +751,5 @@ contract MockPendleRouter is IPendleRouter, IPendleStaticQuoter {
         netSyFee = 0;
         priceImpact = 0;
         exchangeRateAfter = 1e18;
-    }
-}
-
-contract MockAssetOFTView {
-    address internal immutable _token;
-    address internal immutable _endpoint;
-
-    constructor(address token_, address endpoint_) {
-        _token = token_;
-        _endpoint = endpoint_;
-    }
-
-    function token() external view returns (address) {
-        return _token;
-    }
-
-    function endpoint() external view returns (address) {
-        return _endpoint;
     }
 }

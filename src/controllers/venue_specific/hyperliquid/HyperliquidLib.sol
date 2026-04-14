@@ -48,7 +48,6 @@ struct HyperliquidUnwindSizing {
     uint64 markPx;
     uint64 spotSizeToSell;
     uint64 perpSizeToClose;
-    bool requiresLayerZero;
     bool requiresEmergencyExit;
 }
 
