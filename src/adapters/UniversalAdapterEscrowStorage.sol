@@ -11,6 +11,8 @@ import {ContractCodeCheckerLib} from "./libraries/ContractCodeCheckerLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
+/// @notice Designed for single-strategy-per-sleeve deployments (enforced by StrategyVaultFactory).
+/// Multi-strategy usage would double-count idle assets across per-strategy allocation tracking.
 abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     using SafeERC20Lib for IERC20;
     using EnumerableSet for EnumerableSet.Bytes32Set;
@@ -48,6 +50,7 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     address public settlementQueue;
     bool public emergencyMode;
     uint256 public emergencyModeActivatedAt;
+    bool private _locked;
 
     /* MODIFIERS */
     modifier onlyVault() {
@@ -75,6 +78,13 @@ abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
         if (!strategy.active) revert StrategyNotActive();
         if (msg.sender != strategy.agent && msg.sender != owner) revert NotAuthorized();
         _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked) revert ReentrancyGuarded();
+        _locked = true;
+        _;
+        _locked = false;
     }
 
     constructor(address _parentVault) {

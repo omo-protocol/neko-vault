@@ -105,6 +105,7 @@ contract AsyncWithdrawalQueue is ReentrancyGuard {
         nonReentrant
         returns (uint256 requestId)
     {
+        if (msg.sender != shareOwner && msg.sender != owner) revert NotOwner();
         return _requestRedeem(shareOwner, msg.sender, shares, receiver);
     }
 

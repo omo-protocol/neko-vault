@@ -127,7 +127,8 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         adapter.deallocate(deallocData, deallocAmount, DEALLOCATE_SELECTOR, address(0));
     }
 
-    function test_deallocate_UserExitSelectorDoesNotTriggerAutoWithdrawal() public {
+    /// @notice Test that withdraw selector DOES trigger auto-withdrawal (V4 security fix)
+    function test_deallocate_WithdrawSelectorTriggersAutoWithdrawal() public {
         uint256 allocAmount = 100e18;
         MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
 
@@ -150,20 +151,22 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         vm.prank(owner);
         adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
 
+        // With V4 fix, withdraw selector triggers auto-withdrawal to cover shortfall
         bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
         bytes4 withdrawSelector = bytes4(keccak256("withdraw(uint256,address,address)"));
 
         vm.prank(address(vault));
-        vm.expectRevert(
-            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 60e18, 80e18)
-        );
         adapter.deallocate(deallocData, 80e18, withdrawSelector, address(0));
 
-        assertEq(protocol.balanceOf(address(adapter)), 40e18);
-        assertEq(asset.balanceOf(address(adapter)), 60e18);
+        // Auto-withdrawal pulled 20e18 from protocol to cover shortfall (80 - 60 idle)
+        // Adapter balance is 80e18 (vault pulls assets separately via transferFrom)
+        assertEq(asset.balanceOf(address(adapter)), 80e18);
+        // Protocol balance reduced from 40e18 to 20e18
+        assertEq(protocol.balanceOf(address(adapter)), 20e18);
     }
 
-    function test_deallocate_RedeemSelectorDoesNotTriggerAutoWithdrawal() public {
+    /// @notice Test that redeem selector DOES trigger auto-withdrawal (V4 security fix)
+    function test_deallocate_RedeemSelectorTriggersAutoWithdrawal() public {
         uint256 allocAmount = 100e18;
         MockAutoWithdrawController controller = new MockAutoWithdrawController(address(protocol));
 
@@ -186,17 +189,18 @@ contract UniversalAdapterEscrowLazyDeallocationTest is Test {
         vm.prank(owner);
         adapter.executeStrategyBypassCircuitBreaker(STRATEGY_ID, depositCalls);
 
+        // With V4 fix, redeem selector triggers auto-withdrawal to cover shortfall
         bytes memory deallocData = abi.encode(STRATEGY_ID, 2, new IUniversalAdapterEscrow.Call[](0));
         bytes4 redeemSelector = bytes4(keccak256("redeem(uint256,address,address)"));
 
         vm.prank(address(vault));
-        vm.expectRevert(
-            abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 50e18, 75e18)
-        );
         adapter.deallocate(deallocData, 75e18, redeemSelector, address(0));
 
-        assertEq(protocol.balanceOf(address(adapter)), 50e18);
-        assertEq(asset.balanceOf(address(adapter)), 50e18);
+        // Auto-withdrawal pulled 25e18 from protocol to cover shortfall (75 - 50 idle)
+        // Adapter balance is 75e18 (vault pulls assets separately via transferFrom)
+        assertEq(asset.balanceOf(address(adapter)), 75e18);
+        // Protocol balance reduced from 50e18 to 25e18
+        assertEq(protocol.balanceOf(address(adapter)), 25e18);
     }
 
     /// @notice Test deallocate ignores withdrawCalls (backward compatibility)

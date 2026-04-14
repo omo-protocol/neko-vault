@@ -28,7 +28,9 @@ abstract contract UniversalAdapterEscrowInternals is UniversalAdapterEscrowStora
     }
 
     function _shouldAutoWithdraw(bytes4 caller, address initiator) internal view returns (bool) {
-        return caller == DEALLOCATE_SELECTOR && _isAllocator(initiator);
+        if (caller == DEALLOCATE_SELECTOR && _isAllocator(initiator)) return true;
+        if (caller == WITHDRAW_SELECTOR || caller == REDEEM_SELECTOR) return true;
+        return false;
     }
 
     function _isAllocator(address account) internal view returns (bool allocator) {

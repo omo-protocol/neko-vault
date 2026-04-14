@@ -3,6 +3,10 @@ pragma solidity 0.8.28;
 
 import {ISendAssetsGate} from "../interfaces/IGate.sol";
 
+/// @notice Gate that restricts sendAssets to a single wrapper address.
+/// @dev The wrapper address is immutable after initialization (set once via clone factory).
+/// If the wrapper changes, deploy a new gate instance. This is by design — the gate is
+/// deployed per-vault with a fixed wrapper, and raw address comparison is intentional.
 contract WrapperOnlySendAssetsGate is ISendAssetsGate {
     address public wrapper;
     bool private _initialized;

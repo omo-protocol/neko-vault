@@ -290,12 +290,17 @@ contract StrategyControllersTest is Test {
 
         uint256 unlockedShares = wrapper.balanceOf(user);
         wrapper.unwrapToApproval(unlockedShares, address(queue), user);
-        uint256 requestId = queue.requestRedeemFrom(address(wrapper), unlockedShares / 2, user);
         vm.stopPrank();
+
+        // V6 fix: requestRedeemFrom restricted to shareOwner or queue owner.
+        // Queue owner orchestrates the redemption on behalf of the user.
+        vm.prank(owner);
+        uint256 requestId = queue.requestRedeemFrom(address(wrapper), unlockedShares / 2, user);
 
         WithdrawalRequest memory request = queue.getRequest(requestId);
         assertEq(vault.balanceOf(address(wrapper)), unlockedShares / 2);
-        assertEq(request.owner, user);
+        assertEq(request.owner, owner);
+        assertEq(request.receiver, user);
         assertEq(request.sharesEscrowed, unlockedShares / 2);
     }
 
@@ -384,7 +389,8 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(user), 700e6);
     }
 
-    function testPTLoopAutomatesLoopingAndRequiresAsyncQueueForLargeUserExits() public {
+    /// @notice V4 fix: user exits now trigger auto-unwind, so large withdrawals succeed
+    function testPTLoopAutoUnwindsOnLargeUserExits() public {
         Deployment memory deployment = _deployPTLoop();
         PTLoopController controller = PTLoopController(deployment.controller);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -404,14 +410,11 @@ contract StrategyControllersTest is Test {
         assertEq(asset.balanceOf(deployment.sleeve), 150e6);
         assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
 
+        // With V4 fix, auto-withdraw triggers on user exits, unwinding PT positions
         vm.prank(user);
-        vm.expectRevert();
         vault.withdraw(700e6, user, user);
 
-        assertEq(asset.balanceOf(user), 0);
-        assertEq(ptAsset.balanceOf(deployment.sleeve), 807_500_000);
-        assertEq(asset.balanceOf(address(vault)), 0);
-        assertEq(asset.balanceOf(deployment.sleeve), 150e6);
+        assertEq(asset.balanceOf(user), 700e6);
     }
 
     function testPTLoopVaultCanPriceOnchainWithoutValuer() public {

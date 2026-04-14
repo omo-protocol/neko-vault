@@ -76,6 +76,7 @@ interface IUniversalAdapterEscrow is IAdapter {
     error EmergencyModeNotEnabled();
     error LiquidityDataMustHaveEmptyCalls();
     error InsufficientAdapterBalance(uint256 available, uint256 requested);
+    error ReentrancyGuarded();
 
     /* EXTERNAL FUNCTIONS */
 

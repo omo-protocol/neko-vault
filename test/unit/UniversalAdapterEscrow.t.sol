@@ -1759,7 +1759,8 @@ contract UniversalAdapterEscrowTest is Test {
 
         bytes memory deallocData = abi.encode(STRATEGY_1, uint256(2), new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
-        vm.expectRevert(abi.encodeWithSelector(IUniversalAdapterEscrow.InsufficientAdapterBalance.selector, 0, 100e6));
+        // With auto-withdraw enabled for user exit selectors, oversized call array is caught in _autoWithdraw
+        vm.expectRevert(IUniversalAdapterEscrow.InvalidData.selector);
         adapter.deallocate(deallocData, 100e6, bytes4(keccak256("withdraw(uint256,address,address)")), address(0));
     }
 

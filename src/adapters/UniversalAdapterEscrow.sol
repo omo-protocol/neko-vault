@@ -20,6 +20,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         override
         onlyVault
         notPaused
+        nonReentrant
         returns (bytes32[] memory ids, int256 change)
     {
         if (data.length == 0) revert InvalidData();
@@ -43,6 +44,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
 
         if (autoAllocationEnabled) {
             uint256 externalBefore = externalDeposits[strategyId];
+            uint256 adapterBalanceBefore = IERC20(asset).balanceOf(address(this));
             try IAutomatedWithdrawalController(strategies[strategyId].agent).quoteAutomaticAllocation(assets) returns (
                 Call[] memory allocationCalls
             ) {
@@ -51,6 +53,11 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
                     _executeMulticall(strategyId, allocationCalls, true);
                     uint256 externalAfter = externalDeposits[strategyId];
                     if (externalAfter < externalBefore || externalAfter - externalBefore > assets) {
+                        revert InvalidAmount();
+                    }
+                    // Bound actual balance impact: adapter should not lose more than allocated amount
+                    uint256 adapterBalanceAfter = IERC20(asset).balanceOf(address(this));
+                    if (adapterBalanceBefore > adapterBalanceAfter && adapterBalanceBefore - adapterBalanceAfter > assets) {
                         revert InvalidAmount();
                     }
                 }
@@ -64,11 +71,15 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
     }
 
+    /// @dev Deallocate transfers assets from sleeve to vault. Queue-protected liquidity is safe because
+    /// _reserveLocalLiquidity() and _availableUnreservedLiquidity() use balanceOf(vault) + balanceOf(sleeve),
+    /// so the total system liquidity is preserved when assets move between vault and sleeve.
     function deallocate(bytes memory data, uint256 assets, bytes4 caller, address initiator)
         external
         override
         onlyVault
         notPaused
+        nonReentrant
         returns (bytes32[] memory ids, int256 change)
     {
         if (data.length == 0) revert InvalidData();
@@ -108,6 +119,20 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         uint256 allocationDecrease = actualAmount > allocations[strategyId] ? allocations[strategyId] : actualAmount;
         allocations[strategyId] -= allocationDecrease;
         totalAllocations -= allocationDecrease;
+
+        // Clamp surplus to projected idle balance after vault pulls assets
+        if (settlementSurplusAssets > 0) {
+            uint256 postBalance = IERC20(asset).balanceOf(address(this));
+            uint256 inAdapterAlloc = totalAllocations > totalExternalDeposits ? totalAllocations - totalExternalDeposits : 0;
+            if (postBalance > inAdapterAlloc) {
+                uint256 maxSurplus = postBalance - inAdapterAlloc;
+                if (settlementSurplusAssets > maxSurplus) {
+                    settlementSurplusAssets = maxSurplus;
+                }
+            } else {
+                settlementSurplusAssets = 0;
+            }
+        }
 
         if (allocations[strategyId] == 0 && externalDeposits[strategyId] == 0) {
             _removeFromActiveStrategies(strategyId);
@@ -178,6 +203,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         external
         onlyStrategyAgentOrOwner(strategyId)
         notPaused
+        nonReentrant
     {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
@@ -197,6 +223,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         external
         onlyStrategyAgentOrOwner(strategyId)
         notPaused
+        nonReentrant
     {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
@@ -224,6 +251,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         external
         onlyStrategyAgentOrOwner(strategyId)
         notPaused
+        nonReentrant
     {
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
@@ -243,6 +271,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         external
         onlyStrategyAgentOrOwner(strategyId)
         notPaused
+        nonReentrant
     {
         if (withdrawCalls.length == 0) revert InvalidData();
         if (withdrawCalls.length > 64) revert InvalidData(); // Reasonable limit
@@ -320,7 +349,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         emit SettlementQueueSet(address(0));
     }
 
-    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue notPaused {
+    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external onlySettlementQueue notPaused nonReentrant {
         if (!strategies[strategyId].active) revert StrategyNotActive();
         if (assetsReceived == 0) revert InvalidAmount();
 
