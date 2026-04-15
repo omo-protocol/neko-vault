@@ -414,7 +414,9 @@ contract StrategyVaultFactory is ReentrancyGuard {
     }
 
     function _configureDeltaNeutralWhitelist(UniversalAdapterEscrow sleeve, address venue) internal {
-        sleeve.updateWhitelist(venue, CoreWriter.sendRawAction.selector, true, type(uint256).max);
+        // Use updateWhitelistUnsafe for venue — venue contracts may be proxies containing
+        // DELEGATECALL which would fail _validateWhitelistTarget in the safe variant.
+        sleeve.updateWhitelistUnsafe(venue, CoreWriter.sendRawAction.selector, true, type(uint256).max);
     }
 
     function _configurePTLoopWhitelist(UniversalAdapterEscrow sleeve, address asset, address ptToken, address venue)
@@ -422,7 +424,9 @@ contract StrategyVaultFactory is ReentrancyGuard {
     {
         sleeve.updateWhitelist(asset, bytes4(keccak256("approve(address,uint256)")), true, type(uint256).max);
         sleeve.updateWhitelist(ptToken, bytes4(keccak256("approve(address,uint256)")), true, type(uint256).max);
-        sleeve.updateWhitelist(venue, IPendleRouter.swapExactTokenForPt.selector, true, type(uint256).max);
-        sleeve.updateWhitelist(venue, IPendleRouter.swapExactPtForToken.selector, true, type(uint256).max);
+        // Use updateWhitelistUnsafe for venue — Pendle Router is a proxy containing
+        // DELEGATECALL which would fail _validateWhitelistTarget in the safe variant.
+        sleeve.updateWhitelistUnsafe(venue, IPendleRouter.swapExactTokenForPt.selector, true, type(uint256).max);
+        sleeve.updateWhitelistUnsafe(venue, IPendleRouter.swapExactPtForToken.selector, true, type(uint256).max);
     }
 }

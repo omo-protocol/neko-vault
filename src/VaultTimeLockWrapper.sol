@@ -300,7 +300,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         nonReentrant
         returns (uint256 sharesOut)
     {
-        if (receiver == address(0)) revert ZeroAddress();
+        if (receiver == address(0) || receiver == address(this)) revert ZeroAddress();
         if (vTokens == 0) revert ZeroAmount();
 
         if (msg.sender != onBehalf) {
@@ -317,15 +317,16 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
     }
 
     /**
-     * @notice Burn unlocked vTokens and approve a spender to pull the underlying VaultV2 shares.
-     * @dev Supports pull-based integrations that cannot receive pushed shares directly during unwrap.
+     * @notice Burn unlocked vTokens and transfer the underlying VaultV2 shares to recipient.
+     * @dev Transfers shares directly to avoid pooled-allowance race conditions.
+     *      Renamed parameter from "spender" to "recipient" to reflect push-based semantics.
      */
-    function unwrapToApproval(uint256 vTokens, address spender, address onBehalf)
+    function unwrapToApproval(uint256 vTokens, address recipient, address onBehalf)
         external
         nonReentrant
         returns (uint256 sharesOut)
     {
-        if (spender == address(0)) revert ZeroAddress();
+        if (recipient == address(0) || recipient == address(this)) revert ZeroAddress();
         if (vTokens == 0) revert ZeroAmount();
 
         if (msg.sender != onBehalf) {
@@ -337,13 +338,7 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         }
 
         _burnWithLockupCheck(onBehalf, vTokens);
-
-        uint256 currentAllowance = IERC20(address(vault)).allowance(address(this), spender);
-        uint256 updatedAllowance = currentAllowance + vTokens;
-        if (currentAllowance != 0) {
-            SafeERC20Lib.safeApprove(address(vault), spender, 0);
-        }
-        SafeERC20Lib.safeApprove(address(vault), spender, updatedAllowance);
+        SafeERC20Lib.safeTransfer(address(vault), recipient, vTokens);
         return vTokens;
     }
 

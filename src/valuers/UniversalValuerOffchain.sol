@@ -420,6 +420,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @notice Set fallback value for emergency
     function setFallbackValue(bytes32 strategyId, uint256 value) external onlyOwner {
+        if (registeredEscrowTotals[strategyId] != address(0)) revert CannotUpdateReservedEscrowTotal();
         fallbackValues[strategyId] = value;
         emit FallbackValueSet(strategyId, value);
     }

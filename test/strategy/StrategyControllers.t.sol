@@ -36,6 +36,7 @@ import {
     WithdrawalRequest,
     WithdrawalRequestStatus
 } from "../../src/strategies/StrategyTypes.sol";
+import {IERC20} from "../../src/interfaces/IERC20.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 contract StrategyControllersTest is Test {
@@ -274,7 +275,7 @@ contract StrategyControllersTest is Test {
         assertEq(request.sharesEscrowed, unlockedShares / 2);
     }
 
-    function testTimelockWrapperCanUnwrapToApprovalForAsyncQueueFlows() public {
+    function testTimelockWrapperCanUnwrapForAsyncQueueFlows() public {
         Deployment memory deployment = _deployDeltaNeutral(true);
         VaultTimeLockWrapper wrapper = VaultTimeLockWrapper(deployment.wrapper);
         IVaultV2 vault = IVaultV2(deployment.vault);
@@ -289,17 +290,17 @@ contract StrategyControllersTest is Test {
         vm.warp(block.timestamp + wrapper.LOCK_PERIOD());
 
         uint256 unlockedShares = wrapper.balanceOf(user);
-        wrapper.unwrapToApproval(unlockedShares, address(queue), user);
+        // Push-based: unwrap sends vault shares directly to user
+        wrapper.unwrap(unlockedShares, user, user);
+
+        // User approves queue and requests redemption directly
+        IERC20(address(vault)).approve(address(queue), unlockedShares);
+        uint256 requestId = queue.requestRedeem(unlockedShares / 2, user);
         vm.stopPrank();
 
-        // V6 fix: requestRedeemFrom restricted to shareOwner or queue owner.
-        // Queue owner orchestrates the redemption on behalf of the user.
-        vm.prank(owner);
-        uint256 requestId = queue.requestRedeemFrom(address(wrapper), unlockedShares / 2, user);
-
         WithdrawalRequest memory request = queue.getRequest(requestId);
-        assertEq(vault.balanceOf(address(wrapper)), unlockedShares / 2);
-        assertEq(request.owner, owner);
+        assertEq(vault.balanceOf(user), unlockedShares / 2);
+        assertEq(request.owner, user);
         assertEq(request.receiver, user);
         assertEq(request.sharesEscrowed, unlockedShares / 2);
     }

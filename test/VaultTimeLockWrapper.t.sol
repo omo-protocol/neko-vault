@@ -694,7 +694,7 @@ contract VaultTimeLockWrapperTest is Test {
         vm.stopPrank();
     }
 
-    function test_unwrapToApproval_supportsPullBasedIntegrations() public {
+    function test_unwrapToApproval_transfersSharesToRecipient() public {
         vm.startPrank(alice);
         asset.approve(address(wrapper), INITIAL_DEPOSIT);
         uint256 vTokens = wrapper.deposit(INITIAL_DEPOSIT);
@@ -706,12 +706,7 @@ contract VaultTimeLockWrapperTest is Test {
         vm.stopPrank();
 
         assertEq(wrapper.balanceOf(alice), 0, "vTokens burned");
-        assertEq(IERC20(address(vault)).allowance(address(wrapper), bob), vTokens, "shares approved for pull");
-
-        vm.prank(bob);
-        IERC20(address(vault)).transferFrom(address(wrapper), bob, vTokens);
-
-        assertEq(IERC20(address(vault)).balanceOf(bob), vTokens, "spender pulled wrapped shares");
+        assertEq(IERC20(address(vault)).balanceOf(bob), vTokens, "shares transferred to recipient");
     }
 
     function test_transfer_preservesOriginalDepositTime() public {

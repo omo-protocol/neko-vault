@@ -120,12 +120,15 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         allocations[strategyId] -= allocationDecrease;
         totalAllocations -= allocationDecrease;
 
-        // Clamp surplus to projected idle balance after vault pulls assets
+        // Clamp surplus to projected idle balance after vault pulls assets.
+        // The vault will transferFrom(sleeve, vault, actualAmount) AFTER this function returns,
+        // so we must subtract actualAmount from current balance to get the true post-pull balance.
         if (settlementSurplusAssets > 0) {
-            uint256 postBalance = IERC20(asset).balanceOf(address(this));
+            uint256 currentBalance = IERC20(asset).balanceOf(address(this));
+            uint256 projectedBalance = currentBalance > actualAmount ? currentBalance - actualAmount : 0;
             uint256 inAdapterAlloc = totalAllocations > totalExternalDeposits ? totalAllocations - totalExternalDeposits : 0;
-            if (postBalance > inAdapterAlloc) {
-                uint256 maxSurplus = postBalance - inAdapterAlloc;
+            if (projectedBalance > inAdapterAlloc) {
+                uint256 maxSurplus = projectedBalance - inAdapterAlloc;
                 if (settlementSurplusAssets > maxSurplus) {
                     settlementSurplusAssets = maxSurplus;
                 }
@@ -237,7 +240,13 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         if (minBalanceIncrease > 0) {
             require(withdrawnAmount >= minBalanceIncrease, "Slippage: insufficient balance increase");
             if (balanceAfter > balanceBefore + minBalanceIncrease) {
-                SafeERC20Lib.safeTransfer(asset, parentVault, balanceAfter - (balanceBefore + minBalanceIncrease));
+                uint256 excess = balanceAfter - (balanceBefore + minBalanceIncrease);
+                // Reduce surplus before transferring excess to vault to prevent double-counting
+                if (settlementSurplusAssets > 0) {
+                    uint256 surplusReduction = excess > settlementSurplusAssets ? settlementSurplusAssets : excess;
+                    settlementSurplusAssets -= surplusReduction;
+                }
+                SafeERC20Lib.safeTransfer(asset, parentVault, excess);
             }
         }
 
