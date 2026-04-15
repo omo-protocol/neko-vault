@@ -290,6 +290,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
 
         registeredEscrowTotals[totalId] = msg.sender;
+
+        // Clear any pre-existing stale data to prevent uncorrectable values
+        delete fallbackValues[totalId];
+        delete latestReports[totalId];
+
         emit EscrowTotalRegistered(totalId, msg.sender);
     }
 

@@ -579,7 +579,16 @@ contract VaultTimeLockWrapper is ReentrancyGuard {
         }
 
         if (deposits.length >= MAX_BATCHES_PER_USER) revert MaxBatchesReached();
+
+        // Insert in chronological order to maintain FIFO invariant.
+        // Push at end then bubble into sorted position.
         deposits.push(DepositBatch({amount: amount, depositTime: depositTime}));
+        for (uint256 i = deposits.length - 1; i > 0; i--) {
+            if (deposits[i].depositTime >= deposits[i - 1].depositTime) break;
+            DepositBatch memory temp = deposits[i];
+            deposits[i] = deposits[i - 1];
+            deposits[i - 1] = temp;
+        }
     }
 
     /**

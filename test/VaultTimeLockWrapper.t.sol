@@ -1555,17 +1555,17 @@ contract VaultTimeLockWrapperTest is Test {
         wrapper.transfer(bob, 100e18);
         vm.stopPrank();
 
-        // Bob should have 2 batches: his original + Alice's (merged because all
-        // transfers from Alice share the same depositTime)
+        // Bob should have 2 batches: Alice's (merged, older) + Bob's original (newer),
+        // in chronological order for correct FIFO withdrawal
         assertEq(wrapper.getDepositCount(bob), 2, "Bob has 2 batches total");
 
-        // First batch is Bob's original deposit
+        // First batch is Alice's merged transfers (older timestamp, sorted first)
         (uint256 amt0,,,) = wrapper.getDeposit(bob, 0);
-        assertEq(amt0, 100e18, "Bob's original deposit unchanged");
+        assertEq(amt0, 300e18, "Alice's transfers merged at index 0 (older)");
 
-        // Second batch is all of Alice's transfers merged
+        // Second batch is Bob's original deposit (newer timestamp)
         (uint256 amt1,,,) = wrapper.getDeposit(bob, 1);
-        assertEq(amt1, 300e18, "Alice's transfers merged");
+        assertEq(amt1, 100e18, "Bob's original deposit at index 1 (newer)");
     }
 
     function test_security_capEnforcedAfterMerging() public {
