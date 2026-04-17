@@ -400,4 +400,6 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         emit SettlementRecorded(strategyId, assetsReceived, externalDeposits[strategyId]);
     }
 
+    /// @notice Accept native token for bridge messaging fees (LZ OFT).
+    receive() external payable {}
 }

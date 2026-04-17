@@ -11,7 +11,7 @@ import {ContractCodeCheckerLib} from "./libraries/ContractCodeCheckerLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
-/// @notice Designed for single-strategy-per-sleeve deployments (enforced by StrategyVaultFactory).
+/// @notice Designed for single-strategy-per-sleeve deployments (enforced by CrossVenueStrategyVaultFactory).
 /// Multi-strategy usage would double-count idle assets across per-strategy allocation tracking.
 abstract contract UniversalAdapterEscrowStorage is IUniversalAdapterEscrow {
     using SafeERC20Lib for IERC20;
