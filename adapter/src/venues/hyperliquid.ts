@@ -259,7 +259,7 @@ export class HyperliquidAdapter implements VenueAdapter {
       }
     }
 
-    // Read post-close withdrawable and issue withdraw3 → HyperEVM for the adapter to OFT-back.
+    // Read post-close withdrawable and issue withdraw3 → HyperEVM for the adapter to CCTP-back.
     const post = await this.hlInfo(
       this.isPerp()
         ? { type: "clearinghouseState", user: account.address }

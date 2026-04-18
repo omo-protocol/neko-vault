@@ -32,6 +32,7 @@ library RitualHttpLib {
         bytes[] secretSignatures;
         string[] secretHeaderKeys;
         string[] secretHeaderValues;
+        uint256 ttl; // runtime-tunable — passed in from controller storage, not hardcoded
     }
 
     /// @notice Build the abi-encoded request for the Long-Running HTTP precompile.
@@ -45,7 +46,7 @@ library RitualHttpLib {
             // Base executor fields (5)
             req.executor,
             req.encryptedSecrets,
-            uint256(polling.maxPollBlock),
+            req.ttl,
             req.secretSignatures,
             bytes(""),
             // Polling config (3)
@@ -80,10 +81,12 @@ library RitualHttpLib {
             pollHeaders,
             bytes(""),
             ".result",
-            // DKMS + PII (3) — dkmsKeyIndex=0 means "not using dKMS"; secrets come from `encryptedSecrets`.
+            // DKMS + PII (3) — dkmsKeyIndex=0 = not using dKMS; dkmsKeyFormat=0 = disabled;
+            // piiEnabled=true enables SECRET_NAME string substitution in headers (the executor
+            // decrypts `encryptedSecrets` and replaces matching names in `headersValues`).
             uint256(0),
-            uint8(1),
-            false
+            uint8(0),
+            true
         );
     }
 
@@ -94,15 +97,21 @@ library RitualHttpLib {
     }
 
     /// @notice Decode the standard async HTTP response envelope delivered by AsyncDelivery.
+    ///         When `resultJsonPath` extracts a JSON string, the TEE unwraps the quotes and
+    ///         writes the raw UTF-8 bytes of the string into `body`. Our adapters return
+    ///         `{"result":"0x<hex>"}`, so body arrives as ASCII bytes of a hex string. We
+    ///         auto-decode the hex here so callers can `abi.decode(body, (...))` directly.
     function decodeEnvelope(bytes calldata raw)
         internal
-        pure
+        view
         returns (uint16 statusCode, bytes memory body, string memory errorMessage)
     {
         string[] memory _headers;
         string[] memory _cookies;
-        (statusCode, _headers, _cookies, body, errorMessage) =
+        bytes memory rawBody;
+        (statusCode, _headers, _cookies, rawBody, errorMessage) =
             abi.decode(raw, (uint16, string[], string[], bytes, string));
+        body = HexDecodeLib.maybeHexDecode(rawBody);
     }
 
     function _emptyStringArray() private pure returns (string[] memory) {
@@ -125,5 +134,36 @@ library RitualHttpLib {
         for (uint256 i; i < n; ++i) {
             merged[i + 1] = extraValues[i];
         }
+    }
+}
+
+/// @notice External library so callers (controllers) don't inline the hex loop —
+///         keeps MultiLegController runtime under EIP-170.
+library HexDecodeLib {
+    /// @notice If `input` looks like ASCII hex ("0x..." or plain hex of even length),
+    ///         decode it to raw bytes. Otherwise return it unchanged.
+    function maybeHexDecode(bytes memory input) external pure returns (bytes memory) {
+        uint256 len = input.length;
+        uint256 start;
+        if (len >= 2 && input[0] == 0x30 && (input[1] == 0x78 || input[1] == 0x58)) {
+            start = 2;
+            len -= 2;
+        }
+        if (len == 0 || (len & 1) != 0) return input;
+        bytes memory out = new bytes(len / 2);
+        for (uint256 i; i < len; i += 2) {
+            (uint8 hi, bool okHi) = _hexNibble(uint8(input[start + i]));
+            (uint8 lo, bool okLo) = _hexNibble(uint8(input[start + i + 1]));
+            if (!okHi || !okLo) return input;
+            out[i / 2] = bytes1((hi << 4) | lo);
+        }
+        return out;
+    }
+
+    function _hexNibble(uint8 c) private pure returns (uint8 v, bool ok) {
+        if (c >= 0x30 && c <= 0x39) return (c - 0x30, true);
+        if (c >= 0x61 && c <= 0x66) return (c - 0x61 + 10, true);
+        if (c >= 0x41 && c <= 0x46) return (c - 0x41 + 10, true);
+        return (0, false);
     }
 }

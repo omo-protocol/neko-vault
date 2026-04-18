@@ -225,11 +225,33 @@ export class PolymarketAdapter implements VenueAdapter {
       } catch {}
     }
 
-    // 3. Read post-close USDC balance on PM. The actual Polygon withdrawal (from PM's Exchange
-    //    contract to the EOA's Polygon wallet) + subsequent OFT-back to Base is orchestrated by
-    //    the adapter's Polygon-side module — not this venue adapter.
-    const buf = await this.getBuffer(creds);
-    return buf.bufferUsd;
+    // 3. Read ERC20 USDC.balanceOf(EOA) on Polygon — that's what's directly CCTP-burnable via
+    //    `unwindPmOutbound`. If PM settles positions via a CTF Exchange proxy wallet
+    //    instead of the EOA, the user (or adapter with proxy-owner auth) must first move USDC
+    //    from the proxy to the EOA — via PM's "Cash Out" UI or a direct transfer from the proxy
+    //    contract. We don't attempt that here because the proxy mechanism is account-specific.
+    try {
+      const { createPublicClient, http: viemHttp, defineChain } = await import("viem");
+      const polygon = defineChain({
+        id: 137,
+        name: "Polygon",
+        nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+        rpcUrls: { default: { http: ["https://polygon-bor-rpc.publicnode.com"] } },
+      });
+      const pub = createPublicClient({ chain: polygon, transport: viemHttp() });
+      const USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as const;
+      const erc20Abi = [{
+        name: "balanceOf", type: "function", stateMutability: "view",
+        inputs: [{ name: "account", type: "address" }],
+        outputs: [{ name: "", type: "uint256" }],
+      }] as const;
+      const bal = (await pub.readContract({
+        address: USDC_E, abi: erc20Abi, functionName: "balanceOf", args: [account.address],
+      })) as bigint;
+      return bal;
+    } catch {
+      return 0n;
+    }
   }
 }
 

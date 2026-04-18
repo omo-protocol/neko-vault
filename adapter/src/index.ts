@@ -65,6 +65,7 @@ async function main() {
     valuer: req("VALUER") as Address,
     baseAsset: req("BASE_ASSET") as Address,
     vault: req("VAULT") as Address,
+    module: req("MODULE") as Address,
   });
 
   await app.listen({ port, host: "0.0.0.0" });

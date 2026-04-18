@@ -691,4 +691,45 @@ contract MultiLegControllerTest is Test {
         assertEq(other.adapterUrl(), "https://other");
         assertEq(controller.legCount(), 3);
     }
+
+    /// @notice TEE delivers body as raw UTF-8 bytes of the JQ-extracted `.result` string.
+    ///         Adapter returns `{"result":"0x<hex>"}`, so body is ASCII of the hex string.
+    ///         Verifies `decodeEnvelope` auto-hex-decodes before the callback abi.decodes.
+    function testBufferSyncDecodesHexEncodedBody() public {
+        LegBufferSnapshot[] memory snaps = new LegBufferSnapshot[](3);
+        snaps[0] = LegBufferSnapshot({bufferUsd: 7_777e6, timestamp: block.timestamp});
+        snaps[1] = LegBufferSnapshot({bufferUsd: 8_888e6, timestamp: block.timestamp});
+        snaps[2] = LegBufferSnapshot({bufferUsd: 9_999e6, timestamp: block.timestamp});
+        bytes memory rawAbi = abi.encode(snaps);
+
+        // Build ASCII "0x<hex>" of rawAbi — this is what the TEE writes into body.
+        bytes memory asciiHex = _toAsciiHex(rawAbi);
+        string[] memory emptyArr = new string[](0);
+        bytes memory envelope = abi.encode(uint16(200), emptyArr, emptyArr, asciiHex, "");
+
+        bytes32 jobId = keccak256(abi.encodePacked(STRATEGY_ID, "ml-buffer", block.number));
+        vm.prank(owner);
+        controller.tick(0);
+        assertEq(controller.pendingBufferSyncJobId(), jobId);
+
+        vm.prank(RitualPrecompiles.ASYNC_DELIVERY);
+        controller.onBufferSyncResult(jobId, envelope);
+
+        LegBufferSnapshot memory b0 = controller.getLegBuffer(0);
+        LegBufferSnapshot memory b2 = controller.getLegBuffer(2);
+        assertEq(b0.bufferUsd, 7_777e6, "leg0 bufferUsd mismatch");
+        assertEq(b2.bufferUsd, 9_999e6, "leg2 bufferUsd mismatch");
+    }
+
+    function _toAsciiHex(bytes memory data) internal pure returns (bytes memory) {
+        bytes memory alpha = "0123456789abcdef";
+        bytes memory out = new bytes(2 + data.length * 2);
+        out[0] = "0";
+        out[1] = "x";
+        for (uint256 i; i < data.length; i++) {
+            out[2 + i * 2] = alpha[uint8(data[i]) >> 4];
+            out[3 + i * 2] = alpha[uint8(data[i]) & 0x0f];
+        }
+        return out;
+    }
 }

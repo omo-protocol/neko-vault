@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import {IBaseStrategyModule} from "./IBaseStrategyModule.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 
-interface IBaseOftSender {
+interface IBaseCctpSender {
     function bridge(bytes32 destinationRef, uint256 amount) external returns (bytes32);
 }
 
@@ -22,7 +22,7 @@ contract BaseStrategyModule is IBaseStrategyModule {
     error DeploymentsPaused();
     error InsufficientBalance();
     error CycleAlreadyConsumed();
-    error OftSenderNotSet();
+    error CctpSenderNotSet();
 
     event TopUpPm(bytes32 indexed cycleId, uint256 amount, bytes32 destinationRef, bytes32 payloadHash);
     event TopUpHl(bytes32 indexed cycleId, uint256 amount, bytes32 destinationRef, bytes32 payloadHash);
@@ -32,8 +32,8 @@ contract BaseStrategyModule is IBaseStrategyModule {
     event RefillSourceSet(address indexed src);
     event VaultSet(address indexed v);
     event GatewaySet(address indexed gateway);
-    event OftSenderSet(address indexed sender);
-    event OftBridged(bytes32 indexed cycleId, bytes32 indexed destinationRef, uint256 amount, bytes32 guid);
+    event CctpSenderSet(address indexed sender);
+    event CctpBridged(bytes32 indexed cycleId, bytes32 indexed destinationRef, uint256 amount);
 
     address public immutable asset;
     address public owner;
@@ -42,15 +42,14 @@ contract BaseStrategyModule is IBaseStrategyModule {
     ///         Module pulls from here via transferFrom (if non-self) during `_topUp`.
     address public bufferSource;
     /// @notice Source of USDC for INBOUND refills. Typically this module itself — the adapter
-    ///         OFT-sends USDC from HyperEVM/Polygon back to this module's Base address after
+    ///         CCTP-mints USDC from HyperEVM/Polygon back to this module's Base address after
     ///         closing venue positions. `refillReserve` then transfers from here to the vault.
     ///         If zero, falls back to `bufferSource`.
     address public refillSource;
     address public vault;
-    /// @notice Required LZ OFT router. All top-ups bridge through this contract — the three
-    ///         supported venues (HL perp/spot, PM, and any PtLoop destination) all require
-    ///         cross-chain movement. No legacy direct-transfer fallback.
-    address public oftSender;
+    /// @notice CCTP V2 router. All top-ups bridge through this contract via Circle's
+    ///         burn/mint. No legacy direct-transfer fallback.
+    address public cctpSender;
     bool public deploymentsPaused;
     mapping(bytes32 => bool) public consumedCycles;
 
@@ -99,9 +98,9 @@ contract BaseStrategyModule is IBaseStrategyModule {
         emit RefillSourceSet(src);
     }
 
-    function setOftSender(address sender) external onlyOwner {
-        oftSender = sender;
-        emit OftSenderSet(sender);
+    function setCctpSender(address sender) external onlyOwner {
+        cctpSender = sender;
+        emit CctpSenderSet(sender);
     }
 
     function topUpPmBuffer(uint256 amount, bytes32 destinationRef, bytes32 payloadHash, bytes32 cycleId)
@@ -158,7 +157,7 @@ contract BaseStrategyModule is IBaseStrategyModule {
         emit DeploymentsPausedSet(bytes32(0), false);
     }
 
-    /// @notice Sweep excess USDC held by the module (from OFT-returns beyond what was requested
+    /// @notice Sweep excess USDC held by the module (from CCTP-returns beyond what was requested
     ///         via `refillReserve`, or operator over-funding) directly to the vault. Owner-only.
     function sweepExcessToVault(uint256 amount) external onlyOwner {
         if (vault == address(0)) revert InvalidAddress();
@@ -172,8 +171,8 @@ contract BaseStrategyModule is IBaseStrategyModule {
         if (consumedCycles[cycleId]) revert CycleAlreadyConsumed();
         consumedCycles[cycleId] = true;
 
-        address sender = oftSender;
-        if (sender == address(0)) revert OftSenderNotSet();
+        address sender = cctpSender;
+        if (sender == address(0)) revert CctpSenderNotSet();
 
         address src = bufferSource;
         if (src == address(0) || src == address(this)) {
@@ -181,7 +180,7 @@ contract BaseStrategyModule is IBaseStrategyModule {
         } else {
             SafeERC20Lib.safeTransferFrom(asset, src, sender, amount);
         }
-        bytes32 guid = IBaseOftSender(sender).bridge(destinationRef, amount);
-        emit OftBridged(cycleId, destinationRef, amount, guid);
+        IBaseCctpSender(sender).bridge(destinationRef, amount);
+        emit CctpBridged(cycleId, destinationRef, amount);
     }
 }

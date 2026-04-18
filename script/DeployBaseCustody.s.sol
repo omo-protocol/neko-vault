@@ -11,15 +11,17 @@ import {BaseExecFactory} from "../src/factories/BaseExecFactory.sol";
 ///           1. VaultV2Factory + UniversalAdapterEscrowFactory
 ///           2. BaseCoreFactory (phase 1) + BaseExecFactory (phase 2)
 ///           3. coreFactory.deployCore(...) → vault / sleeve / valuer / agent
-///           4. execFactory.deployExec(...) → module / gateway / oftSender
+///           4. execFactory.deployExec(...) → module / gateway / cctpSender
 ///
 ///         Env vars:
 ///           PRIVATE_KEY               — deployer
 ///           USDC_ADDRESS              — asset (e.g. Base Sepolia USDC 0x036C...)
-///           OWNER                     — final owner for vault / sleeve / module / gateway / oftSender
+///           OWNER                     — final owner for vault / sleeve / module / gateway / cctpSender
 ///           VALUER_OWNER              — final owner for valuer (typically adapter's Base EOA)
 ///           STRATEGY_ID               — bytes32
 ///           SIGNER1, SIGNER2          — two gateway quorum signers (threshold = 2)
+///           CCTP_TOKEN_MESSENGER      — Circle CCTP V2 TokenMessenger on this chain
+///                                       (Base/Polygon/HyperEVM all at 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d)
 contract DeployBaseCustody is Script {
     function run() external {
         uint256 deployerPk = vm.envUint("PRIVATE_KEY");
@@ -29,6 +31,8 @@ contract DeployBaseCustody is Script {
         bytes32 strategyId = vm.envOr("STRATEGY_ID", keccak256(abi.encode(owner, usdc, "neko-v1")));
         address signer1 = vm.envAddress("SIGNER1");
         address signer2 = vm.envAddress("SIGNER2");
+        address cctpTokenMessenger =
+            vm.envOr("CCTP_TOKEN_MESSENGER", address(0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d));
 
         vm.startBroadcast(deployerPk);
 
@@ -59,6 +63,7 @@ contract DeployBaseCustody is Script {
                 asset: usdc,
                 vault: core.vault,
                 sleeve: core.sleeve,
+                cctpTokenMessenger: cctpTokenMessenger,
                 gatewaySigners: sigs,
                 gatewayThreshold: 2,
                 capPmTopUp: 1_000_000e6,
@@ -84,6 +89,6 @@ contract DeployBaseCustody is Script {
         console.log("Strategy agent:      ", core.strategyAgent);
         console.log("Module:              ", exec.module);
         console.log("Gateway:             ", exec.gateway);
-        console.log("OFT sender:          ", exec.oftSender);
+        console.log("CCTP sender:         ", exec.cctpSender);
     }
 }

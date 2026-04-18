@@ -3,13 +3,13 @@ pragma solidity 0.8.28;
 
 import {BaseExecutionGateway} from "../base/BaseExecutionGateway.sol";
 import {BaseStrategyModule} from "../base/BaseStrategyModule.sol";
-import {BaseOftSender} from "../base/BaseOftSender.sol";
+import {BaseCctpSender} from "../base/BaseCctpSender.sol";
 import {CrossVenueCommandLib} from "../base/CrossVenueCommandLib.sol";
 
 /// @title BaseExecFactory
 /// @notice Phase 2 of the split deploy. Takes the core contracts from `BaseCoreFactory`, deploys
-///         module + gateway + OFT sender, wires them, and transfers ownership of the full stack
-///         (vault + sleeve + module + gateway + oftSender) to `vaultOwner`. Valuer is owned by
+///         module + gateway + CCTP sender, wires them, and transfers ownership of the full stack
+///         (vault + sleeve + module + gateway + cctpSender) to `vaultOwner`. Valuer is owned by
 ///         `valuerOwner` (set in phase 1).
 contract BaseExecFactory {
     error InvalidConfig();
@@ -20,7 +20,7 @@ contract BaseExecFactory {
         address indexed vault,
         address module,
         address gateway,
-        address oftSender
+        address cctpSender
     );
 
     struct ExecParams {
@@ -28,6 +28,7 @@ contract BaseExecFactory {
         address asset;
         address vault;
         address sleeve;
+        address cctpTokenMessenger; // Circle CCTP V2 TokenMessenger on this chain
         address[] gatewaySigners;
         uint256 gatewayThreshold;
         uint256 capPmTopUp;
@@ -41,13 +42,14 @@ contract BaseExecFactory {
     struct ExecDeployment {
         address module;
         address gateway;
-        address oftSender;
+        address cctpSender;
     }
 
     function deployExec(ExecParams calldata p) external returns (ExecDeployment memory d) {
         if (p.vaultOwner == address(0) || p.asset == address(0) || p.vault == address(0) || p.sleeve == address(0)) {
             revert InvalidAddress();
         }
+        if (p.cctpTokenMessenger == address(0)) revert InvalidAddress();
         if (p.gatewaySigners.length == 0 || p.gatewayThreshold == 0) revert InvalidConfig();
         if (p.gatewayThreshold > p.gatewaySigners.length) revert InvalidConfig();
 
@@ -57,14 +59,14 @@ contract BaseExecFactory {
             address(this), p.vault, p.asset, d.module, p.gatewayName, p.gatewayVersion
         );
         d.gateway = address(gateway);
-        BaseOftSender oftSender = new BaseOftSender(p.asset, address(this));
-        oftSender.setAuthorizedCaller(d.module, true);
-        d.oftSender = address(oftSender);
+        BaseCctpSender cctpSender = new BaseCctpSender(p.asset, p.cctpTokenMessenger, address(this));
+        cctpSender.setAuthorizedCaller(d.module, true);
+        d.cctpSender = address(cctpSender);
 
-        // Wire module: gateway, vault, oftSender, refillSource (module = OFT inbox for returns).
+        // Wire module: gateway, vault, cctpSender, refillSource (module = CCTP inbox for returns).
         module.setGateway(d.gateway);
         module.setVault(p.vault);
-        module.setOftSender(d.oftSender);
+        module.setCctpSender(d.cctpSender);
         module.setRefillSource(d.module);
 
         // Gateway: signers + threshold + caps.
@@ -84,11 +86,11 @@ contract BaseExecFactory {
         }
         if (p.dailyCap > 0) gateway.setDailyCap(p.dailyCap);
 
-        // Hand over ownership of module + gateway + oftSender.
+        // Hand over ownership of module + gateway + cctpSender.
         module.transferOwnership(p.vaultOwner);
         gateway.transferOwnership(p.vaultOwner);
-        oftSender.setOwner(p.vaultOwner);
+        cctpSender.setOwner(p.vaultOwner);
 
-        emit BaseExecDeployed(p.vaultOwner, p.vault, d.module, d.gateway, d.oftSender);
+        emit BaseExecDeployed(p.vaultOwner, p.vault, d.module, d.gateway, d.cctpSender);
     }
 }

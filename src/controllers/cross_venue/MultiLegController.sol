@@ -5,6 +5,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {RitualPrecompiles} from "../../interfaces/ritual/IRitualPrecompiles.sol";
+import {SchedulerSetupLib} from "./SchedulerSetupLib.sol";
+import {MultiLegSubmitLib} from "./MultiLegSubmitLib.sol";
 import {CrossVenueCommandLib} from "../../base/CrossVenueCommandLib.sol";
 import {RitualHttpLib} from "./RitualHttpLib.sol";
 import {
@@ -90,6 +92,8 @@ contract MultiLegController is ReentrancyGuard {
     uint64 public pollIntervalBlocks;
     uint64 public maxPollBlock;
     uint256 public deliveryGasLimit;
+    /// @notice Async HTTP precompile TTL (blocks). Settable at runtime so we can tune without redeploying.
+    uint256 public httpTtl;
     string[] public secretHeaderKeys;
     string[] public secretHeaderValues;
     /// @notice ECIES-encrypted venue secrets (one blob per secret, encrypted to `executor` pubkey).
@@ -135,6 +139,14 @@ contract MultiLegController is ReentrancyGuard {
     bytes32 public lastSubmittedCommandNonce;
     bytes32 public reserveDestinationRef;
     uint256 public pendingUnwindTargetUsd;
+
+    uint256 public tickScheduleId;
+    uint256 public valuationScheduleId;
+    /// @dev Schedule auto-extend params. Packed into one slot:
+    ///         tickFreq (uint32) | valuationFreq (uint32) | extendGas (uint32) — bits 0..95.
+    ///      Stored on first `fundAndSchedule` call; tick/syncValuation re-use them to extend.
+    uint96 internal _schedPacked;
+    uint256 public scheduleMaxFeePerGas;
 
     /// @notice Last Base-side NAV + reserve reported by the valuation-sync callback.
     uint256 public lastNavUsd;
@@ -230,6 +242,7 @@ contract MultiLegController is ReentrancyGuard {
         pollIntervalBlocks = 25;
         maxPollBlock = 4500;
         deliveryGasLimit = 300_000;
+        httpTtl = 200; // default; tune via setHttpConfig
 
         legCount = uint8(p.legs.length);
         for (uint8 i; i < p.legs.length; i++) {
@@ -260,6 +273,66 @@ contract MultiLegController is ReentrancyGuard {
     function setExecutor(address e) external onlyOwner {
         executor = e;
     }
+
+    /// @notice Tune all HTTP async-precompile parameters without redeploying. Owner-only.
+    ///         Pass 0 to leave any field unchanged.
+    function setHttpConfig(
+        uint64 newPollInterval,
+        uint64 newMaxPollBlock,
+        uint256 newDeliveryGasLimit,
+        uint256 newHttpTtl
+    ) external onlyOwner {
+        if (newPollInterval > 0) pollIntervalBlocks = newPollInterval;
+        if (newMaxPollBlock > 0) maxPollBlock = newMaxPollBlock;
+        if (newDeliveryGasLimit > 0) deliveryGasLimit = newDeliveryGasLimit;
+        if (newHttpTtl > 0) httpTtl = newHttpTtl;
+    }
+
+    /// @notice Deposit msg.value into RitualWallet (credited to this clone) and schedule both
+    ///         `tick` and `syncValuation` recurring calls on the Ritual Scheduler. Owner-only.
+    ///         `tickFreq` / `valuationFreq` in blocks (1 block ≈ 350ms on Ritual, so
+    ///         `tickFreq = 100` ≈ every 35s). `numCalls = 0` means run until wallet runs dry.
+    ///         Lock duration must extend past `currentBlock + numCalls * frequency + ttl` or the
+    ///         Scheduler will reject.
+    function fundAndSchedule(
+        uint32 tickFreq,
+        uint32 valuationFreq,
+        uint32 tickNumCalls,
+        uint32 valuationNumCalls,
+        uint32 gasLimit,
+        uint256 maxFeePerGas,
+        uint32 lockDurationBlocks
+    ) external payable onlyOwner {
+        (tickScheduleId, valuationScheduleId) = SchedulerSetupLib.fundAndScheduleBoth(
+            this.tick.selector,
+            this.syncValuation.selector,
+            tickFreq,
+            valuationFreq,
+            tickNumCalls,
+            valuationNumCalls,
+            gasLimit,
+            maxFeePerGas,
+            lockDurationBlocks,
+            msg.value
+        );
+        _schedPacked = uint96(tickFreq) | (uint96(valuationFreq) << 32) | (uint96(gasLimit) << 64);
+        scheduleMaxFeePerGas = maxFeePerGas;
+    }
+
+    function _maybeExtend(bool isTick, uint256 executionIndex) internal {
+        if (msg.sender != RitualPrecompiles.SCHEDULER) return;
+        uint256 nid = SchedulerSetupLib.maybeExtend(
+            isTick ? this.tick.selector : this.syncValuation.selector,
+            isTick,
+            executionIndex,
+            _schedPacked,
+            scheduleMaxFeePerGas
+        );
+        if (nid != 0) {
+            if (isTick) tickScheduleId = nid; else valuationScheduleId = nid;
+        }
+    }
+
 
     /// @notice Replace the stored ECIES-encrypted venue secrets and their owner-EOA signatures.
     ///         `blobs[i]` is the ECIES ciphertext of one secret (venue PK, etc.) to the executor pubkey;
@@ -427,7 +500,8 @@ contract MultiLegController is ReentrancyGuard {
 
     // ─── Scheduler entrypoints ───────────────────────────────────────────────
 
-    function tick(uint256 /* executionIndex */ ) external nonReentrant onlySchedulerOrOwner {
+    function tick(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
+        _maybeExtend(true, executionIndex);
         if (tradingState == MultiLegTradingState.PAUSED || fundingState == MultiLegFundingState.PAUSED) return;
         if (
             tradingState == MultiLegTradingState.RECOVERY_REQUIRED || tradingState == MultiLegTradingState.UNHEDGED
@@ -469,7 +543,8 @@ contract MultiLegController is ReentrancyGuard {
         if (tradingState == MultiLegTradingState.IDLE) _tryStartCycle();
     }
 
-    function syncValuation(uint256 /* executionIndex */ ) external nonReentrant onlySchedulerOrOwner {
+    function syncValuation(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
+        _maybeExtend(false, executionIndex);
         if (tradingState == MultiLegTradingState.LEG_PENDING) return;
         if (pendingValuationJobId != bytes32(0)) return;
         _submitValuationSync();
@@ -675,23 +750,28 @@ contract MultiLegController is ReentrancyGuard {
         bytes32 jobId = keccak256(abi.encodePacked("ml-base-cmd", env.nonce, block.number));
         pendingBaseCommandJobId = jobId;
         lastSubmittedCommandNonce = bytes32(env.nonce);
-        RitualHttpLib.submit(
-            RitualHttpLib.HttpRequest({
-                url: string(abi.encodePacked(adapterUrl, "/base/execute-command")),
-                payload: abi.encode(env),
-                executor: executor,
-                encryptedSecrets: _encryptedSecrets,
-                secretSignatures: _secretSignatures,
-                secretHeaderKeys: secretHeaderKeys,
-                secretHeaderValues: secretHeaderValues
-            }),
-            RitualHttpLib.Polling({pollIntervalBlocks: pollIntervalBlocks, maxPollBlock: maxPollBlock}),
-            RitualHttpLib.Delivery({
-                target: address(this),
-                callback: this.onBaseCommandSubmitted.selector,
-                gasLimit: deliveryGasLimit
-            })
+        MultiLegSubmitLib.dispatch(
+            _submitCtx(),
+            "/base/execute-command",
+            abi.encode(env),
+            this.onBaseCommandSubmitted.selector
         );
+    }
+
+    function _submitCtx() internal view returns (MultiLegSubmitLib.Ctx memory) {
+        return MultiLegSubmitLib.Ctx({
+            adapterUrl: adapterUrl,
+            executor: executor,
+            encryptedSecrets: _encryptedSecrets,
+            secretSignatures: _secretSignatures,
+            secretHeaderKeys: secretHeaderKeys,
+            secretHeaderValues: secretHeaderValues,
+            pollIntervalBlocks: pollIntervalBlocks,
+            maxPollBlock: maxPollBlock,
+            deliveryGasLimit: deliveryGasLimit,
+            ttl: httpTtl,
+            controller: address(this)
+        });
     }
 
     function onBaseCommandSubmitted(bytes32 jobId, bytes calldata result) external onlyAsyncDelivery nonReentrant {
@@ -773,22 +853,11 @@ contract MultiLegController is ReentrancyGuard {
         bytes32 jobId = keccak256(abi.encodePacked(intent.idempotencyKey, block.number));
         pendingLegJobId = jobId;
 
-        RitualHttpLib.submit(
-            RitualHttpLib.HttpRequest({
-                url: string(abi.encodePacked(adapterUrl, "/leg/execute")),
-                payload: abi.encode(intent),
-                executor: executor,
-                encryptedSecrets: _encryptedSecrets,
-                secretSignatures: _secretSignatures,
-                secretHeaderKeys: secretHeaderKeys,
-                secretHeaderValues: secretHeaderValues
-            }),
-            RitualHttpLib.Polling({pollIntervalBlocks: pollIntervalBlocks, maxPollBlock: maxPollBlock}),
-            RitualHttpLib.Delivery({
-                target: address(this),
-                callback: this.onLegResult.selector,
-                gasLimit: deliveryGasLimit
-            })
+        MultiLegSubmitLib.dispatch(
+            _submitCtx(),
+            "/leg/execute",
+            abi.encode(intent),
+            this.onLegResult.selector
         );
         _setTradingState(MultiLegTradingState.LEG_PENDING);
         emit MultiLegLegSubmitted(currentCycleId, legIndex, jobId, notional);
@@ -847,71 +916,30 @@ contract MultiLegController is ReentrancyGuard {
     function _submitBufferSync() internal {
         bytes32 jobId = keccak256(abi.encodePacked(strategyId, "ml-buffer", block.number));
         pendingBufferSyncJobId = jobId;
-        RitualHttpLib.submit(
-            RitualHttpLib.HttpRequest({
-                url: string(abi.encodePacked(adapterUrl, "/buffers")),
-                payload: abi.encode(strategyId),
-                executor: executor,
-                encryptedSecrets: _encryptedSecrets,
-                secretSignatures: _secretSignatures,
-                secretHeaderKeys: secretHeaderKeys,
-                secretHeaderValues: secretHeaderValues
-            }),
-            RitualHttpLib.Polling({pollIntervalBlocks: pollIntervalBlocks, maxPollBlock: maxPollBlock}),
-            RitualHttpLib.Delivery({
-                target: address(this),
-                callback: this.onBufferSyncResult.selector,
-                gasLimit: deliveryGasLimit
-            })
+        MultiLegSubmitLib.dispatch(
+            _submitCtx(), "/buffers", abi.encode(strategyId), this.onBufferSyncResult.selector
         );
         emit MultiLegBufferSyncSubmitted(jobId);
     }
 
     function _submitUnwind(uint256 targetAssetsUsd) internal {
-        bytes32 jobId = keccak256(abi.encodePacked(currentCycleId, "ml-unwind", block.number));
-        pendingUnwindJobId = jobId;
-        RitualHttpLib.submit(
-            RitualHttpLib.HttpRequest({
-                url: string(abi.encodePacked(adapterUrl, "/unwind")),
-                payload: abi.encode(currentCycleId, targetAssetsUsd),
-                executor: executor,
-                encryptedSecrets: _encryptedSecrets,
-                secretSignatures: _secretSignatures,
-                secretHeaderKeys: secretHeaderKeys,
-                secretHeaderValues: secretHeaderValues
-            }),
-            RitualHttpLib.Polling({pollIntervalBlocks: pollIntervalBlocks, maxPollBlock: maxPollBlock}),
-            RitualHttpLib.Delivery({
-                target: address(this),
-                callback: this.onUnwindResult.selector,
-                gasLimit: deliveryGasLimit
-            })
+        pendingUnwindJobId = keccak256(abi.encodePacked(currentCycleId, "ml-unwind", block.number));
+        MultiLegSubmitLib.dispatch(
+            _submitCtx(),
+            "/unwind",
+            abi.encode(currentCycleId, targetAssetsUsd),
+            this.onUnwindResult.selector
         );
     }
 
     function _submitValuationSync() internal {
-        bytes32 jobId = keccak256(abi.encodePacked(strategyId, "ml-val", block.number));
-        pendingValuationJobId = jobId;
-        RitualHttpLib.submit(
-            RitualHttpLib.HttpRequest({
-                url: string(abi.encodePacked(adapterUrl, "/valuation")),
-                payload: abi.encode(strategyId),
-                executor: executor,
-                encryptedSecrets: _encryptedSecrets,
-                secretSignatures: _secretSignatures,
-                secretHeaderKeys: secretHeaderKeys,
-                secretHeaderValues: secretHeaderValues
-            }),
-            RitualHttpLib.Polling({pollIntervalBlocks: pollIntervalBlocks, maxPollBlock: maxPollBlock}),
-            RitualHttpLib.Delivery({
-                target: address(this),
-                callback: this.onValuationSync.selector,
-                gasLimit: deliveryGasLimit
-            })
+        pendingValuationJobId = keccak256(abi.encodePacked(strategyId, "ml-val", block.number));
+        MultiLegSubmitLib.dispatch(
+            _submitCtx(), "/valuation", abi.encode(strategyId), this.onValuationSync.selector
         );
     }
 
-    function _decodeReceipt(bytes calldata result) internal pure returns (NormalizedExecutionReceipt memory r) {
+    function _decodeReceipt(bytes calldata result) internal view returns (NormalizedExecutionReceipt memory r) {
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
         if (statusCode < 200 || statusCode >= 300 || bytes(errorMessage).length > 0) {
             r.status = ExecStatus.Failed;

@@ -20,6 +20,20 @@ import type {
   LegBufferSnapshot,
 } from "./types.js";
 import { ExecStatus } from "./types.js";
+import {
+  settlePmInbound,
+  settleHlInbound,
+  unwindPmOutbound,
+  unwindHlOutbound,
+} from "./bridges/index.js";
+
+/// Matches CrossVenueCommandLib.CommandType in Solidity.
+enum CommandType {
+  TOPUP_PM_BUFFER = 0,
+  TOPUP_HL_BUFFER = 1,
+  REFILL_RESERVE = 2,
+  PAUSE = 3,
+}
 
 /// Venue ID constants (keccak256 of canonical names, must match Solidity).
 const V_HL_PERP = HL_PERP;
@@ -46,10 +60,12 @@ export interface AdapterServerOptions {
   baseAsset: Address;
   /** Vault address for reserve reads. */
   vault: Address;
+  /** BaseStrategyModule address — used as `mintRecipient` for inbound-unwind CCTP bursts. */
+  module: Address;
 }
 
 export function buildServer(opts: AdapterServerOptions) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: true });
 
   const venues: Map<Hex, VenueAdapter> =
     opts.venues ??
@@ -68,6 +84,10 @@ export function buildServer(opts: AdapterServerOptions) {
       ],
     ]);
 
+  // TEE executors send mismatched Content-Length headers — strip them to avoid Fastify 400s.
+  app.addHook("onRequest", (req, _reply, done) => { delete req.headers["content-length"]; done(); });
+  // Catch-all body parser — accept any content-type as raw buffer.
+  app.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
   // Raw-body parser — Ritual's HTTP precompile sends ABI-encoded bytes.
   app.addContentTypeParser(
     "application/json",
@@ -79,6 +99,17 @@ export function buildServer(opts: AdapterServerOptions) {
     { parseAs: "buffer" },
     (_req, body, done) => done(null, body)
   );
+
+  // Result cache for the long-running HTTP pattern: POST returns a task_id; TEE then polls
+  // `<url>/status/<task_id>` which looks up the cached result.
+  const resultCache = new Map<string, { result: string; ts: number }>();
+  function cacheResult(result: string): string {
+    const taskId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    resultCache.set(taskId, { result, ts: Date.now() });
+    const cutoff = Date.now() - 5 * 60_000;
+    for (const [k, v] of resultCache) if (v.ts < cutoff) resultCache.delete(k);
+    return taskId;
+  }
 
   function credentialsFromHeaders(headers: Record<string, string | string[] | undefined>): VenueCredentials {
     const h = (k: string) => {
@@ -114,8 +145,8 @@ export function buildServer(opts: AdapterServerOptions) {
           ? failReceipt(intent)
           : await adapter.execute(intent, creds);
       return reply
-        .type("application/octet-stream")
-        .send(Buffer.from(encodeExecutionReceipt(result).slice(2), "hex"));
+        .type("application/json")
+        .send((() => { const __r = encodeExecutionReceipt(result); const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
       return reply.status(400).send({ error: String(err) });
     }
@@ -136,8 +167,8 @@ export function buildServer(opts: AdapterServerOptions) {
         snaps.push(await a.getBuffer(creds));
       }
       return reply
-        .type("application/octet-stream")
-        .send(Buffer.from(encodeBufferSnapshots(snaps).slice(2), "hex"));
+        .type("application/json")
+        .send((() => { const __r = encodeBufferSnapshots(snaps); const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
       return reply.status(400).send({ error: String(err) });
     }
@@ -162,11 +193,43 @@ export function buildServer(opts: AdapterServerOptions) {
         opts.gatewayName,
         opts.gatewayVersion
       );
+
+      // After a successful top-up command, drive the inbound CCTP settlement:
+      //   Base burn (just happened) → Circle attestation → venue-chain receive
+      //   → (HL only) CoreDepositWallet.deposit to credit HyperCore
+      //   → (PM only) ensure CTF Exchange allowance
+      // TOPUP_PM_BUFFER and TOPUP_HL_BUFFER trigger this. REFILL_RESERVE / PAUSE do not
+      // (REFILL mints USDC back to the module on Base, no venue-side action; PAUSE is a noop).
+      if (success) {
+        const cmdType = Number((env as any).commandType) as CommandType;
+        const amount = BigInt((env as any).amount);
+        try {
+          if (cmdType === CommandType.TOPUP_PM_BUFFER && creds.pmPrivateKey != null && amount > 0n) {
+            await settlePmInbound(creds.pmPrivateKey, {
+              baseBurnTxHash: txHash,
+              amount,
+              minAllowance: amount,
+            });
+          } else if (cmdType === CommandType.TOPUP_HL_BUFFER && creds.hlPrivateKey != null && amount > 0n) {
+            await settleHlInbound(creds.hlPrivateKey, {
+              baseBurnTxHash: txHash,
+              amount,
+            });
+          }
+        } catch (settleErr) {
+          // We still return the Base tx hash as success — the burn landed on-chain. Inbound
+          // settlement failure is logged for operator intervention (attestation timeout etc).
+          // The controller's fundingState will stay TOPUP_PENDING until a subsequent
+          // ingestFundingReceipt is posted.
+          console.error(`[adapter] CCTP settlement failed for cmd=${cmdType}: ${settleErr}`);
+        }
+      }
+
       // Body: abi.encode(bytes32 baseTxHash, bool success, string errorMsg)
       const body = encodeBaseSubmitResult(txHash, success);
       return reply
-        .type("application/octet-stream")
-        .send(Buffer.from(body.slice(2), "hex"));
+        .type("application/json")
+        .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
       return reply.status(500).send({ error: String(err) });
     }
@@ -219,8 +282,8 @@ export function buildServer(opts: AdapterServerOptions) {
         baseSuccess,
       });
       return reply
-        .type("application/octet-stream")
-        .send(Buffer.from(body.slice(2), "hex"));
+        .type("application/json")
+        .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
       return reply.status(500).send({ error: String(err) });
     }
@@ -233,22 +296,63 @@ export function buildServer(opts: AdapterServerOptions) {
       // Body: abi.encode(bytes32 cycleId, uint256 targetAssetsUsd) — we only use strategyId-style addressing.
       const strategyId = rawBodyToHex(req).slice(0, 66) as Hex;
 
+      // Phase 1: close positions on each venue and withdraw to the venue-chain EOA's USDC balance.
+      // `closeAllAndWithdraw` is responsible for: PM → sell all + withdraw from CTF Exchange;
+      // HL → close all perps/spot + `withdraw3` to HyperEVM USDC balance.
       let realized = 0n;
-      for (const adapter of venues.values()) {
-        realized += await adapter.closeAllAndWithdraw(creds, strategyId);
+      const hlRealized: bigint = (venues.has(V_HL_PERP) || venues.has(V_HL_SPOT)) && creds.hlPrivateKey != null
+        ? await (venues.get(V_HL_PERP) ?? venues.get(V_HL_SPOT)!).closeAllAndWithdraw(creds, strategyId)
+        : 0n;
+      const pmRealized: bigint = venues.has(V_POLYMARKET) && creds.pmPrivateKey != null
+        ? await venues.get(V_POLYMARKET)!.closeAllAndWithdraw(creds, strategyId)
+        : 0n;
+      realized = hlRealized + pmRealized;
+
+      // Phase 2: CCTP-burn the venue-chain USDC back to the Base module, wait for Circle
+      // attestation, post receiveMessage on Base. Both legs run in parallel; we block until
+      // both mints settle before returning so MultiLegController.onUnwindResult →
+      // REFILL_RESERVE has an accurate realized figure.
+      const unwindJobs: Promise<void>[] = [];
+      if (hlRealized > 0n && creds.hlPrivateKey != null) {
+        unwindJobs.push(
+          unwindHlOutbound(creds.hlPrivateKey, opts.module, hlRealized)
+            .then(() => {})
+            .catch((err) => console.error(`[adapter] HL unwind CCTP failed: ${err}`))
+        );
       }
-      // NOTE: adapter's off-chain code is also responsible for OFT-sending the realized USDC
-      // back to Base (landing at the module). That happens AFTER venue withdrawal; this endpoint
-      // should block until it's on-Base before returning, to satisfy the invariant in
-      // MultiLegController.onUnwindResult → REFILL_RESERVE emission.
+      if (pmRealized > 0n && creds.pmPrivateKey != null) {
+        unwindJobs.push(
+          unwindPmOutbound(creds.pmPrivateKey, opts.module, pmRealized)
+            .then(() => {})
+            .catch((err) => console.error(`[adapter] PM unwind CCTP failed: ${err}`))
+        );
+      }
+      if (unwindJobs.length > 0) {
+        await Promise.all(unwindJobs);
+      }
 
       const body = encodeUnwindResult(realized);
       return reply
-        .type("application/octet-stream")
-        .send(Buffer.from(body.slice(2), "hex"));
+        .type("application/json")
+        .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
       return reply.status(500).send({ error: String(err) });
     }
+  });
+
+  // statusCatchAll — long-running HTTP precompile polls <url>/status/<taskId>; we always
+  // return status=completed since our endpoints reply immediately in wrapAsTask form.
+  app.all("/*", async (req, reply) => {
+    // TEE polls <endpoint>/status/<task_id>; return the cached result for that task_id.
+    const statusMatch = req.url.match(/\/status\/([a-zA-Z0-9]+)/);
+    if (statusMatch) {
+      const cached = resultCache.get(statusMatch[1]);
+      return reply.type("application/json").send({
+        status: "completed",
+        result: cached?.result ?? "0x",
+      });
+    }
+    return reply.status(404).send({ error: "not found" });
   });
 
   // ─── Health ─────────────────────────────────────────────────────────────

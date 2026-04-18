@@ -5,13 +5,6 @@ optimizer_runs = 100000
 bytecode_hash = "none"
 evm_version = "cancun"
 dynamic_test_linking = true
-remappings = [
-    "@layerzerolabs/oft-evm/=lib/devtools/packages/oft-evm/",
-    "@layerzerolabs/oapp-evm/=lib/devtools/packages/oapp-evm/",
-    "@layerzerolabs/hyperliquid-composer/=lib/devtools/packages/hyperliquid-composer/",
-    "@layerzerolabs/lz-evm-protocol-v2/=lib/LayerZero-v2/packages/layerzero-v2/evm/protocol/",
-    "@layerzerolabs/lz-evm-messagelib-v2/=lib/LayerZero-v2/packages/layerzero-v2/evm/messagelib/",
-]
 
 [profile.default.fmt]
 wrap_comments = true
@@ -23,5 +16,6 @@ via_ir = false
 runs = 2048
 
 [rpc_endpoints]
-ritual = "https://rpc.riteco.xyz"
+ritual = "https://rpc.ritualfoundation.org"
 base_sepolia = "https://sepolia.base.org"
+base_mainnet = "https://mainnet.base.org"

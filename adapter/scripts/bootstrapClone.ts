@@ -10,7 +10,7 @@
 /// After this runs, the TEE can decrypt per-request and substitute into headers.
 ///
 /// Env:
-///   RITUAL_RPC_URL      — https://rpc.riteco.xyz (or mainnet)
+///   RITUAL_RPC_URL      — https://rpc.ritualfoundation.org
 ///   PRIVATE_KEY         — owner EOA of the clone (also the secrets owner)
 ///   CLONE               — clone address (MultiLeg or PtLoop)
 ///   SECRETS_JSON        — JSON blob with venue keys, e.g. {"HL_PK":"0x...","PM_PK":"0x...","BASE_PK":"0x..."}
@@ -158,11 +158,35 @@ async function main() {
     functionName: "getServicesByCapability",
     args: [CAPABILITY_HTTP, true],
   })) as readonly {
-    node: { teeAddress: Address; publicKey: Hex };
+    node: { teeAddress: Address; publicKey: Hex; endpoint: string };
     isValid: boolean;
   }[];
   if (services.length === 0) throw new Error("no active executors in registry");
-  const selected = services[0];
+  // Select: prefer env-override, else load-balance by pinging each endpoint and picking fastest.
+  const override = process.env.EXECUTOR_OVERRIDE as Address | undefined;
+  let selected: (typeof services)[number] | undefined;
+  if (override) {
+    selected = services.find((s) => s.node.teeAddress.toLowerCase() === override.toLowerCase());
+    if (!selected) throw new Error(`EXECUTOR_OVERRIDE ${override} not in registry`);
+    console.log(`       override   → ${selected.node.teeAddress} @ ${selected.node.endpoint}`);
+  } else {
+    console.log(`       pinging ${services.length} executors to find fastest…`);
+    const probes = await Promise.all(services.map(async (s) => {
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 3000);
+        await fetch(s.node.endpoint, { signal: ctrl.signal }).catch(() => null);
+        clearTimeout(t);
+        return { s, ms: Date.now() - start };
+      } catch { return { s, ms: 9999 }; }
+    }));
+    probes.sort((a, b) => a.ms - b.ms);
+    const top5 = probes.slice(0, 5);
+    console.log(`       top 5 by latency:`);
+    for (const p of top5) console.log(`         ${p.s.node.teeAddress} ${p.s.node.endpoint}  ${p.ms}ms`);
+    selected = top5[0].s;
+  }
   const executor = selected.node.teeAddress;
   const executorPublicKey = selected.node.publicKey;
   console.log(`       executor   = ${executor}`);
