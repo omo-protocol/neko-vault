@@ -433,7 +433,7 @@ contract MultiLegControllerTest is Test {
         string[] memory emptyArr = new string[](0);
         bytes memory envelope = abi.encode(uint16(200), emptyArr, emptyArr, body, "");
         vm.prank(RitualPrecompiles.ASYNC_DELIVERY);
-        controller.onValuationSync(envelope);
+        controller.onValuationSync(bytes32(0), envelope);
 
         assertEq(controller.lastNavUsd(), 10_000e6);
         assertEq(controller.lastBaseReserveUsd(), 500e6);

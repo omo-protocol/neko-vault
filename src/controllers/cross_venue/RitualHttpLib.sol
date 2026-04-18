@@ -81,12 +81,14 @@ library RitualHttpLib {
             pollHeaders,
             bytes(""),
             ".result",
-            // DKMS + PII (3) — dkmsKeyIndex=0 = not using dKMS; dkmsKeyFormat=0 = disabled;
-            // piiEnabled=true enables SECRET_NAME string substitution in headers (the executor
-            // decrypts `encryptedSecrets` and replaces matching names in `headersValues`).
+            // DKMS + PII (3) — dkmsKeyIndex=0 = not using dKMS; dkmsKeyFormat=0 = disabled.
+            // piiEnabled=false: TEE skips SECRET_NAME substitution. Setting this true caused
+            // silent failures in long-running HTTP when encryptedSecrets didn't decrypt cleanly.
+            // Since adapter uses plaintext secrets received via its own TLS, substitution isn't
+            // needed here — revisit if we ever need on-wire secret injection.
             uint256(0),
             uint8(0),
-            true
+            false
         );
     }
 

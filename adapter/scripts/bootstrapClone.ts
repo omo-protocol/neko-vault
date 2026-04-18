@@ -200,8 +200,13 @@ async function main() {
   console.log(`       hash       = ${secretsHash}`);
 
   console.log("[3/6] signing secretsHash with owner EOA…");
-  // Executor expects a raw ECDSA sig over the hash (not EIP-191 / 712).
-  const sig = await account.sign({ hash: secretsHash });
+  // Per ritual-dapp-secrets skill: EIP-191 personal_sign over the RAW encrypted blob bytes.
+  // Executor recovers signer via `keccak256("\x19Ethereum Signed Message:\n" + len + blob)`.
+  // Prior code signed the hash directly — recovered wrong address → silent 402 rejection.
+  const sig = await walletClient.signMessage({
+    account,
+    message: { raw: blob },
+  });
 
   console.log("[4/6] clone.setExecutor + clone.setSecrets + clone.setSecretHeaders");
   const headerKeys = Object.keys(headerMap);

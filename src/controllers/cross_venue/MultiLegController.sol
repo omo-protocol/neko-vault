@@ -558,8 +558,11 @@ contract MultiLegController is ReentrancyGuard {
 
     // ─── Callbacks ───────────────────────────────────────────────────────────
 
-    function onBufferSyncResult(bytes32 jobId, bytes calldata result) external onlyAsyncDelivery nonReentrant {
-        if (pendingBufferSyncJobId != jobId) revert InvalidJobId();
+    function onBufferSyncResult(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
+        // NOTE: AsyncDelivery passes the Phase 1 origin tx hash as jobId — NOT the controller-
+        // computed job id we stored in `pendingBufferSyncJobId`. `onlyAsyncDelivery` is the
+        // authoritative auth check; don't gate on jobId equality.
+        if (pendingBufferSyncJobId == bytes32(0)) return;
         pendingBufferSyncJobId = bytes32(0);
 
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
@@ -580,9 +583,9 @@ contract MultiLegController is ReentrancyGuard {
         _tryEmitTopUp();
     }
 
-    function onLegResult(bytes32 jobId, bytes calldata result) external onlyAsyncDelivery nonReentrant {
+    function onLegResult(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
         if (tradingState != MultiLegTradingState.LEG_PENDING) revert InvalidState();
-        if (pendingLegJobId != jobId) revert InvalidJobId();
+        if (pendingLegJobId == bytes32(0)) return;
         pendingLegJobId = bytes32(0);
 
         NormalizedExecutionReceipt memory r = _decodeReceipt(result);
@@ -626,7 +629,7 @@ contract MultiLegController is ReentrancyGuard {
     ///         with the dKMS-held valuer signer key and submit on Base via the dKMS-held Base EOA.
     ///         This callback stores the reported state so subsequent `tick()` calls can auto-trigger
     ///         unwind when reserve is low.
-    function onValuationSync(bytes calldata result) external onlyAsyncDelivery nonReentrant {
+    function onValuationSync(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
         pendingValuationJobId = bytes32(0);
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
         if (statusCode < 200 || statusCode >= 300 || bytes(errorMessage).length > 0) return;
@@ -774,8 +777,8 @@ contract MultiLegController is ReentrancyGuard {
         });
     }
 
-    function onBaseCommandSubmitted(bytes32 jobId, bytes calldata result) external onlyAsyncDelivery nonReentrant {
-        if (pendingBaseCommandJobId != jobId) revert InvalidJobId();
+    function onBaseCommandSubmitted(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
+        if (pendingBaseCommandJobId == bytes32(0)) return;
         pendingBaseCommandJobId = bytes32(0);
 
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
@@ -789,9 +792,9 @@ contract MultiLegController is ReentrancyGuard {
 
     /// @notice Callback from adapter after it closes all open legs and reports realized USDC.
     ///         Body: abi.encode(uint256 realizedAssetsUsd).
-    function onUnwindResult(bytes32 jobId, bytes calldata result) external onlyAsyncDelivery nonReentrant {
+    function onUnwindResult(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
         if (tradingState != MultiLegTradingState.UNWIND_PENDING) revert InvalidState();
-        if (pendingUnwindJobId != jobId) revert InvalidJobId();
+        if (pendingUnwindJobId == bytes32(0)) return;
         pendingUnwindJobId = bytes32(0);
 
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
