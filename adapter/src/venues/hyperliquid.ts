@@ -3,12 +3,12 @@ import {
   toHex,
   toBytes,
   pad,
-  concat,
   type Hex,
-  type Address,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { encode as msgpackEncode } from "@msgpack/msgpack";
+import { Hyperliquid, type ClearinghouseState, type SpotClearinghouseState, type OrderResponse } from "hyperliquid";
+import { sendHyperCoreToEvm } from "../bridges/hypercore-withdraw.js";
+import { DOMAIN } from "../bridges/cctp.js";
 import type {
   ExecutionIntent,
   NormalizedExecutionReceipt,
@@ -16,7 +16,7 @@ import type {
   LegBufferSnapshot,
 } from "../types.js";
 import { ExecStatus, Side, MarginMode } from "../types.js";
-import type { VenueAdapter } from "./types.js";
+import type { VenueAdapter, VenueExecContext } from "./types.js";
 
 /// HyperLiquid REST API base (mainnet). Set `HL_API_URL` env override if using testnet.
 const HL_API_URL = process.env.HL_API_URL ?? "https://api.hyperliquid.xyz";
@@ -67,28 +67,18 @@ export async function loadHlMarketsFromApi(apiUrl = HL_API_URL): Promise<HlMarke
   return reg;
 }
 
-interface HlOrderAction {
-  type: "order";
-  orders: Array<{
-    a: number;
-    b: boolean;
-    p: string;
-    s: string;
-    r: boolean;
-    t: { limit: { tif: "Ioc" | "Gtc" } };
-  }>;
-  grouping: "na";
-}
-
-interface HlSignedExchangeReq {
-  action: unknown;
-  nonce: number;
-  signature: { r: Hex; s: Hex; v: number };
-  vaultAddress?: Address;
-}
-
 /// HyperLiquid adapter covering both perp (`V_HL_PERP`) and spot (`V_HL_SPOT`) venues.
+/// Signing is delegated to the official `hyperliquid` SDK (handles EIP-712 phantom-agent +
+/// msgpack action hashing). We only expose the high-level execute / close / info surface.
 /// `execute` submits IOC market orders, polls fills, and returns a normalized receipt.
+///
+/// ISOLATION: assumes the supplied `x-hl-key` is a DEDICATED fresh EOA pre-funded with a small
+/// amount of HYPE for HyperEVM gas. All orders trade this EOA directly — no subaccount logic.
+/// HL's subaccount feature requires >$100k prior volume, which blocks low-volume strategies.
+/// A fresh EOA gives the same isolation guarantee (operator's main account untouched) without
+/// the volume gate. Operator creates the EOA off-adapter (see `scripts/freshHlWallet.ts` or
+/// any key generator), funds it with ~0.05 HYPE for gas, updates CCTP HL mintRecipient and
+/// clone's `x-hl-key` secret.
 export class HyperliquidAdapter implements VenueAdapter {
   constructor(
     public readonly venueId: typeof V_HL_PERP | typeof V_HL_SPOT,
@@ -99,63 +89,160 @@ export class HyperliquidAdapter implements VenueAdapter {
     return this.venueId === V_HL_PERP;
   }
 
-  async execute(intent: ExecutionIntent, creds: VenueCredentials): Promise<NormalizedExecutionReceipt> {
-    if (!creds.hlPrivateKey) return failReceipt(intent, "no HL key");
+  async execute(intent: ExecutionIntent, creds: VenueCredentials, ctx?: VenueExecContext): Promise<NormalizedExecutionReceipt> {
+    if (!creds.hlPrivateKey) { console.log("[hl] no key"); return failReceipt(intent, "no HL key"); }
     const market = this.markets[intent.marketRef];
-    if (!market) return failReceipt(intent, "unknown marketRef");
+    if (!market) { console.log(`[hl] unknown marketRef ${intent.marketRef.slice(0,12)}…`); return failReceipt(intent, "unknown marketRef"); }
 
     const account = privateKeyToAccount(creds.hlPrivateKey);
-
-    // Set margin mode for perp (isolated / cross) before placing the order. For spot this is a no-op.
-    if (this.isPerp()) {
-      try {
-        await this.setMarginMode(account.address, creds.hlPrivateKey, market.assetIndex, intent.marginMode);
-      } catch {
-        // Margin-mode already set, or venue rejected — proceed; the order may still fill under the current mode.
-      }
+    const coinName = this.isPerp() ? `${market.tickerSymbol}-PERP` : `${market.tickerSymbol}-SPOT`;
+    console.log(`[hl] connecting SDK for ${coinName}…`);
+    const sdk = new Hyperliquid({ privateKey: creds.hlPrivateKey, enableWs: false, testnet: false });
+    try {
+      await sdk.connect();
+    } catch (err) {
+      console.log(`[hl] sdk.connect failed: ${String(err).slice(0,150)}`);
+      return failReceipt(intent, "sdk connect");
     }
 
-    // Get mid-price to estimate size from USD notional.
-    const mid = await this.getMidPrice(market.tickerSymbol);
-    if (mid <= 0) return failReceipt(intent, "no mid price");
-    const sizeBase = Number(intent.targetNotionalUsd) / 1e6 / mid;
-    const sizeStr = sizeBase.toFixed(market.szDecimals);
+    try {
+      if (this.isPerp()) {
+        try {
+          await sdk.exchange.updateLeverage(coinName, intent.marginMode === MarginMode.Cross ? "cross" : "isolated", 1);
+        } catch (err) {
+          console.log(`[hl] updateLeverage skipped: ${String(err).slice(0,80)}`);
+        }
+      }
 
-    const action: HlOrderAction = {
-      type: "order",
-      orders: [
-        {
-          a: market.assetIndex,
-          b: intent.side === Side.Buy,
-          p: "0", // market order: price = 0 with IOC
-          s: sizeStr,
-          r: false,
-          t: { limit: { tif: "Ioc" } },
-        },
-      ],
-      grouping: "na",
-    };
+      const mid = await this.getMidPrice(market.tickerSymbol);
+      if (mid <= 0) { console.log(`[hl] no mid for ${market.tickerSymbol}`); return failReceipt(intent, "no mid price"); }
 
-    const nonce = Date.now();
-    const resp = await this.signAndPost(action, nonce, creds.hlPrivateKey);
-    if (resp?.status !== "ok") return failReceipt(intent, `hl order rejected: ${JSON.stringify(resp).slice(0, 150)}`);
+      // DELTA REBALANCE: read the (fresh, dedicated) EOA's position, only place the NET delta.
+      // Duplicate intents become no-ops because position already matches target.
+      const isBuy = intent.side === Side.Buy;
+      const targetUsd = Number(intent.targetNotionalUsd) / 1e6;
+      const targetSigned = isBuy ? targetUsd : -targetUsd;
 
-    // Poll user fills for the nonce-tagged fills (up to ~30s).
-    const filled = await this.pollFilled(account.address, market.assetIndex, nonce, 30);
-    if (!filled) return failReceipt(intent, "no fill within timeout");
+      let currentSigned = 0;
+      if (this.isPerp()) {
+        const state = (await this.hlInfo({ type: "clearinghouseState", user: account.address }).catch(() => null)) as ClearinghouseState | null;
+        const ap = (state?.assetPositions ?? []).find((x) => x?.position?.coin === market.tickerSymbol);
+        if (ap) {
+          const szi = parseFloat(ap.position.szi ?? "0");
+          currentSigned = szi * mid;
+        }
+      } else {
+        const state = (await this.hlInfo({ type: "spotClearinghouseState", user: account.address }).catch(() => null)) as SpotClearinghouseState | null;
+        const b = (state?.balances ?? []).find((x) => x.coin === market.tickerSymbol);
+        if (b) currentSigned = parseFloat(b.total ?? "0") * mid;
+      }
 
-    return {
-      cycleId: intent.cycleId,
-      venue: intent.venue,
-      status: filled.filledUsd >= intent.targetNotionalUsd ? ExecStatus.Filled : ExecStatus.PartialFill,
-      filledNotionalUsd: filled.filledUsd,
-      filledBaseQty: filled.filledBase,
-      avgPriceE18: filled.avgPriceE18,
-      externalOrderId: pad(toHex(filled.oid), { size: 32 }) as Hex,
-      externalAccountRef: pad(account.address, { size: 32 }) as Hex,
-      terminal: true,
-      rawPayloadHash: keccak256(toBytes(JSON.stringify(resp))),
-    };
+      const deltaUsd = targetSigned - currentSigned;
+      const tolUsd = 1.0; // $1 dead-band — don't chase dust
+      console.log(`[hl] rebalance ${coinName}: target=$${targetSigned.toFixed(2)} current=$${currentSigned.toFixed(2)} delta=$${deltaUsd.toFixed(2)}`);
+
+      if (Math.abs(deltaUsd) <= tolUsd) {
+        // Already at target — return existing position as a synthetic Filled receipt.
+        console.log(`[hl] within tolerance, no order. Reporting existing position as filled.`);
+        const filledUsd = Math.abs(currentSigned);
+        const filledBase = Math.abs(currentSigned) / mid;
+        return {
+          cycleId: intent.cycleId,
+          venue: intent.venue,
+          status: ExecStatus.Filled,
+          filledNotionalUsd: BigInt(Math.floor(filledUsd * 1e6)),
+          filledBaseQty: BigInt(Math.floor(filledBase * 1e18)),
+          avgPriceE18: BigInt(Math.floor(mid * 1e18)),
+          externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
+          externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+          terminal: true,
+          rawPayloadHash: keccak256(toBytes(`rebalance-noop:${coinName}:${currentSigned}`)),
+        };
+      }
+
+      // Net delta → real order.
+      const orderIsBuy = deltaUsd > 0;
+      const deltaBase = Math.abs(deltaUsd) / mid;
+      const sz = Number(deltaBase.toFixed(market.szDecimals));
+      const limitPx = Number((orderIsBuy ? mid * 1.05 : mid * 0.95).toPrecision(5));
+      console.log(`[hl] placing ${coinName} ${orderIsBuy?'BUY':'SELL'} sz=${sz} px=${limitPx} (delta $${deltaUsd.toFixed(2)})`);
+
+      let resp: OrderResponse | null = null;
+      try {
+        resp = await sdk.exchange.placeOrder({
+          coin: coinName,
+          is_buy: orderIsBuy,
+          sz,
+          limit_px: limitPx,
+          order_type: { limit: { tif: "Ioc" } },
+          reduce_only: false,
+        });
+        console.log(`[hl] resp: ${JSON.stringify(resp).slice(0,300)}`);
+      } catch (err) {
+        console.log(`[hl] placeOrder threw: ${String(err).slice(0,300)}`);
+        return failReceipt(intent, "placeOrder threw");
+      }
+
+      if (resp?.status !== "ok") {
+        return failReceipt(intent, `hl order rejected: ${JSON.stringify(resp).slice(0, 200)}`);
+      }
+      // SDK's statuses only type `resting`/`filled`. HL runtime also returns `error: string` on
+      // rejection — widen at the use-site.
+      const statusEntry = resp.response.data.statuses[0] as
+        | { resting: { oid: number } }
+        | { filled: { oid: number; totalSz: string; avgPx: string } }
+        | { error: string };
+      if ("error" in statusEntry) {
+        return failReceipt(intent, `hl order error: ${statusEntry.error}`);
+      }
+
+      const filled = "filled" in statusEntry ? statusEntry.filled : undefined;
+      if (filled) {
+        const avgPx = parseFloat(filled.avgPx);
+        const totalSz = parseFloat(filled.totalSz);
+        // Report the RESULTING position (target) as filledNotionalUsd, not the delta order size.
+        const resultingSignedUsd = targetSigned;
+        const resultingNotionalUsd = Math.abs(resultingSignedUsd);
+        const resultingBaseQty = resultingNotionalUsd / mid;
+
+        // CLOSE-SIDE CCTP-BACK: when the rebalance SHRANK our position (|currentSigned| >
+        // |targetSigned|), USDC was freed on HyperCore. Bridge it to the Base module so the
+        // controller's subsequent REFILL_RESERVE command finds USDC to push into the sleeve.
+        // Fire-and-forget — HTTP handler returns immediately; `sendToEvmWithData` is a single
+        // HL API action (no attestation wait) and Circle's automatic forwarder credits Base.
+        const shrank = Math.abs(currentSigned) - Math.abs(resultingSignedUsd);
+        if (shrank > 1.0 && ctx?.moduleAddress) {
+          const freedUsd = shrank.toFixed(2);
+          console.log(`[hl] position shrank $${freedUsd} — firing CCTP-back to module ${ctx.moduleAddress}`);
+          sendHyperCoreToEvm(creds.hlPrivateKey, {
+            amount: freedUsd,
+            destinationRecipient: ctx.moduleAddress,
+            destinationChainId: DOMAIN.BASE,
+            sourceDex: "",
+          }).catch((err) => {
+            console.log(`[hl] CCTP-back failed (non-fatal): ${String(err).slice(0,200)}`);
+          });
+        }
+
+        return {
+          cycleId: intent.cycleId,
+          venue: intent.venue,
+          status: resultingNotionalUsd * 1e6 >= Number(intent.targetNotionalUsd) * 0.99 ? ExecStatus.Filled : ExecStatus.PartialFill,
+          filledNotionalUsd: BigInt(Math.floor(resultingNotionalUsd * 1e6)),
+          filledBaseQty: BigInt(Math.floor(resultingBaseQty * 1e18)),
+          avgPriceE18: BigInt(Math.floor(avgPx * 1e18)),
+          externalOrderId: pad(toHex(filled.oid ?? 0), { size: 32 }) as Hex,
+          externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+          terminal: true,
+          rawPayloadHash: keccak256(toBytes(JSON.stringify({ resp, resultingNotionalUsd, deltaSz: totalSz }))),
+        };
+      }
+
+      // Not filled (unusual for IoC — likely rejected or fully cancelled).
+      return failReceipt(intent, "hl order placed but no fill");
+    } finally {
+      sdk.disconnect();
+    }
   }
 
   async getBuffer(creds: VenueCredentials): Promise<LegBufferSnapshot> {
@@ -167,7 +254,6 @@ export class HyperliquidAdapter implements VenueAdapter {
       return { bufferUsd: BigInt(Math.floor(withdrawable * 1e6)), timestamp: nowSec() };
     } else {
       const state = await this.hlInfo({ type: "spotClearinghouseState", user: account.address });
-      // USDC balance on spot
       const bal = Array.isArray(state?.balances) ? state.balances : [];
       const usdc = bal.find((b: { coin: string }) => b.coin === "USDC");
       const amount = parseFloat(usdc?.total ?? "0");
@@ -206,81 +292,53 @@ export class HyperliquidAdapter implements VenueAdapter {
   async closeAllAndWithdraw(creds: VenueCredentials, _strategyId: Hex): Promise<bigint> {
     if (!creds.hlPrivateKey) return 0n;
     const account = privateKeyToAccount(creds.hlPrivateKey);
+    const sdk = new Hyperliquid({ privateKey: creds.hlPrivateKey, enableWs: false, testnet: false });
+    await sdk.connect();
 
-    if (this.isPerp()) {
-      const state = await this.hlInfo({ type: "clearinghouseState", user: account.address });
-      const positions = Array.isArray(state?.assetPositions) ? state.assetPositions : [];
-      for (const p of positions) {
-        const szi = parseFloat(p?.position?.szi ?? "0");
-        if (szi === 0) continue;
-        const entry = Object.values(this.markets).find((m) => m.tickerSymbol === p.position.coin);
-        if (!entry) continue;
-        const action: HlOrderAction = {
-          type: "order",
-          orders: [
-            {
-              a: entry.assetIndex,
-              b: szi < 0, // opposite side to close
-              p: "0",
-              s: Math.abs(szi).toFixed(entry.szDecimals),
-              r: true,
-              t: { limit: { tif: "Ioc" } },
-            },
-          ],
-          grouping: "na",
-        };
-        await this.signAndPost(action, Date.now(), creds.hlPrivateKey);
+    try {
+      if (this.isPerp()) {
+        // SDK's one-shot close lives on `sdk.custom` (not `sdk.exchange`): 5% slippage tolerance.
+        await sdk.custom.closeAllPositions(0.05).catch(() => {});
+      } else {
+        // Spot: sell all non-USDC balances via individual market sells.
+        const state = await this.hlInfo({ type: "spotClearinghouseState", user: account.address });
+        const bal = Array.isArray(state?.balances) ? state.balances : [];
+        for (const b of bal) {
+          if (b.coin === "USDC") continue;
+          const size = parseFloat(b.total);
+          if (size <= 0) continue;
+          const mid = await this.getMidPrice(b.coin);
+          if (!mid) continue;
+          await sdk.exchange.placeOrder({
+            coin: `${b.coin}-SPOT`,
+            is_buy: false,
+            sz: size,
+            limit_px: Number((mid * 0.95).toPrecision(5)),
+            order_type: { limit: { tif: "Ioc" } },
+            reduce_only: false,
+          }).catch(() => {});
+        }
       }
-    } else {
-      // Spot: sell all non-USDC balances.
-      const state = await this.hlInfo({ type: "spotClearinghouseState", user: account.address });
-      const bal = Array.isArray(state?.balances) ? state.balances : [];
-      for (const b of bal) {
-        if (b.coin === "USDC") continue;
-        const entry = Object.values(this.markets).find((m) => m.tickerSymbol === b.coin);
-        if (!entry) continue;
-        const size = parseFloat(b.total);
-        if (size <= 0) continue;
-        const action: HlOrderAction = {
-          type: "order",
-          orders: [
-            {
-              a: entry.assetIndex,
-              b: false, // sell
-              p: "0",
-              s: size.toFixed(entry.szDecimals),
-              r: false,
-              t: { limit: { tif: "Ioc" } },
-            },
-          ],
-          grouping: "na",
-        };
-        await this.signAndPost(action, Date.now(), creds.hlPrivateKey);
+
+      // Withdraw post-close HyperCore balance back to HyperEVM (same address).
+      // The adapter's outbound CCTP step (`unwindHlOutbound`) will then bridge HyperEVM→Base.
+      const post = await this.hlInfo(
+        this.isPerp()
+          ? { type: "clearinghouseState", user: account.address }
+          : { type: "spotClearinghouseState", user: account.address }
+      );
+      const withdrawableStr = this.isPerp()
+        ? post?.withdrawable
+        : (post?.balances ?? []).find((b: { coin: string }) => b.coin === "USDC")?.total;
+      const withdrawable = parseFloat(withdrawableStr ?? "0");
+      if (withdrawable > 0) {
+        // SDK convenience: withdraw to self on HyperEVM.
+        await (sdk.exchange as any).initiateWithdrawal?.(withdrawable).catch(() => {});
       }
+      return BigInt(Math.floor(withdrawable * 1e6));
+    } finally {
+      sdk.disconnect();
     }
-
-    // Read post-close withdrawable and issue withdraw3 → HyperEVM for the adapter to CCTP-back.
-    const post = await this.hlInfo(
-      this.isPerp()
-        ? { type: "clearinghouseState", user: account.address }
-        : { type: "spotClearinghouseState", user: account.address }
-    );
-    const withdrawableStr = this.isPerp()
-      ? post?.withdrawable
-      : (post?.balances ?? []).find((b: { coin: string }) => b.coin === "USDC")?.total;
-    const withdrawable = parseFloat(withdrawableStr ?? "0");
-    if (withdrawable > 0) {
-      // HL withdraw3 action: amount in USD, destination = HyperEVM account (the adapter's HyperEVM EOA).
-      const action = {
-        type: "withdraw3",
-        destination: account.address, // HyperEVM EOA = perp account address (same EOA)
-        amount: withdrawable.toFixed(6),
-        time: Date.now(),
-      };
-      await this.signAndPost(action, action.time, creds.hlPrivateKey);
-    }
-
-    return BigInt(Math.floor(withdrawable * 1e6));
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -301,91 +359,6 @@ export class HyperliquidAdapter implements VenueAdapter {
     return isFinite(price) ? price : 0;
   }
 
-  private async pollFilled(
-    user: Address,
-    _assetIdx: number,
-    clientOrderId: number,
-    timeoutSec: number
-  ): Promise<{ filledUsd: bigint; filledBase: bigint; avgPriceE18: bigint; oid: number } | null> {
-    const deadline = Date.now() + timeoutSec * 1000;
-    while (Date.now() < deadline) {
-      const fills = await this.hlInfo({ type: "userFills", user });
-      if (Array.isArray(fills)) {
-        const recent = fills.filter((f: { time: number; coin: string }) => f.time >= clientOrderId - 5_000);
-        if (recent.length > 0) {
-          const rel = recent.filter((f: { coin: string }) => f.coin !== undefined);
-          if (rel.length > 0) {
-            let usd = 0, base = 0, price = 0, oid = 0;
-            for (const f of rel) {
-              const fPx = parseFloat(f.px);
-              const fSz = parseFloat(f.sz);
-              usd += fPx * fSz;
-              base += fSz;
-              price = fPx;
-              oid = f.oid ?? 0;
-            }
-            return {
-              filledUsd: BigInt(Math.floor(usd * 1e6)),
-              filledBase: BigInt(Math.floor(base * 1e18)),
-              avgPriceE18: BigInt(Math.floor(price * 1e18)),
-              oid,
-            };
-          }
-        }
-      }
-      await sleep(1000);
-    }
-    return null;
-  }
-
-  private async setMarginMode(
-    _user: Address,
-    key: Hex,
-    assetIdx: number,
-    mode: MarginMode
-  ): Promise<unknown> {
-    const action = {
-      type: "updateLeverage",
-      asset: assetIdx,
-      isCross: mode === MarginMode.Cross,
-      leverage: 1, // operator can extend to per-strategy leverage
-    };
-    return this.signAndPost(action, Date.now(), key);
-  }
-
-  /// Signs and POSTs to /exchange. Uses HL's phantom-agent EIP-712 scheme.
-  private async signAndPost(action: unknown, nonce: number, key: Hex): Promise<any> {
-    const account = privateKeyToAccount(key);
-    const actionHash = hashAction(action, nonce);
-    const phantomAgent = { source: "a", connectionId: actionHash } as const;
-
-    const signature = await account.signTypedData({
-      domain: {
-        name: "Exchange",
-        version: "1",
-        chainId: 1337,
-        verifyingContract: "0x0000000000000000000000000000000000000000",
-      },
-      types: {
-        Agent: [
-          { name: "source", type: "string" },
-          { name: "connectionId", type: "bytes32" },
-        ],
-      },
-      primaryType: "Agent",
-      message: phantomAgent,
-    });
-
-    const sig = splitSig(signature);
-    const body: HlSignedExchangeReq = { action, nonce, signature: sig };
-    const res = await fetch(`${HL_API_URL}/exchange`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return null;
-    return res.json();
-  }
 }
 
 function failReceipt(intent: ExecutionIntent, _reason: string): NormalizedExecutionReceipt {
@@ -403,33 +376,10 @@ function failReceipt(intent: ExecutionIntent, _reason: string): NormalizedExecut
   };
 }
 
+// Ritual `block.timestamp` is in MILLISECONDS (non-standard EVM). Buffer + valuation
+// timestamps written by the adapter are compared against Ritual's block.timestamp, so they
+// must also be ms. The function name is kept for grep continuity — it returns MS.
 function nowSec(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000));
+  return BigInt(Date.now());
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function splitSig(sig: Hex): { r: Hex; s: Hex; v: number } {
-  const raw = sig.slice(2);
-  return {
-    r: ("0x" + raw.slice(0, 64)) as Hex,
-    s: ("0x" + raw.slice(64, 128)) as Hex,
-    v: parseInt(raw.slice(128, 130), 16),
-  };
-}
-
-/// HL's canonical action hashing:
-///   keccak256( concat( msgpack(action), nonce_be8, vaultAddress20_or_0x00 ) )
-///
-/// Matches the Python SDK (`hyperliquid-python-sdk`) byte-for-byte.
-/// Accepts an optional sub-account vault address; pass `undefined`/`null` for the default account.
-function hashAction(action: unknown, nonce: number, vaultAddress?: Address): Hex {
-  const actionBytes = msgpackEncode(action);
-  const nonceBytes = toBytes(pad(toHex(BigInt(nonce)), { size: 8 }));
-  const vaultBytes = vaultAddress
-    ? concat([toBytes("0x01"), toBytes(vaultAddress)])
-    : toBytes("0x00");
-  return keccak256(concat([actionBytes, nonceBytes, vaultBytes]));
-}

@@ -8,6 +8,10 @@ interface IBaseCctpSender {
     function bridge(bytes32 destinationRef, uint256 amount) external returns (bytes32);
 }
 
+interface IUniversalAdapterSettlement {
+    function recordSettlement(bytes32 strategyId, uint256 assetsReceived) external;
+}
+
 /// @title BaseStrategyModule
 /// @notice Narrow execution module called only by BaseExecutionGateway.
 ///         Forwards top-up amounts from a configured `bufferSource` (the sleeve, or a
@@ -47,6 +51,12 @@ contract BaseStrategyModule is IBaseStrategyModule {
     ///         If zero, falls back to `bufferSource`.
     address public refillSource;
     address public vault;
+    /// @notice Sleeve address for settlement — when module is registered as the sleeve's
+    ///         settlement queue, `refillReserve` pushes inbound USDC into sleeve via
+    ///         `recordSettlement` (proper accounting — reduces externalDeposits[strategyId]).
+    address public sleeve;
+    /// @notice Strategy id tied to this module; required for ISettlementQueueValidation.
+    bytes32 public strategyId;
     /// @notice CCTP V2 router. All top-ups bridge through this contract via Circle's
     ///         burn/mint. No legacy direct-transfer fallback.
     address public cctpSender;
@@ -93,6 +103,12 @@ contract BaseStrategyModule is IBaseStrategyModule {
         emit BufferSourceSet(src);
     }
 
+    function setSleeveAndStrategyId(address sleeve_, bytes32 strategyId_) external onlyOwner {
+        if (sleeve_ == address(0)) revert InvalidAddress();
+        sleeve = sleeve_;
+        strategyId = strategyId_;
+    }
+
     function setRefillSource(address src) external onlyOwner {
         refillSource = src;
         emit RefillSourceSet(src);
@@ -137,17 +153,21 @@ contract BaseStrategyModule is IBaseStrategyModule {
         override
         onlyGateway
     {
-        if (vault == address(0)) revert InvalidAddress();
+        if (sleeve == address(0)) revert InvalidAddress();
         if (amount == 0) revert AmountZero();
         if (consumedCycles[cycleId]) revert CycleAlreadyConsumed();
         consumedCycles[cycleId] = true;
 
-        address src = refillSource != address(0) ? refillSource : bufferSource;
-        if (src == address(0) || src == address(this)) {
-            SafeERC20Lib.safeTransfer(asset, vault, amount);
+        // Push inbound USDC (from CCTP mint) into sleeve, then let sleeve settle accounting.
+        // `recordSettlement` reduces externalDeposits[strategyId] — reflects that external
+        // venue positions returned funds, so the sleeve's "off-site" balance shrinks.
+        address src = refillSource != address(0) ? refillSource : address(this);
+        if (src == address(this)) {
+            SafeERC20Lib.safeTransfer(asset, sleeve, amount);
         } else {
-            SafeERC20Lib.safeTransferFrom(asset, src, vault, amount);
+            SafeERC20Lib.safeTransferFrom(asset, src, sleeve, amount);
         }
+        IUniversalAdapterSettlement(sleeve).recordSettlement(strategyId, amount);
         emit ReserveRefilled(cycleId, amount, destinationRef, payloadHash);
     }
 

@@ -5,6 +5,7 @@ import {VaultV2Factory} from "../VaultV2Factory.sol";
 import {IVaultV2} from "../interfaces/IVaultV2.sol";
 import {UniversalAdapterEscrow} from "../adapters/UniversalAdapterEscrow.sol";
 import {UniversalAdapterEscrowFactory} from "../adapters/UniversalAdapterEscrowFactory.sol";
+import {IUniversalAdapterEscrow} from "../adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {UniversalValuerOffchain} from "../valuers/UniversalValuerOffchain.sol";
 import {NoOpStrategyAgent} from "../base/NoOpStrategyAgent.sol";
 
@@ -73,11 +74,70 @@ contract BaseCoreFactory {
             p.strategyId, d.strategyAgent, bytes(""), p.strategyDailyLimit
         );
 
-        // Hand over vault + sleeve ownership to the final vaultOwner.
-        UniversalAdapterEscrow(payable(d.sleeve)).transferOwnership(p.vaultOwner);
+        // Wire vault → sleeve: auto-allocate user deposits into the sleeve against strategyId.
+        // Without this, deposits sit idle in the vault and top-up commands revert
+        // `TransferFromReverted` because the module tries to pull from an empty sleeve.
+        // Flags: 1 = AUTO_ALLOCATION, 2 = AUTO_WITHDRAW. Both on → full auto round-trip.
+        // Both setters are timelocked — use the factory-curator submit() trick (timelock=0 default).
+        bytes memory liquidityData = abi.encode(p.strategyId, uint256(3), new IUniversalAdapterEscrow.Call[](0));
+        v.submit(abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
+        v.setIsAllocator(address(this), true);
+        v.submit(abi.encodeCall(IVaultV2.setLiquidityAdapterAndData, (d.sleeve, liquidityData)));
+        v.setLiquidityAdapterAndData(d.sleeve, liquidityData);
+        // Sleeve returns `keccak256(liquidityData)` as the cap id (Morpho V2 pattern), so
+        // cap setters receive the same liquidityData blob.
+        v.submit(abi.encodeCall(IVaultV2.increaseAbsoluteCap, (liquidityData, type(uint128).max)));
+        v.increaseAbsoluteCap(liquidityData, type(uint128).max);
+        v.submit(abi.encodeCall(IVaultV2.increaseRelativeCap, (liquidityData, 1e18)));
+        v.increaseRelativeCap(liquidityData, 1e18);
+        v.submit(abi.encodeCall(IVaultV2.setIsAllocator, (address(this), false)));
+        v.setIsAllocator(address(this), false);
+
+        // NOTE: sleeve ownership is NOT transferred here. The deploy script calls
+        // `approveModuleAndTransferOwnership(sleeve, strategyId, asset, module, vaultOwner)`
+        // after exec deploys the module, so sleeve approves USDC → module for top-up pulls
+        // and THEN transfers ownership. One-shot, no user-visible manual step.
         v.setCurator(p.vaultOwner);
         v.setOwner(p.vaultOwner);
 
         emit BaseCoreDeployed(p.vaultOwner, p.asset, d.vault, d.sleeve, d.valuer, d.strategyAgent, p.strategyId);
+    }
+
+    /// @notice Post-exec step: approve module to pull USDC from sleeve, then transfer sleeve
+    ///         ownership to the final vaultOwner. Must be called in the same deploy tx as
+    ///         `deployCore`+`deployExec` (factory must still own sleeve).
+    function approveModuleAndTransferOwnership(
+        address sleeve,
+        bytes32 strategyId,
+        address asset,
+        address module,
+        address vaultOwner
+    ) external {
+        UniversalAdapterEscrow s = UniversalAdapterEscrow(payable(sleeve));
+        // Whitelist USDC.approve(...) so we can call it from the strategy multicall path.
+        // `updateWhitelistUnsafe` because USDC is a canonical proxy implementation.
+        bytes4 approveSelector = bytes4(keccak256("approve(address,uint256)"));
+        s.updateWhitelistUnsafe(asset, approveSelector, true, type(uint256).max);
+        // Approve TWO spenders from sleeve's USDC:
+        //  1. module → for outbound top-up pulls (safeTransferFrom sleeve→cctpSender)
+        //  2. vault  → for withdrawal deallocations (safeTransferFrom sleeve→vault)
+        IUniversalAdapterEscrow.Call[] memory calls = new IUniversalAdapterEscrow.Call[](2);
+        calls[0] = IUniversalAdapterEscrow.Call({
+            target: asset,
+            data: abi.encodeWithSignature("approve(address,uint256)", module, type(uint256).max),
+            value: 0
+        });
+        calls[1] = IUniversalAdapterEscrow.Call({
+            target: asset,
+            data: abi.encodeWithSignature("approve(address,uint256)", s.parentVault(), type(uint256).max),
+            value: 0
+        });
+        s.executeStrategy(strategyId, calls);
+        // Register module as the sleeve's settlement queue so `refillReserve` can call
+        // `sleeve.recordSettlement` to reduce externalDeposits on CCTP-inbound refunds.
+        // (Module's counterpart `setSleeveAndStrategyId` is wired inside `BaseExecFactory.deployExec`
+        // before module ownership transfers to vaultOwner.)
+        s.setSettlementQueue(module);
+        s.transferOwnership(vaultOwner);
     }
 }

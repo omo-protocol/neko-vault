@@ -124,19 +124,20 @@ export async function extractMessageFromBurnTx(
 
 /// @notice Poll Circle's attestation API until the attestation signature is available.
 ///         Standard transfers: ~13 min on Ethereum, ~20 min on L2s. Fast transfers: <1 min.
+///         Polls indefinitely — a burn on-chain is permanent, so the matching attestation will
+///         always eventually publish. Caller decides when to give up (via AbortSignal).
 export async function fetchAttestation(
   sourceDomain: number,
   message: Hex,
-  opts?: { intervalMs?: number; timeoutMs?: number },
+  opts?: { intervalMs?: number; signal?: AbortSignal },
 ): Promise<CctpAttestation> {
   const interval = opts?.intervalMs ?? 15_000;
-  const timeout = opts?.timeoutMs ?? 30 * 60_000;
-  const started = Date.now();
-  // Circle's API identifies messages by keccak256 of the message bytes
+  const signal = opts?.signal;
   const { keccak256 } = await import("viem");
   const messageHash = keccak256(message);
   const url = `${CIRCLE_ATTESTATION_API}/v2/messages/${sourceDomain}?transactionHash=${messageHash}`;
-  while (Date.now() - started < timeout) {
+  while (true) {
+    if (signal?.aborted) throw new Error(`fetchAttestation aborted for msg ${messageHash}`);
     try {
       const res = await fetch(url);
       if (res.ok) {
@@ -152,7 +153,6 @@ export async function fetchAttestation(
     }
     await new Promise((r) => setTimeout(r, interval));
   }
-  throw new Error(`attestation timeout after ${timeout}ms for msg ${messageHash}`);
 }
 
 // ─── Receive (mint on destination) ──────────────────────────────────────────
@@ -219,7 +219,9 @@ export async function depositForBurn(
       paddedRecipient,
       p.usdc,
       `0x${"0".repeat(64)}` as Hex,
-      p.maxFee ?? 0n,
+      // CCTP V2 Fast Transfer defaults: non-zero maxFee + finalityThreshold 1000 → ~60-90s
+      // end-to-end vs 13-20min standard. maxFee=50000 = 5¢ (Circle's fast-lane relayers take it).
+      p.maxFee ?? 50_000n,
       p.minFinalityThreshold ?? 1000,
     ],
   });

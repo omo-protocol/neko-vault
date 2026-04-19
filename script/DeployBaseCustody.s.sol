@@ -4,8 +4,12 @@ pragma solidity 0.8.28;
 import "forge-std/Script.sol";
 import {VaultV2Factory} from "../src/VaultV2Factory.sol";
 import {UniversalAdapterEscrowFactory} from "../src/adapters/UniversalAdapterEscrowFactory.sol";
+import {UniversalAdapterEscrow} from "../src/adapters/UniversalAdapterEscrow.sol";
+import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {BaseCoreFactory} from "../src/factories/BaseCoreFactory.sol";
 import {BaseExecFactory} from "../src/factories/BaseExecFactory.sol";
+import {BaseCctpSender} from "../src/base/BaseCctpSender.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice One-shot script that deploys:
 ///           1. VaultV2Factory + UniversalAdapterEscrowFactory
@@ -30,7 +34,8 @@ contract DeployBaseCustody is Script {
         address valuerOwner = vm.envOr("VALUER_OWNER", owner);
         bytes32 strategyId = vm.envOr("STRATEGY_ID", keccak256(abi.encode(owner, usdc, "neko-v1")));
         address signer1 = vm.envAddress("SIGNER1");
-        address signer2 = vm.envAddress("SIGNER2");
+        address signer2 = vm.envOr("SIGNER2", address(0));
+        uint256 gatewayThreshold = vm.envOr("GATEWAY_THRESHOLD", uint256(2));
         address cctpTokenMessenger =
             vm.envOr("CCTP_TOKEN_MESSENGER", address(0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d));
 
@@ -53,9 +58,10 @@ contract DeployBaseCustody is Script {
             })
         );
 
-        address[] memory sigs = new address[](2);
+        uint256 sigCount = signer2 == address(0) ? 1 : 2;
+        address[] memory sigs = new address[](sigCount);
         sigs[0] = signer1;
-        sigs[1] = signer2;
+        if (sigCount == 2) sigs[1] = signer2;
 
         BaseExecFactory.ExecDeployment memory exec = execFactory.deployExec(
             BaseExecFactory.ExecParams({
@@ -63,9 +69,10 @@ contract DeployBaseCustody is Script {
                 asset: usdc,
                 vault: core.vault,
                 sleeve: core.sleeve,
+                strategyId: strategyId,
                 cctpTokenMessenger: cctpTokenMessenger,
                 gatewaySigners: sigs,
-                gatewayThreshold: 2,
+                gatewayThreshold: gatewayThreshold == 0 ? 1 : gatewayThreshold,
                 capPmTopUp: 1_000_000e6,
                 capHlTopUp: 1_000_000e6,
                 capRefillReserve: 10_000_000e6,
@@ -75,7 +82,20 @@ contract DeployBaseCustody is Script {
             })
         );
 
+        // Final atomic step: sleeve approves module for USDC top-up pulls, sleeve ownership
+        // to vaultOwner. No manual step required after deploy.
+        coreFactory.approveModuleAndTransferOwnership(
+            core.sleeve,
+            strategyId,
+            usdc,
+            exec.module,
+            owner
+        );
+
         vm.stopBroadcast();
+
+        // Configure CCTP routes as `owner`. Fast Transfer defaults — see _configureRoutes.
+        _configureRoutes(exec.cctpSender, owner, deployerPk);
 
         console.log("=== Base Custody Stack Deployed ===");
         console.log("VaultV2Factory:      ", address(vf));
@@ -90,5 +110,28 @@ contract DeployBaseCustody is Script {
         console.log("Module:              ", exec.module);
         console.log("Gateway:             ", exec.gateway);
         console.log("CCTP sender:         ", exec.cctpSender);
+    }
+
+    /// @dev Fast Transfer defaults: maxFee=50000, minFinalityThreshold=1000 → ~60-90 s end-to-end,
+    ///      fits Ritual's HTTP precompile TTL (30 blocks × ~5 s ≈ 150 s).
+    function _configureRoutes(address cctpSender_, address ownerAddr, uint256 pk) internal {
+        vm.startBroadcast(pk);
+        _cfg(cctpSender_, keccak256("dest:pm"), 7, ownerAddr);
+        _cfg(cctpSender_, keccak256("dest:hl"), 19, ownerAddr);
+        vm.stopBroadcast();
+    }
+
+    function _cfg(address cctpSender_, bytes32 ref, uint32 domain, address recipient) internal {
+        BaseCctpSender(payable(cctpSender_)).configureRoute(
+            ref,
+            BaseCctpSender.Route({
+                destinationDomain: domain,
+                mintRecipient: bytes32(uint256(uint160(recipient))),
+                maxFee: 50_000,
+                minFinalityThreshold: 1000,
+                hookData: bytes(""),
+                active: true
+            })
+        );
     }
 }

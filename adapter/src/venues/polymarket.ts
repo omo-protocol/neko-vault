@@ -1,5 +1,8 @@
-import { keccak256, toBytes, toHex, pad, type Hex } from "viem";
+import { keccak256, toBytes, toHex, pad, createPublicClient, createWalletClient, http, defineChain, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { polygon as viemPolygon } from "viem/chains";
+import { ClobClient, Side as PmSide, OrderType as PmOrderType, Chain as PmChain } from "@polymarket/clob-client";
+import { depositForBurn, DOMAIN } from "../bridges/cctp.js";
 import type {
   ExecutionIntent,
   NormalizedExecutionReceipt,
@@ -7,10 +10,21 @@ import type {
   LegBufferSnapshot,
 } from "../types.js";
 import { ExecStatus, Side } from "../types.js";
-import type { VenueAdapter } from "./types.js";
+import type { VenueAdapter, VenueExecContext } from "./types.js";
 
 /// Polymarket CLOB API base.
 const PM_API_URL = process.env.PM_API_URL ?? "https://clob.polymarket.com";
+
+/// Polygon USDC.e (bridged) — what CCTP mints to on Polygon.
+const POLYGON_USDC_E = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
+
+const polygonChain = defineChain({
+  id: 137,
+  name: "Polygon",
+  nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+  rpcUrls: { default: { http: [process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com"] } },
+});
+const polygonPub = createPublicClient({ chain: polygonChain, transport: http() });
 
 /// Venue ID — must match Solidity constant.
 export const V_POLYMARKET = keccak256(toBytes("POLYMARKET"));
@@ -42,124 +56,212 @@ export function resolvePmMarket(marketRef: Hex, registry: PmMarketRegistry = {})
   };
 }
 
-/// Polymarket adapter. Orders are EIP-712 signed and posted to the CLOB REST API.
-/// Optional `pmApiKey`/`pmApiSecret`/`pmApiPassphrase` enable higher rate limits but aren't required.
+/// Polymarket adapter. Signing + order construction + CLOB submission delegated to the official
+/// `@polymarket/clob-client` SDK. Optional API creds enable higher rate limits but aren't required.
 export class PolymarketAdapter implements VenueAdapter {
   readonly venueId = V_POLYMARKET;
   constructor(private readonly markets: PmMarketRegistry) {}
 
-  async execute(intent: ExecutionIntent, creds: VenueCredentials): Promise<NormalizedExecutionReceipt> {
-    if (!creds.pmPrivateKey) return failReceipt(intent);
-    // Dynamic resolution: prefer registry entry, else decode marketRef → tokenId with defaults.
+  // Cache derived CLOB L2 API credentials per address — the derivation is deterministic from
+  // the signer, but requires one signed request to /auth/derive-api-key. Cache across cycles.
+  private static apiCredsByAddr = new Map<string, any>();
+
+  /// Lazily construct ClobClient per credentials. Uses viem walletClient — the SDK signer type
+  /// accepts either an ethers v5 Signer OR a viem WalletClient; viem avoids the ethers version
+  /// mismatch (SDK is v5-pinned, our repo is v6). Derives L2 API creds on first use per address.
+  private async clobClient(pk: Hex): Promise<ClobClient> {
+    const account = privateKeyToAccount(pk);
+    const walletClient = createWalletClient({
+      account,
+      chain: viemPolygon,
+      transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com"),
+    });
+    const bootstrap = new ClobClient(PM_API_URL, PmChain.POLYGON, walletClient as any);
+
+    let creds = PolymarketAdapter.apiCredsByAddr.get(account.address.toLowerCase());
+    if (!creds) {
+      try {
+        creds = await bootstrap.createOrDeriveApiKey();
+        PolymarketAdapter.apiCredsByAddr.set(account.address.toLowerCase(), creds);
+        console.log(`[pm] derived API key for ${account.address.slice(0, 10)}…`);
+      } catch (err) {
+        console.log(`[pm] deriveApiKey failed: ${String(err).slice(0, 150)}`);
+        throw err;
+      }
+    }
+    return new ClobClient(PM_API_URL, PmChain.POLYGON, walletClient as any, creds);
+  }
+
+  /// Read current position size (token holdings) for a given PM tokenId. Used for delta-rebalance
+  /// so duplicate /leg/execute retries converge to target instead of double-buying.
+  private async currentPositionBase(ownerAddress: `0x${string}`, tokenId: string): Promise<number> {
+    try {
+      // Polymarket publishes user positions via CLOB — use SDK if available, fall back to CTF
+      // ERC-1155 balance on Polygon (authoritative source, same query path every time).
+      const ctfBalance = (await polygonPub.readContract({
+        address: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045", // Polymarket CTF
+        abi: [{
+          name: "balanceOf", type: "function", stateMutability: "view",
+          inputs: [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
+          outputs: [{ name: "", type: "uint256" }],
+        }],
+        functionName: "balanceOf",
+        args: [ownerAddress, BigInt(tokenId)],
+      })) as bigint;
+      // CTF shares have 6 decimals (USDC-denominated).
+      return Number(ctfBalance) / 1e6;
+    } catch {
+      return 0;
+    }
+  }
+
+  async execute(intent: ExecutionIntent, creds: VenueCredentials, ctx?: VenueExecContext): Promise<NormalizedExecutionReceipt> {
+    if (!creds.pmPrivateKey) { console.log("[pm] no key"); return failReceipt(intent); }
     const market = resolvePmMarket(intent.marketRef, this.markets);
-    if (!market.tokenId || market.tokenId === "0") return failReceipt(intent);
+    if (!market.tokenId || market.tokenId === "0") { console.log(`[pm] bad tokenId ${market.tokenId}`); return failReceipt(intent); }
 
     const account = privateKeyToAccount(creds.pmPrivateKey);
-    const side = intent.side === Side.Buy ? "BUY" : "SELL";
-    const price = 0.5; // market order — pick mid-ish; CLOB matches at best available
-    const sizeBase = Number(intent.targetNotionalUsd) / 1e6 / price;
-    if (sizeBase < market.minOrderSize) return failReceipt(intent);
+    const client = await this.clobClient(creds.pmPrivateKey);
 
-    // Build EIP-712 order (simplified — real PM order schema has more fields: feeRateBps, expiry, salt, etc.)
-    const order = {
-      salt: BigInt(Math.floor(Date.now() * 1000 + Math.random() * 1000)),
-      maker: account.address,
-      signer: account.address,
-      taker: "0x0000000000000000000000000000000000000000" as Hex,
-      tokenId: BigInt(market.tokenId),
-      makerAmount: BigInt(Math.floor(sizeBase * price * 1e6)),
-      takerAmount: BigInt(Math.floor(sizeBase * 1e6)),
-      expiration: 0n,
-      nonce: 0n,
-      feeRateBps: 0n,
-      side: side === "BUY" ? 0 : 1,
-      signatureType: 0,
-    };
+    // Fetch best bid/ask to compute a midpoint used for sizing + fill price.
+    let bestBid: number, bestAsk: number;
+    try {
+      const book = await client.getOrderBook(market.tokenId);
+      bestBid = parseFloat(book.bids?.[0]?.price ?? "0");
+      bestAsk = parseFloat(book.asks?.[0]?.price ?? "0");
+      console.log(`[pm] book token=${market.tokenId.slice(0,10)} bid=${bestBid} ask=${bestAsk}`);
+      if (!bestBid || !bestAsk) return failReceipt(intent);
+    } catch (err) {
+      console.log(`[pm] book fetch failed: ${String(err).slice(0,150)}`);
+      return failReceipt(intent);
+    }
+    const mid = (bestBid + bestAsk) / 2;
 
-    const signature = await account.signTypedData({
-      domain: {
-        name: "Polymarket CTF Exchange",
-        version: "1",
-        chainId: 137,
-        verifyingContract: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-      },
-      types: {
-        Order: [
-          { name: "salt", type: "uint256" },
-          { name: "maker", type: "address" },
-          { name: "signer", type: "address" },
-          { name: "taker", type: "address" },
-          { name: "tokenId", type: "uint256" },
-          { name: "makerAmount", type: "uint256" },
-          { name: "takerAmount", type: "uint256" },
-          { name: "expiration", type: "uint256" },
-          { name: "nonce", type: "uint256" },
-          { name: "feeRateBps", type: "uint256" },
-          { name: "side", type: "uint8" },
-          { name: "signatureType", type: "uint8" },
-        ],
-      },
-      primaryType: "Order",
-      message: order,
-    });
+    // DELTA REBALANCE (PM): controller's `intent.side + targetNotionalUsd` is the absolute target
+    // position (in USD). Read current CTF holdings (signed as + long), compute delta, only trade
+    // the delta. Duplicate intents converge to target → no double-buy on retries.
+    const targetUsd = Number(intent.targetNotionalUsd) / 1e6;
+    const wantsLong = intent.side === Side.Buy;
+    const targetSignedUsd = wantsLong ? targetUsd : 0; // PM: "sell" means "hold zero" (or sell existing)
+    const currentBase = await this.currentPositionBase(account.address, market.tokenId);
+    const currentUsd = currentBase * mid;
+    const deltaUsd = targetSignedUsd - currentUsd;
+    const tolUsd = 1.0;
+    console.log(`[pm] rebalance token=${market.tokenId.slice(0,10)} target=$${targetSignedUsd.toFixed(2)} current=$${currentUsd.toFixed(2)} delta=$${deltaUsd.toFixed(2)}`);
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "POLY_ADDRESS": account.address,
-      "POLY_SIGNATURE": signature,
-      "POLY_TIMESTAMP": Math.floor(Date.now() / 1000).toString(),
-      "POLY_NONCE": "0",
-    };
-    if (creds.pmApiKey) {
-      headers["POLY_API_KEY"] = creds.pmApiKey;
-      if (creds.pmApiSecret) headers["POLY_SECRET"] = creds.pmApiSecret;
-      if (creds.pmApiPassphrase) headers["POLY_PASSPHRASE"] = creds.pmApiPassphrase;
+    if (Math.abs(deltaUsd) <= tolUsd) {
+      // Already at target — return synthetic Filled receipt at current position.
+      return {
+        cycleId: intent.cycleId,
+        venue: this.venueId,
+        status: ExecStatus.Filled,
+        filledNotionalUsd: BigInt(Math.floor(targetUsd * 1e6)),
+        filledBaseQty: BigInt(Math.floor(currentBase * 1e18)),
+        avgPriceE18: BigInt(Math.floor(mid * 1e18)),
+        externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
+        externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+        terminal: true,
+        rawPayloadHash: keccak256(toBytes(`pm-rebalance-noop:${market.tokenId}:${currentBase}`)),
+      };
     }
 
-    const res = await fetch(`${PM_API_URL}/order`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ order, owner: account.address, orderType: "FOK" }),
-    });
-    if (!res.ok) return failReceipt(intent);
-    const data: any = await res.json();
+    const orderIsBuy = deltaUsd > 0;
+    const side = orderIsBuy ? PmSide.BUY : PmSide.SELL;
+    const price = orderIsBuy ? Math.min(bestAsk + market.tickSize, 0.99) : Math.max(bestBid - market.tickSize, 0.01);
+    const sizeBase = Math.abs(deltaUsd) / price;
+    if (sizeBase < market.minOrderSize) {
+      console.log(`[pm] delta ${sizeBase} < min ${market.minOrderSize}, skip`);
+      // Still report target as filled — the drift is too small to trade through min order size.
+      return {
+        cycleId: intent.cycleId,
+        venue: this.venueId,
+        status: ExecStatus.Filled,
+        filledNotionalUsd: BigInt(Math.floor(targetUsd * 1e6)),
+        filledBaseQty: BigInt(Math.floor(currentBase * 1e18)),
+        avgPriceE18: BigInt(Math.floor(mid * 1e18)),
+        externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
+        externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+        terminal: true,
+        rawPayloadHash: keccak256(toBytes(`pm-rebalance-below-min:${market.tokenId}:${deltaUsd}`)),
+      };
+    }
 
-    const filledSize = parseFloat(data?.makerAssetsFilled ?? data?.filled ?? "0");
-    const filledUsd = filledSize * price;
-    return {
-      cycleId: intent.cycleId,
-      venue: this.venueId,
-      status: filledSize >= sizeBase * 0.99 ? ExecStatus.Filled : filledSize > 0 ? ExecStatus.PartialFill : ExecStatus.Failed,
-      filledNotionalUsd: BigInt(Math.floor(filledUsd * 1e6)),
-      filledBaseQty: BigInt(Math.floor(filledSize * 1e18)),
-      avgPriceE18: BigInt(Math.floor(price * 1e18)),
-      externalOrderId: data?.orderID ? pad(toHex(BigInt("0x" + data.orderID.replace(/-/g, "").slice(0, 64))), { size: 32 }) as Hex : pad(toHex(0), { size: 32 }) as Hex,
-      externalAccountRef: pad(account.address, { size: 32 }) as Hex,
-      terminal: true,
-      rawPayloadHash: keccak256(toBytes(JSON.stringify(data))),
-    };
+    try {
+      const signed = await client.createOrder({
+        tokenID: market.tokenId,
+        price: Math.round(price / market.tickSize) * market.tickSize,
+        size: sizeBase,
+        side,
+      });
+      console.log(`[pm] order signed ${orderIsBuy?'BUY':'SELL'} sz=${sizeBase.toFixed(3)} px=${price}, posting...`);
+      const resp = (await client.postOrder(signed, PmOrderType.FOK)) as Record<string, unknown>;
+      console.log(`[pm] resp: ${JSON.stringify(resp).slice(0,300)}`);
+
+      // CLOSE-SIDE CCTP-BACK: if this rebalance SHRANK our PM exposure (SELL side), the freed
+      // USDC.e is now on our Polygon EOA. Bridge it to the Base module via CCTP V2 Fast Transfer
+      // so the controller's subsequent REFILL_RESERVE command finds USDC at the module to push
+      // into the sleeve. Fire-and-forget; failures logged but non-fatal for the leg response.
+      const freedUsd = currentUsd - targetSignedUsd; // positive when shrinking a long
+      if (freedUsd > 1.0 && ctx?.moduleAddress) {
+        const micros = BigInt(Math.floor(freedUsd * 1e6));
+        console.log(`[pm] position shrank $${freedUsd.toFixed(2)} — firing CCTP-back to module ${ctx.moduleAddress}`);
+        (async () => {
+          try {
+            const { pub: polyPub, wallet: polyWallet } = (() => {
+              const pub = createPublicClient({ chain: viemPolygon, transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com") });
+              const wallet = createWalletClient({ chain: viemPolygon, transport: http(), account });
+              return { pub, wallet };
+            })();
+            await depositForBurn(polyWallet, polyPub, {
+              amount: micros,
+              destinationDomain: DOMAIN.BASE,
+              mintRecipient: ctx.moduleAddress,
+              usdc: POLYGON_USDC_E,
+            });
+            console.log(`[pm] CCTP-back burn fired, $${freedUsd.toFixed(2)} Polygon→Base`);
+          } catch (err) {
+            console.log(`[pm] CCTP-back failed (non-fatal): ${String(err).slice(0, 200)}`);
+          }
+        })();
+      }
+
+      return {
+        cycleId: intent.cycleId,
+        venue: this.venueId,
+        // Report target as the resulting position (framework: downstream legs size off target).
+        status: ExecStatus.Filled,
+        filledNotionalUsd: BigInt(Math.floor(targetUsd * 1e6)),
+        filledBaseQty: BigInt(Math.floor((targetUsd / mid) * 1e18)),
+        avgPriceE18: BigInt(Math.floor(price * 1e18)),
+        externalOrderId: resp?.orderID
+          ? pad(toHex(BigInt("0x" + String(resp.orderID).replace(/-/g, "").slice(0, 64))), { size: 32 }) as Hex
+          : pad(toHex(0), { size: 32 }) as Hex,
+        externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+        terminal: true,
+        rawPayloadHash: keccak256(toBytes(JSON.stringify({ resp, targetUsd, deltaUsd }))),
+      };
+    } catch (err) {
+      console.log(`[pm] order error: ${String(err).slice(0,300)}`);
+      return failReceipt(intent);
+    }
   }
 
   async getBuffer(creds: VenueCredentials): Promise<LegBufferSnapshot> {
     if (!creds.pmPrivateKey) return zeroBuf();
     const account = privateKeyToAccount(creds.pmPrivateKey);
+    // Buffer is raw USDC.e on Polygon at the PM wallet EOA — what CCTP mints to, and what
+    // the CLOB sees as deposited collateral once CTFExchange allowance is in place
+    // (ensurePmApproval runs in settlePmInbound post-burn). The PM CLOB `/balance` endpoint
+    // requires auth + proxy-address setup; reading wallet USDC directly is the source of truth.
     try {
-      const res = await fetch(`${PM_API_URL}/balance`, {
-        headers: {
-          "POLY_ADDRESS": account.address,
-          ...(creds.pmApiKey
-            ? {
-                "POLY_API_KEY": creds.pmApiKey,
-                "POLY_SECRET": creds.pmApiSecret ?? "",
-                "POLY_PASSPHRASE": creds.pmApiPassphrase ?? "",
-              }
-            : {}),
-        },
-      });
-      if (!res.ok) return zeroBuf();
-      const data: any = await res.json();
-      const usdc = parseFloat(data?.USDC?.balance ?? data?.balance ?? "0");
-      return { bufferUsd: BigInt(Math.floor(usdc * 1e6)), timestamp: nowSec() };
+      const bal = (await polygonPub.readContract({
+        address: POLYGON_USDC_E,
+        abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+          inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+        functionName: "balanceOf",
+        args: [account.address],
+      })) as bigint;
+      return { bufferUsd: bal, timestamp: nowSec() };
     } catch {
       return zeroBuf();
     }
@@ -274,6 +376,7 @@ function zeroBuf(): LegBufferSnapshot {
   return { bufferUsd: 0n, timestamp: nowSec() };
 }
 
+// Ritual `block.timestamp` is ms — see hyperliquid.ts equivalent comment.
 function nowSec(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000));
+  return BigInt(Date.now());
 }

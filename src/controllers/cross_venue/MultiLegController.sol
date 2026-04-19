@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {KellySignLib} from "./KellySignLib.sol";
+import {DustFloorLib} from "./DustFloorLib.sol";
 import {RitualPrecompiles} from "../../interfaces/ritual/IRitualPrecompiles.sol";
 import {SchedulerSetupLib} from "./SchedulerSetupLib.sol";
 import {MultiLegSubmitLib} from "./MultiLegSubmitLib.sol";
@@ -22,6 +22,7 @@ import {
 } from "./SharedVenueTypes.sol";
 import {
     MAX_LEGS,
+    REF_LEG_SENTINEL,
     ML_VENUE_HL_PERP,
     ML_VENUE_HL_SPOT,
     ML_VENUE_PM,
@@ -30,7 +31,6 @@ import {
     LegConfig,
     LegBufferSnapshot,
     LegFill,
-    OffchainKellyWeights,
     MultiLegCycleRequested,
     MultiLegLegSubmitted,
     MultiLegLegFill,
@@ -40,10 +40,12 @@ import {
     MultiLegTradingStateChanged,
     MultiLegBufferSnapshotUpdated,
     MultiLegBufferSyncSubmitted,
-    MultiLegKellyApplied,
     MultiLegFundingReceiptIngested,
+    MultiLegKellyApplied,
+    OffchainKellyWeights,
     ValuationPushed,
-    AutoUnwindTriggered
+    AutoUnwindTriggered,
+    LegFailThresholdHit
 } from "./MultiLegTypes.sol";
 
 /// @title MultiLegController
@@ -53,8 +55,6 @@ import {
 ///         lifecycle: initial allocation, incremental opens, unwind → REFILL_RESERVE. Allowed
 ///         venues: HYPERLIQUID-PERP, HYPERLIQUID-SPOT, POLYMARKET. Clone-safe (EIP-1167).
 contract MultiLegController is ReentrancyGuard {
-    using ECDSA for bytes32;
-    using MessageHashUtils for bytes32;
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -131,17 +131,63 @@ contract MultiLegController is ReentrancyGuard {
 
     LegFill[MAX_LEGS] public currentCycleFills;
 
+    /// @dev Partial-unwind override targets per leg. ONLY applied when `_currentCycleIsUnwind`
+    ///      is true (so target=0 for a full unwind is a valid override, not "unset"). Reset at
+    ///      cycle completion.
+    uint256[MAX_LEGS] internal _unwindTargetOverrideUsd;
+    /// @dev True during cycles started via `requestPartialUnwind`. Gates the override-target
+    ///      path in `_legNotional` and the REFILL_RESERVE emission at cycle completion.
+    bool internal _currentCycleIsUnwind;
+    /// @dev Total USD expected to be realized by the current unwind cycle. Computed at
+    ///      `requestPartialUnwind` time as `r × NAV`. Consumed by the cycle-complete path
+    ///      to emit a REFILL_RESERVE command on Base so the module credits the sleeve.
+    uint256 internal _unwindShortfallUsd;
+
+    /// @dev Block number when the current pending async job started. Used by tick() to detect
+    ///      stuck LEG_PENDING / VALUATION_PENDING / UNWIND_PENDING states and auto-reset after
+    ///      `maxPendingBlocks` without requiring manual pauseTrading/unpauseTrading intervention.
+    uint256 public pendingSinceBlock;
+    uint256 public maxPendingBlocks; // 0 = disable auto-recovery
+
+    /// @notice If non-zero, `tick()` auto-triggers a partial unwind sized to refill Base reserve
+    ///         whenever the most recent valuation reports `lastBaseReserveUsd < minBaseReserveUsd`.
+    ///         Operator-set; 0 disables (manual-only).
+    uint256 public minBaseReserveUsd;
+
+    /// @dev Auto-clear counter for LEG_FAILED. Incremented on each auto-clear, reset on any
+    ///      successful leg fill. If it exceeds `legFailThreshold` (operator-set), tick() stops
+    ///      auto-clearing and emits `LegFailThresholdHit` so operator intervenes.
+    uint256 public legFailCount;
+    uint256 public legFailThreshold; // 0 = unlimited retries
+
+    /// @notice Dust floors expressed in bps of *deployable* capital (`lastNavUsd - lastBaseReserveUsd`).
+    ///         Below `deployable × floor / 10_000`, the controller skips the action entirely.
+    ///         Relative so the vault behaves the same whether TVL is $17 or $17M. Before the first
+    ///         valuation (deployable=0) floors evaluate to 0 and don't gate anything. Set any field
+    ///         to 0 to disable the respective gate.
+    uint256 public minTopupBps;          // skip TOPUP_* if amount < deployable × bps / 10000
+    uint256 public minRefillBps;         // skip REFILL_RESERVE if realized < deployable × bps / 10000
+    uint256 public minRebalanceBps;      // skip drift-rebalance if drift < deployable × bps / 10000
+
     bytes32 public pendingLegJobId;
     bytes32 public pendingBufferSyncJobId;
     bytes32 public pendingValuationJobId;
     bytes32 public pendingBaseCommandJobId;
-    bytes32 public pendingUnwindJobId;
     bytes32 public lastSubmittedCommandNonce;
     bytes32 public reserveDestinationRef;
-    uint256 public pendingUnwindTargetUsd;
 
     uint256 public tickScheduleId;
     uint256 public valuationScheduleId;
+
+    /// @dev Deferred async-submit queue. Callbacks can't nest a new 0x0805 precompile call
+    ///      (Ritual enforces "one per tx"), so they set a kind+data pair here and the next
+    ///      `tick()` dispatches. Kinds:
+    ///        0 = none
+    ///        1 = top-up for leg at data (data = legIndex in low byte)
+    ///        2 = submit next leg (data = legIndex)
+    ///        3 = submit valuation sync after all legs filled
+    uint8 internal _deferredKind;
+    uint256 internal _deferredData;
     /// @dev Schedule auto-extend params. Packed into one slot:
     ///         tickFreq (uint32) | valuationFreq (uint32) | extendGas (uint32) — bits 0..95.
     ///      Stored on first `fundAndSchedule` call; tick/syncValuation re-use them to extend.
@@ -152,25 +198,19 @@ contract MultiLegController is ReentrancyGuard {
     uint256 public lastNavUsd;
     uint256 public lastBaseReserveUsd;
     uint256 public lastValuationTimestamp;
-    /// @notice If non-zero, tick() auto-triggers unwind when lastBaseReserveUsd < minBaseReserveUsd.
-    uint256 public minBaseReserveUsd;
-    /// @notice Target refill amount when auto-unwinding (usually `target - current`).
-    uint256 public autoUnwindTargetUsd;
-    /// @notice Max age of the valuation-sync report before auto-unwind is skipped. Zero = no cap
-    ///         (auto-unwind always uses whatever `lastBaseReserveUsd` is). Prevents firing unwinds
-    ///         off stale reserve data.
-    uint256 public maxValuationStalenessSeconds;
 
     LegBufferSnapshot[MAX_LEGS] public bufferSnapshots;
+
+    /// @notice Latest on-chain Kelly target. Pushed by `submitKellyWeights`; consumed by
+    ///         `_effectiveWeight` + `_effectiveCycleNotional` while fresh. When expired or
+    ///         absent, controller falls back to static `legs[i].weightBps`.
+    OffchainKellyWeights public latestKelly;
+    mapping(bytes32 => bool) public usedKellyNonces;
 
     // Funding in-flight — tracks which leg and how much
     uint8 public pendingTopUpLegIndex;
     bytes32 public pendingTopUpCycle;
     uint256 public pendingTopUpAmount;
-
-    // Off-chain Kelly
-    OffchainKellyWeights public latestKelly;
-    mapping(bytes32 => bool) public usedKellyNonces;
 
     // ─── Modifiers ───────────────────────────────────────────────────────────
 
@@ -245,10 +285,20 @@ contract MultiLegController is ReentrancyGuard {
         httpTtl = 200; // default; tune via setHttpConfig
 
         legCount = uint8(p.legs.length);
+        bool anyReference = false;
         for (uint8 i; i < p.legs.length; i++) {
             _validateLeg(p.legs[i]);
             legs[i] = p.legs[i];
+            if (p.legs[i].referenceLegIndex == REF_LEG_SENTINEL) {
+                anyReference = true;
+            } else {
+                // Hedge leg must reference a lower-index leg (DAG; prevents circular deps and
+                // guarantees the reference has filled by the time this leg sizes off it).
+                if (p.legs[i].referenceLegIndex >= i) revert InvalidConfig();
+            }
         }
+        // At least one leg must be a reference — otherwise there's nothing to size hedges against.
+        if (!anyReference) revert InvalidConfig();
 
         bufferStalenessSeconds = p.bufferStalenessSeconds;
         minCycleNotionalUsd = p.minCycleNotionalUsd;
@@ -349,10 +399,8 @@ contract MultiLegController is ReentrancyGuard {
         }
     }
 
-    function getSecrets() external view returns (bytes[] memory blobs, bytes[] memory sigs) {
-        blobs = _encryptedSecrets;
-        sigs = _secretSignatures;
-    }
+    // getSecrets removed — operator re-runs bootstrapClone to refresh if needed (reads blobs
+    // from `_encryptedSecrets` via storage slot if truly required). Dropped for size budget.
 
     function setKellySigner(address s) external onlyOwner {
         kellySigner = s;
@@ -375,6 +423,9 @@ contract MultiLegController is ReentrancyGuard {
 
     function setLegConfig(uint8 index, LegConfig calldata cfg) external onlyOwner {
         if (index >= legCount) revert InvalidConfig();
+        // Only mutate LegConfig while idle — changing venue/market/weights mid-cycle could corrupt
+        // `currentCycleFills[]` accounting and leave stale positions untracked.
+        if (tradingState != MultiLegTradingState.IDLE) revert InvalidState();
         _validateLeg(cfg);
         legs[index] = cfg;
     }
@@ -391,12 +442,97 @@ contract MultiLegController is ReentrancyGuard {
             uint16 absW = cfg.weightBps < 0 ? uint16(-cfg.weightBps) : uint16(cfg.weightBps);
             if (absW > cfg.maxAbsWeightBps) revert WeightExceedsCap();
         }
+        // Hedge legs must have a non-zero beta (0 would mean "don't hedge", which is the same as
+        // not declaring a hedge leg at all — config error). Reference legs (sentinel) ignore beta.
+        if (cfg.referenceLegIndex != REF_LEG_SENTINEL && cfg.betaBps == 0) revert InvalidConfig();
     }
 
     function setCycleBounds(uint256 minUsd, uint256 maxUsd) external onlyOwner {
         if (minUsd == 0 || maxUsd < minUsd) revert InvalidConfig();
         minCycleNotionalUsd = minUsd;
         maxCycleNotionalUsd = maxUsd;
+    }
+
+    /// @notice Ritual `block.timestamp` is in MILLISECONDS (non-standard EVM). This field is
+    ///         therefore also in ms. Operator-tunable — e.g. `3_600_000` = 1-hour staleness.
+    function setBufferStalenessSeconds(uint256 ms_) external onlyOwner {
+        if (ms_ == 0) revert InvalidConfig();
+        bufferStalenessSeconds = ms_;
+    }
+
+    /// @notice Auto-recovery: if any `pending*JobId` has been set for more than `n` blocks,
+    ///         `tick()` forcibly clears it and resets tradingState to IDLE. Prevents manual
+    ///         pauseTrading/unpauseTrading dance when AsyncDelivery drops a callback. `0` disables.
+    function setMaxPendingBlocks(uint256 n) external onlyOwner {
+        maxPendingBlocks = n;
+    }
+
+    /// @notice Auto-unwind threshold — `tick()` triggers `requestPartialUnwind(shortfall)` when
+    ///         `lastBaseReserveUsd < minBaseReserveUsd`. 0 disables (manual-only). Operator
+    ///         typically sets this to the minimum vault reserve needed to service pending
+    ///         withdrawals; `tick()` will auto-replenish by shrinking venue positions.
+    function setMinBaseReserveUsd(uint256 min) external onlyOwner {
+        minBaseReserveUsd = min;
+    }
+
+    /// @notice Cap on LEG_FAILED auto-clears. When exceeded, `tick()` stops auto-clearing so
+    ///         repeated failures don't silently burn gas — operator must investigate + reset.
+    function setLegFailThreshold(uint256 n) external onlyOwner {
+        legFailThreshold = n;
+    }
+
+    /// @notice Dust floors expressed in bps of deployable capital (NAV − Base reserve).
+    ///         Below `deployable × bps / 10_000`, the controller skips TOPUP/REFILL/REBALANCE.
+    ///         Scales with vault size so a $17 demo and a $17M prod vault behave the same.
+    ///         Pass 0 for any field to disable the gate.
+    function setDustFloorsBps(uint256 topupBps, uint256 refillBps, uint256 rebalanceBps) external onlyOwner {
+        minTopupBps = topupBps;
+        minRefillBps = refillBps;
+        minRebalanceBps = rebalanceBps;
+    }
+
+    /// @notice Current signed USD notional of leg `legIndex`'s fill (from `currentCycleFills`,
+    ///         set after each leg completes). Used by `requestPartialUnwind` to size the scaled
+    ///         targets. Zero if no cycle has filled this leg yet.
+    function currentPositionUsd(uint8 legIndex) internal view returns (uint256) {
+        return currentCycleFills[legIndex].filledNotionalUsd;
+    }
+
+    /// @dev Effective hedge ratio w for leg `legIndex` = hedge_notional / (|β| × ref_notional).
+    ///      Returns 0 for reference legs. In bps scale (10000 = 1.0).
+    function _effectiveW(uint8 legIndex) internal view returns (uint256) {
+        LegConfig memory cfg = legs[legIndex];
+        if (cfg.referenceLegIndex == REF_LEG_SENTINEL) return 0;
+        uint256 refFill = currentCycleFills[cfg.referenceLegIndex].filledNotionalUsd;
+        if (refFill == 0) return 0;
+        uint256 hedge = currentCycleFills[legIndex].filledNotionalUsd;
+        int16 b = cfg.betaBps;
+        uint256 absBeta = b < 0 ? uint256(uint16(-b)) : uint256(uint16(b));
+        if (absBeta == 0) return 0;
+        return (hedge * 10_000 * 10_000) / (refFill * absBeta);
+    }
+
+    /// @notice Sum of absolute drift in USD across all hedge legs whose `|w_effective − w_target|`
+    ///         exceeds their `driftToleranceBps`. Zero if no leg is outside tolerance.
+    ///         `tick()` gates the auto-rebalance on `driftUsd >= minRebalanceUsd` so we don't pay
+    ///         bridge/CCTP/gas fees on dust-scale hedge drift.
+    function _driftDetected() internal view returns (uint256 driftUsd) {
+        for (uint8 i; i < legCount; i++) {
+            LegConfig memory cfg = legs[i];
+            if (cfg.referenceLegIndex == REF_LEG_SENTINEL) continue;
+            if (cfg.driftToleranceBps == 0) continue;
+            uint256 wEff = _effectiveW(i);
+            if (wEff == 0) continue; // no fills yet, nothing to drift from
+            uint256 wTarget = _absWeight(i);
+            uint256 delta = wEff > wTarget ? wEff - wTarget : wTarget - wEff;
+            if (delta > cfg.driftToleranceBps) {
+                // USD drift on this hedge = delta_bps × |β|_bps × refFillUsd / (10000 × 10000).
+                uint256 refFill = currentCycleFills[cfg.referenceLegIndex].filledNotionalUsd;
+                int16 b = cfg.betaBps;
+                uint256 absBeta = b < 0 ? uint256(uint16(-b)) : uint256(uint16(b));
+                driftUsd += (delta * absBeta * refFill) / (10_000 * 10_000);
+            }
+        }
     }
 
     function pauseTrading() external onlyVaultManager {
@@ -417,18 +553,6 @@ contract MultiLegController is ReentrancyGuard {
         _setFundingState(MultiLegFundingState.STALE);
     }
 
-    /// @notice Configure auto-unwind behavior. If `min > 0`, scheduler tick auto-triggers
-    ///         `requestUnwind(target)` once the latest valuation-sync reports Base reserve below
-    ///         `min`. Set min=0 to disable; operator-triggered unwinds remain available.
-    function setAutoUnwindThresholds(uint256 min, uint256 target) external onlyOwner {
-        minBaseReserveUsd = min;
-        autoUnwindTargetUsd = target;
-    }
-
-    function setMaxValuationStaleness(uint256 s) external onlyOwner {
-        maxValuationStalenessSeconds = s;
-    }
-
     /// @notice Admin escape hatch: clear frozen pending job IDs when the TEE adapter fails to
     ///         deliver and the Long-Running HTTP TTL elapsed without a callback. Each boolean
     ///         wipes the corresponding pending ID, letting the next scheduler tick retry.
@@ -438,14 +562,12 @@ contract MultiLegController is ReentrancyGuard {
         bool leg,
         bool bufferSync,
         bool valuation,
-        bool baseCommand,
-        bool unwind
+        bool baseCommand
     ) external onlyVaultManager {
         if (leg) pendingLegJobId = bytes32(0);
         if (bufferSync) pendingBufferSyncJobId = bytes32(0);
         if (valuation) pendingValuationJobId = bytes32(0);
         if (baseCommand) pendingBaseCommandJobId = bytes32(0);
-        if (unwind) pendingUnwindJobId = bytes32(0);
     }
 
     /// @notice Clear a recoverable failure state to IDLE. Only `LEG_FAILED` (first-leg failed,
@@ -461,38 +583,56 @@ contract MultiLegController is ReentrancyGuard {
         _setTradingState(MultiLegTradingState.IDLE);
     }
 
-    /// @notice Kick off an unwind to refill Base reserve. Adapter closes all open legs, realizes USDC,
-    ///         and reports the delivered amount. Controller then emits a `REFILL_RESERVE` CommandEnvelope
-    ///         which the scheduled-tx path routes to Base.
-    /// @notice Kick off an unwind. Callable from IDLE, READY, and UNHEDGED — UNHEDGED requires unwind
-    ///         to close the partially-opened legs before the controller can accept new cycles.
-    function requestUnwind(uint256 targetAssetsUsd) external nonReentrant onlyVaultManager {
-        if (
-            tradingState != MultiLegTradingState.IDLE && tradingState != MultiLegTradingState.READY
-                && tradingState != MultiLegTradingState.UNHEDGED
-        ) revert InvalidState();
-        if (targetAssetsUsd == 0) revert InvalidConfig();
-        pendingUnwindTargetUsd = targetAssetsUsd;
-        currentCycleId = _newCycleId();
-        _setTradingState(MultiLegTradingState.UNWIND_PENDING);
-        _submitUnwind(targetAssetsUsd);
+    /// @notice Partial withdrawal — shrink every leg by the same ratio `r = shortfallUsd / NAV`.
+    ///         Preserves the current hedge ratio w_effective on each LegGroup (framework
+    ///         INVARIANT 1). For each leg: newTarget = (1 − r) × current. Calls `_submitLeg(0)`
+    ///         and the existing leg-chain delivers the scaled rebalance through the delta logic.
+    ///         `shortfallUsd == current NAV` is a full unwind (each leg targets 0).
+    function requestPartialUnwind(uint256 shortfallUsd) external nonReentrant onlyVaultManager {
+        _internalPartialUnwind(shortfallUsd);
     }
 
-    /// @notice Off-chain Kelly weights posted by `kellySigner`. EIP-191 signed digest over
-    ///         (strategyId, targetWeightBps, totalTargetNotional, validUntil, nonce, chainId, address(this)).
+    /// @dev Internal partial-unwind driver. Shared between operator-invoked
+    ///      `requestPartialUnwind` and the auto-trigger path in `tick()` (low-reserve).
+    ///      Returns the new cycleId so the caller can emit AutoUnwindTriggered against it.
+    function _internalPartialUnwind(uint256 shortfallUsd) internal returns (bytes32 cid) {
+        if (tradingState != MultiLegTradingState.IDLE && tradingState != MultiLegTradingState.READY) {
+            revert InvalidState();
+        }
+        if (shortfallUsd == 0) revert InvalidConfig();
+        uint256 nav = lastNavUsd;
+        if (nav == 0) revert InvalidState();
+        uint256 cappedShortfall = shortfallUsd > nav ? nav : shortfallUsd;
+        uint256 rBps = (cappedShortfall * 10_000) / nav;
+        if (rBps > 10_000) rBps = 10_000;
+
+        cid = _newCycleId();
+        currentCycleId = cid;
+        currentLegIndex = 0;
+        _currentCycleIsUnwind = true;
+        _unwindShortfallUsd = cappedShortfall;
+        for (uint8 i; i < legCount; i++) {
+            uint256 currentNotional = currentPositionUsd(i);
+            _unwindTargetOverrideUsd[i] = (currentNotional * (10_000 - rBps)) / 10_000;
+            delete currentCycleFills[i];
+        }
+        emit MultiLegCycleRequested(cid, cappedShortfall, legCount);
+        _submitLeg(0);
+    }
+
+    // [removed] requestUnwind + /unwind protocol: superseded by `requestPartialUnwind` which
+    // uses the same `/leg/execute` delta-rebalance path to shrink positions (r=1 = full close).
+
+    /// @notice Off-chain Kelly push — signer posts a signed target weight vector + total notional.
+    ///         Verified here, cached in `latestKelly`, consumed by `_effectiveWeight` and
+    ///         `_effectiveCycleNotional` while fresh. Replay-protected via `nonce`; freshness via
+    ///         `validUntil`. Operator clamps via each leg's `maxAbsWeightBps`.
     function submitKellyWeights(OffchainKellyWeights calldata w, bytes calldata signature) external {
         if (!useKelly) revert InvalidState();
         if (w.validUntil < block.timestamp) revert KellyStale();
         if (usedKellyNonces[w.nonce]) revert KellyNonceReused();
-
-        bytes32 digest = keccak256(
-            abi.encode(
-                strategyId, w.targetWeightBps, w.totalTargetNotional, w.validUntil, w.nonce, block.chainid, address(this)
-            )
-        ).toEthSignedMessageHash();
-        address signer = digest.recover(signature);
+        address signer = KellySignLib.recoverSigner(strategyId, address(this), w, signature);
         if (signer != kellySigner) revert KellyInvalidSignature();
-
         usedKellyNonces[w.nonce] = true;
         latestKelly = w;
         emit MultiLegKellyApplied(w.nonce, w.totalTargetNotional, w.validUntil);
@@ -502,45 +642,98 @@ contract MultiLegController is ReentrancyGuard {
 
     function tick(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
         _maybeExtend(true, executionIndex);
+
+        // Auto-recovery: if any pending job has been in flight longer than `maxPendingBlocks`
+        // (AsyncDelivery presumably dropped the callback), clear it and reset tradingState so
+        // the next tick can make progress. Prevents ops having to manually pause/unpause.
+        _autoRecoverIfStuck();
+
         if (tradingState == MultiLegTradingState.PAUSED || fundingState == MultiLegFundingState.PAUSED) return;
         if (
             tradingState == MultiLegTradingState.RECOVERY_REQUIRED || tradingState == MultiLegTradingState.UNHEDGED
-                || tradingState == MultiLegTradingState.LEG_FAILED
         ) return;
+        // LEG_FAILED: auto-clear so next cycle can retry. Capped by `legFailThreshold` so
+        // repeated failures don't silently burn Ritual gas; past the cap, stay LEG_FAILED and
+        // let the operator intervene.
+        if (tradingState == MultiLegTradingState.LEG_FAILED) {
+            legFailCount += 1;
+            if (legFailThreshold > 0 && legFailCount > legFailThreshold) {
+                emit LegFailThresholdHit(legFailCount);
+                return; // stay LEG_FAILED; operator must call clearRecovery()
+            }
+            _setTradingState(MultiLegTradingState.IDLE);
+        }
         // If an unwind is already in flight, the valuation-sync + REFILL_RESERVE will follow via callback.
         if (tradingState == MultiLegTradingState.UNWIND_PENDING) return;
+
+        // Process any deferred async submit queued by a prior callback (callbacks can't nest
+        // 0x0805 precompile calls — Ritual enforces one per tx). Returns early if dispatched.
+        if (_dispatchDeferred()) return;
 
         if (_anyBufferStale()) {
             if (pendingBufferSyncJobId == bytes32(0)) _submitBufferSync();
             return;
         }
 
-        // Auto-reserve maintenance: if latest valuation-sync reported Base reserve below min,
-        // kick off an unwind to refill. Takes priority over new cycle starts. Skipped if the
-        // valuation report is older than `maxValuationStalenessSeconds` (when configured) —
-        // prevents firing off stale data.
+        if (fundingState == MultiLegFundingState.TOPUP_PENDING) return;
+
+        // Auto-unwind-on-low-reserve: if valuation reports Base reserve below the operator's
+        // min, shrink venue positions proportionally to refill. Uses `requestPartialUnwind`
+        // internally so the framework invariants (hedge ratio preserved) hold.
         if (
             minBaseReserveUsd > 0 && lastValuationTimestamp > 0 && lastBaseReserveUsd < minBaseReserveUsd
-                && (
-                    maxValuationStalenessSeconds == 0
-                        || block.timestamp - lastValuationTimestamp <= maxValuationStalenessSeconds
-                )
                 && (tradingState == MultiLegTradingState.IDLE || tradingState == MultiLegTradingState.READY)
+                && lastNavUsd > 0
         ) {
-            uint256 target = autoUnwindTargetUsd > 0 ? autoUnwindTargetUsd : minBaseReserveUsd - lastBaseReserveUsd;
-            currentCycleId = _newCycleId();
-            pendingUnwindTargetUsd = target;
-            _setTradingState(MultiLegTradingState.UNWIND_PENDING);
-            emit AutoUnwindTriggered(currentCycleId, lastBaseReserveUsd, target);
-            _submitUnwind(target);
+            uint256 shortfall = minBaseReserveUsd - lastBaseReserveUsd;
+            bytes32 cid = _internalPartialUnwind(shortfall);
+            emit AutoUnwindTriggered(cid, lastBaseReserveUsd, shortfall);
             return;
         }
 
-        if (fundingState == MultiLegFundingState.TOPUP_PENDING) return;
-
         if (_tryEmitTopUp()) return;
 
+        // Drift-rebalance: if any hedge leg's effective `w` has drifted outside its tolerance
+        // due to price moves, kick off a rebalance cycle. Framework INVARIANT 1. Dust floor is
+        // bps of deployable capital; min=0 still triggers on any detected drift.
+        if (tradingState == MultiLegTradingState.IDLE || tradingState == MultiLegTradingState.READY) {
+            uint256 driftUsd = _driftDetected();
+            uint256 rebalanceFloor = DustFloorLib.floorUsd(lastNavUsd, lastBaseReserveUsd, minRebalanceBps);
+            if (driftUsd > 0 && driftUsd >= rebalanceFloor) {
+                _tryStartCycle();
+                return;
+            }
+        }
+
         if (tradingState == MultiLegTradingState.IDLE) _tryStartCycle();
+    }
+
+    /// @dev Clear pending-async stale state after `maxPendingBlocks` blocks, resetting
+    ///      tradingState to IDLE so the next tick can progress. No-op if maxPendingBlocks=0.
+    function _autoRecoverIfStuck() internal {
+        if (maxPendingBlocks == 0) return;
+        bool anyPending = pendingLegJobId != bytes32(0) || pendingValuationJobId != bytes32(0)
+            || pendingBaseCommandJobId != bytes32(0) || pendingBufferSyncJobId != bytes32(0);
+        if (!anyPending) {
+            pendingSinceBlock = 0;
+            return;
+        }
+        if (pendingSinceBlock == 0) {
+            pendingSinceBlock = block.number;
+            return;
+        }
+        if (block.number - pendingSinceBlock <= maxPendingBlocks) return;
+        pendingLegJobId = bytes32(0);
+        pendingValuationJobId = bytes32(0);
+        pendingBaseCommandJobId = bytes32(0);
+        pendingBufferSyncJobId = bytes32(0);
+        pendingSinceBlock = 0;
+        if (
+            tradingState == MultiLegTradingState.LEG_PENDING
+                || tradingState == MultiLegTradingState.VALUATION_PENDING
+        ) {
+            _setTradingState(MultiLegTradingState.IDLE);
+        }
     }
 
     function syncValuation(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
@@ -580,11 +773,24 @@ contract MultiLegController is ReentrancyGuard {
         }
 
         if (fundingState == MultiLegFundingState.STALE) _setFundingState(MultiLegFundingState.OK);
-        _tryEmitTopUp();
+        // Queue a top-up for next tick() if any leg is below min. Can't submit here (Ritual:
+        // one 0x0805 per tx).
+        for (uint8 i; i < legCount; i++) {
+            if (bufferSnapshots[i].bufferUsd < legs[i].bufferMinUsd) {
+                _deferredKind = 1;
+                _deferredData = i;
+                break;
+            }
+        }
     }
 
     function onLegResult(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
-        if (tradingState != MultiLegTradingState.LEG_PENDING) revert InvalidState();
+        // Silent no-op guards: reverting here causes Ritual's AsyncDelivery to interpret the
+        // delivery as failed and re-poke the precompile, which re-POSTs the same /leg/execute
+        // to the adapter. Every duplicate POST places another order on the venue, draining
+        // margin. Idempotency lives here: if the expected pending state is gone (already
+        // processed, or FSM moved on), we just return — leaving the adapter stateless.
+        if (tradingState != MultiLegTradingState.LEG_PENDING) return;
         if (pendingLegJobId == bytes32(0)) return;
         pendingLegJobId = bytes32(0);
 
@@ -612,15 +818,18 @@ contract MultiLegController is ReentrancyGuard {
             return;
         }
 
-        uint8 next = idx + 1;
-        if (next >= legCount) {
-            _setTradingState(MultiLegTradingState.VALUATION_PENDING);
-            _submitValuationSync();
-            return;
-        }
+        // A successful leg fill resets the LEG_FAILED auto-clear counter.
+        legFailCount = 0;
 
-        currentLegIndex = next;
-        _submitLeg(next);
+        uint8 next = idx + 1;
+        // Queue for next tick: can't submit another 0x0805 call here.
+        if (next >= legCount) {
+            _deferredKind = 3;
+            _deferredData = 0;
+        } else {
+            _deferredKind = 2;
+            _deferredData = next;
+        }
     }
 
     /// @notice Callback from adapter after it computes + pushes NAV to Base and reads Base reserve.
@@ -645,6 +854,16 @@ contract MultiLegController is ReentrancyGuard {
         if (tradingState == MultiLegTradingState.VALUATION_PENDING) {
             _setTradingState(MultiLegTradingState.READY);
             emit MultiLegCycleCompleted(currentCycleId);
+            // If this cycle was a partial unwind, queue a REFILL_RESERVE on Base (dispatched by
+            // next tick since we can't nest another precompile here) so the module pushes the
+            // now-returned USDC into the sleeve and reconciles externalDeposits.
+            if (_currentCycleIsUnwind && _unwindShortfallUsd > 0) {
+                _deferredKind = 4;
+                _deferredData = _unwindShortfallUsd;
+                // Note: _clearUnwindState() runs in _dispatchDeferred after REFILL_RESERVE emits.
+            } else {
+                _clearUnwindState();
+            }
             _setTradingState(MultiLegTradingState.IDLE);
         }
     }
@@ -662,31 +881,10 @@ contract MultiLegController is ReentrancyGuard {
     }
 
     // ─── Views ───────────────────────────────────────────────────────────────
-
-    function getLegConfig(uint8 i) external view returns (LegConfig memory) {
-        return legs[i];
-    }
-
-    function getLegBuffer(uint8 i) external view returns (LegBufferSnapshot memory) {
-        return bufferSnapshots[i];
-    }
-
-    function getLegFill(uint8 i) external view returns (LegFill memory) {
-        return currentCycleFills[i];
-    }
-
-    function effectiveWeightBps(uint8 i) external view returns (int16) {
-        return _effectiveWeight(i);
-    }
-
-    /// @notice Direction inferred from the effective weight's sign. Buy when weight > 0, Sell when < 0.
-    function effectiveSide(uint8 i) external view returns (Side) {
-        return _effectiveSide(i);
-    }
-
-    function effectiveCycleNotional() external view returns (uint256) {
-        return _effectiveCycleNotional();
-    }
+    // Struct getters removed — callers use autogenerated `legs(i)`, `bufferSnapshots(i)`,
+    // `currentCycleFills(i)` tuple getters. `effectiveWeightBps` / `effectiveSide` /
+    // `effectiveCycleNotional` removed — operator can reconstruct from `legs(i)` + `latestKelly(i)`
+    // + `maxCycleNotionalUsd`. Dropped to stay under EIP-170 runtime size limit.
 
     // ─── Internal ────────────────────────────────────────────────────────────
 
@@ -698,12 +896,66 @@ contract MultiLegController is ReentrancyGuard {
         return false;
     }
 
+    /// @notice Drain the deferred-submit queue set by a callback. Returns true if dispatched.
+    function _dispatchDeferred() internal returns (bool) {
+        uint8 kind = _deferredKind;
+        if (kind == 0) return false;
+        uint256 data = _deferredData;
+        _deferredKind = 0;
+        _deferredData = 0;
+        if (kind == 1) {
+            // Top-up for leg `data`: re-emit command (the callback already validated the need).
+            uint8 legIdx = uint8(data);
+            LegConfig memory cfg = legs[legIdx];
+            uint256 amount = cfg.bufferTargetUsd - bufferSnapshots[legIdx].bufferUsd;
+            // Dust floor — bps-of-deployable. Drain the deferred slot either way (cleared above)
+            // so we don't spin on the same tiny shortfall forever.
+            if (amount < DustFloorLib.floorUsd(lastNavUsd, lastBaseReserveUsd, minTopupBps)) return true;
+            CrossVenueCommandLib.CommandType cmd = _commandForLeg(legIdx);
+            _emitCommand(cmd, amount, cfg.destinationRef);
+            pendingTopUpLegIndex = legIdx;
+            pendingTopUpAmount = amount;
+            pendingTopUpCycle = currentCycleId == bytes32(0) ? _newCycleId() : currentCycleId;
+            _setFundingState(MultiLegFundingState.TOPUP_PENDING);
+        } else if (kind == 2) {
+            currentLegIndex = uint8(data);
+            _submitLeg(uint8(data));
+        } else if (kind == 3) {
+            _setTradingState(MultiLegTradingState.VALUATION_PENDING);
+            _submitValuationSync();
+        } else if (kind == 4) {
+            // Refill reserve after partial unwind: shrink-leg cycle already ran, adapter has
+            // CCTP'd the freed USDC back to the Base module. This command tells the module to
+            // push that USDC into the sleeve (sleeve.recordSettlement reconciles
+            // externalDeposits[strategyId]). `data` is the total realized USD. Dust floor
+            // bps-of-deployable suppresses sub-floor refill command round-trips.
+            if (data >= DustFloorLib.floorUsd(lastNavUsd, lastBaseReserveUsd, minRefillBps)) {
+                emit ReserveRefillReady(currentCycleId, data);
+                _emitCommand(CrossVenueCommandLib.CommandType.REFILL_RESERVE, data, reserveDestinationRef);
+            }
+            _setTradingState(MultiLegTradingState.IDLE);
+            _clearUnwindState();
+        }
+        return true;
+    }
+
+    /// @dev Reset per-cycle unwind flags + override targets so the next cycle uses regular sizing.
+    function _clearUnwindState() internal {
+        _currentCycleIsUnwind = false;
+        _unwindShortfallUsd = 0;
+        for (uint8 i; i < legCount; i++) _unwindTargetOverrideUsd[i] = 0;
+    }
+
     function _tryEmitTopUp() internal returns (bool acted) {
         if (fundingState == MultiLegFundingState.PAUSED || fundingState == MultiLegFundingState.STALE) return false;
+        uint256 topupFloor = DustFloorLib.floorUsd(lastNavUsd, lastBaseReserveUsd, minTopupBps);
         for (uint8 i; i < legCount; i++) {
             LegConfig memory cfg = legs[i];
             if (bufferSnapshots[i].bufferUsd < cfg.bufferMinUsd) {
                 uint256 amount = cfg.bufferTargetUsd - bufferSnapshots[i].bufferUsd;
+                // Dust floor: skip sub-floor top-ups so bridge + CCTP + gas fees don't exceed
+                // the amount being moved. `minTopupBps = 0` disables (floor=0).
+                if (amount < topupFloor) continue;
                 CrossVenueCommandLib.CommandType cmd = _commandForLeg(i);
                 _emitCommand(cmd, amount, cfg.destinationRef);
                 pendingTopUpLegIndex = i;
@@ -727,7 +979,10 @@ contract MultiLegController is ReentrancyGuard {
     function _emitCommand(CrossVenueCommandLib.CommandType cmd, uint256 amount, bytes32 destinationRef) internal {
         uint256 nonce = nextNonce++;
         bytes32 cycleId = currentCycleId == bytes32(0) ? _newCycleId() : currentCycleId;
-        uint256 deadline = block.timestamp + envelopeTtlSeconds;
+        // Ritual `block.timestamp` is in MILLISECONDS; Base validates `env.deadline` against
+        // its own SECONDS-scale `block.timestamp`. Convert to seconds before adding TTL so
+        // Base's expiry check is meaningful. envelopeTtlSeconds is in seconds (per its name).
+        uint256 deadline = (block.timestamp / 1000) + envelopeTtlSeconds;
         bytes32 payloadHash = keccak256(abi.encode(cmd, amount, destinationRef));
         bytes32 ritualTxHash = blockhash(block.number - 1);
         emit CommandReady(
@@ -788,36 +1043,20 @@ contract MultiLegController is ReentrancyGuard {
         }
         (bytes32 baseTxHash, bool success,) = abi.decode(body, (bytes32, bool, string));
         emit BaseCommandSubmitted(lastSubmittedCommandNonce, baseTxHash, success);
+
+        // Adapter blocks inline through CCTP settle + venue post-step before returning success,
+        // so `success == true` here means funding is confirmed on the venue side. Clear the
+        // TOPUP_PENDING gate so the next tick can advance the FSM (next top-up / cycle start).
+        // This replaces the separate off-chain `ingestFundingReceipt` hop.
+        if (success && fundingState == MultiLegFundingState.TOPUP_PENDING) {
+            pendingTopUpCycle = bytes32(0);
+            pendingTopUpAmount = 0;
+            _setFundingState(MultiLegFundingState.OK);
+        }
     }
 
-    /// @notice Callback from adapter after it closes all open legs and reports realized USDC.
-    ///         Body: abi.encode(uint256 realizedAssetsUsd).
-    function onUnwindResult(bytes32 /* jobId */, bytes calldata result) external onlyAsyncDelivery nonReentrant {
-        if (tradingState != MultiLegTradingState.UNWIND_PENDING) revert InvalidState();
-        if (pendingUnwindJobId == bytes32(0)) return;
-        pendingUnwindJobId = bytes32(0);
-
-        (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
-        if (statusCode < 200 || statusCode >= 300 || bytes(errorMessage).length > 0) {
-            _setTradingState(MultiLegTradingState.RECOVERY_REQUIRED);
-            emit MultiLegRecoveryMarked(currentCycleId, 0, "unwind failed at adapter");
-            return;
-        }
-
-        uint256 realizedUsd = abi.decode(body, (uint256));
-        if (realizedUsd == 0) {
-            _setTradingState(MultiLegTradingState.IDLE);
-            return;
-        }
-        emit ReserveRefillReady(currentCycleId, realizedUsd);
-        _emitCommand(CrossVenueCommandLib.CommandType.REFILL_RESERVE, realizedUsd, reserveDestinationRef);
-
-        for (uint8 i; i < legCount; i++) {
-            delete currentCycleFills[i];
-        }
-        pendingUnwindTargetUsd = 0;
-        _setTradingState(MultiLegTradingState.IDLE);
-    }
+    // [removed] onUnwindResult: adapter `/unwind` protocol retired. Partial unwinds run through
+    // `requestPartialUnwind` → per-leg `_submitLeg` delta rebalance → `onLegResult` normal path.
 
     function _tryStartCycle() internal {
         if (tradingState != MultiLegTradingState.IDLE) return;
@@ -866,14 +1105,32 @@ contract MultiLegController is ReentrancyGuard {
         emit MultiLegLegSubmitted(currentCycleId, legIndex, jobId, notional);
     }
 
+    /// @notice Delta-managed sizing:
+    ///           • Reference leg (`referenceLegIndex == REF_LEG_SENTINEL`):
+    ///                notional = cycleTargetUsd × |w|/10000
+    ///           • Hedge leg: notional = refFill × |w|/10000 × |β|/10000
+    ///         This is the canonical framework — every hedge leg ties its size to its reference
+    ///         via the two-parameter (w, β) decomposition. Classic DN is w=1, β=1. Partial hedge
+    ///         is w<1; cross-instrument hedge is β≠1.
     function _legNotional(uint8 legIndex) internal view returns (uint256) {
+        // Partial-unwind override: gated by the cycle-level unwind flag (NOT the value), so an
+        // override of 0 means "target zero" (full close) during a full unwind instead of being
+        // treated as "no override set."
+        if (_currentCycleIsUnwind) {
+            return _unwindTargetOverrideUsd[legIndex];
+        }
         LegConfig memory cfg = legs[legIndex];
         uint256 absW = _absWeight(legIndex);
-        if (cfg.sizeFromPrevFill && legIndex > 0) {
-            uint256 prev = currentCycleFills[legIndex - 1].filledNotionalUsd;
-            return (prev * absW) / 10_000;
+        if (cfg.referenceLegIndex == REF_LEG_SENTINEL) {
+            return (currentCycleTargetUsd * absW) / 10_000;
         }
-        return (currentCycleTargetUsd * absW) / 10_000;
+        // Hedge leg: size off the reference leg's reported post-rebalance fill.
+        // Magnitude uses |β|; sign combines with sign(weight) at order-side inference in adapter.
+        require(cfg.referenceLegIndex < legCount, "bad refLeg");
+        uint256 refFill = currentCycleFills[cfg.referenceLegIndex].filledNotionalUsd;
+        int16 b = cfg.betaBps;
+        uint256 absBeta = b < 0 ? uint256(uint16(-b)) : uint256(uint16(b));
+        return (refFill * absW * absBeta) / (10_000 * 10_000);
     }
 
     function _effectiveWeight(uint8 legIndex) internal view returns (int16) {
@@ -881,12 +1138,9 @@ contract MultiLegController is ReentrancyGuard {
         if (useKelly && latestKelly.validUntil >= block.timestamp) {
             int16 w = latestKelly.targetWeightBps[legIndex];
             if (w != 0) {
-                // Clamp Kelly override to the per-leg static cap. Operator retains a hard ceiling
-                // so a compromised / buggy Kelly signer can't exceed risk bounds.
-                if (cfg.venue == ML_VENUE_HL_SPOT && w < 0) {
-                    // Spot legs can't go negative even via Kelly — fall back to static.
-                    return cfg.weightBps;
-                }
+                // Spot legs can't go negative even under Kelly — fall back to static.
+                if (cfg.venue == ML_VENUE_HL_SPOT && w < 0) return cfg.weightBps;
+                // Clamp Kelly override to the static cap — operator's hard ceiling on risk.
                 if (cfg.maxAbsWeightBps > 0) {
                     int16 cap = int16(cfg.maxAbsWeightBps);
                     if (w > cap) return cap;
@@ -904,14 +1158,25 @@ contract MultiLegController is ReentrancyGuard {
     }
 
     function _effectiveSide(uint8 legIndex) internal view returns (Side) {
-        return _effectiveWeight(legIndex) < 0 ? Side.Sell : Side.Buy;
+        LegConfig memory cfg = legs[legIndex];
+        int16 w = _effectiveWeight(legIndex);
+        // Reference leg: direction from sign of weight alone (+ = buy/long, − = sell/short).
+        if (cfg.referenceLegIndex == REF_LEG_SENTINEL) {
+            return w < 0 ? Side.Sell : Side.Buy;
+        }
+        // Hedge leg: direction from sign(w) × sign(β). Two anti-correlated negatives (e.g. PM
+        // YES ref with weight +, NO hedge with w=+ and β=−) yield buy on NO — which is the
+        // correct hedge. Same side × positive β on HL spot+perp hedge yields sell perp for a
+        // long spot ref.
+        int16 b = cfg.betaBps;
+        int256 combined = int256(w) * int256(b);
+        return combined < 0 ? Side.Sell : Side.Buy;
     }
 
     function _effectiveCycleNotional() internal view returns (uint256) {
         if (useKelly && latestKelly.validUntil >= block.timestamp && latestKelly.totalTargetNotional > 0) {
             uint256 k = latestKelly.totalTargetNotional;
-            if (k > maxCycleNotionalUsd) return maxCycleNotionalUsd;
-            return k;
+            return k > maxCycleNotionalUsd ? maxCycleNotionalUsd : k;
         }
         return maxCycleNotionalUsd;
     }
@@ -923,16 +1188,6 @@ contract MultiLegController is ReentrancyGuard {
             _submitCtx(), "/buffers", abi.encode(strategyId), this.onBufferSyncResult.selector
         );
         emit MultiLegBufferSyncSubmitted(jobId);
-    }
-
-    function _submitUnwind(uint256 targetAssetsUsd) internal {
-        pendingUnwindJobId = keccak256(abi.encodePacked(currentCycleId, "ml-unwind", block.number));
-        MultiLegSubmitLib.dispatch(
-            _submitCtx(),
-            "/unwind",
-            abi.encode(currentCycleId, targetAssetsUsd),
-            this.onUnwindResult.selector
-        );
     }
 
     function _submitValuationSync() internal {

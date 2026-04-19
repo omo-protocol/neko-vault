@@ -64,19 +64,44 @@ export interface SettlePmResult {
 
 /// @notice After Base burned USDC for PM, wait for attestation, mint on Polygon, and ensure the PM
 ///         wallet's CTF Exchange allowance covers `minAllowance`.
+///         Idempotent: if the mint already landed externally (e.g. prior attempt, manual receive),
+///         we skip the receive step and still ensure allowance. Useful when replaying failed
+///         settlements from the persistent queue.
 export async function settlePmInbound(
   pmWalletKey: Hex,
   p: SettleParams & { minAllowance: bigint; usdcToken?: Address; exchange?: Address },
 ): Promise<SettlePmResult> {
   const basePub = createPublicClient({ chain: base, transport: http() });
-  const message = await extractMessageFromBurnTx(basePub, p.baseBurnTxHash);
-  const att = await fetchAttestation(DOMAIN.BASE, message);
-
   const { pub: polyPub, wallet: polyWallet } = clients(polygon, pmWalletKey);
   const pmAccount = polyWallet.account!.address as Address;
+  const usdc = p.usdcToken ?? POLYMARKET.USDC_E;
 
-  const receiveHash = await receiveCctp(polyWallet, polyPub, att);
-  await waitForPmUsdcBalance(polyPub, p.usdcToken ?? POLYMARKET.USDC_E, pmAccount, p.amount);
+  const preBal = (await polyPub.readContract({
+    address: usdc,
+    abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+      inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+    functionName: "balanceOf",
+    args: [pmAccount],
+  })) as bigint;
+
+  let receiveHash: Hex = ("0x" + "0".repeat(64)) as Hex;
+  let message: Hex = ("0x" + "0".repeat(64)) as Hex;
+  if (preBal >= p.amount) {
+    // Mint already landed — skip attestation fetch + receive to keep replay idempotent.
+    console.log(`[adapter] settlePmInbound: mint already on ${pmAccount} (bal=${preBal}), skipping receive`);
+  } else {
+    message = await extractMessageFromBurnTx(basePub, p.baseBurnTxHash);
+    const att = await fetchAttestation(DOMAIN.BASE, message);
+    try {
+      receiveHash = await receiveCctp(polyWallet, polyPub, att);
+    } catch (err) {
+      // If the nonce was already used (externally-receive'd), fall through to balance check.
+      const msg = (err as Error)?.message ?? String(err);
+      if (!/already used|NonceAlreadyUsed|already processed/i.test(msg)) throw err;
+      console.log(`[adapter] settlePmInbound: receive reverted (nonce used), continuing: ${msg}`);
+    }
+    await waitForPmUsdcBalance(polyPub, usdc, pmAccount, p.amount);
+  }
 
   const approvalHash = await ensurePmApproval(
     polyWallet,
@@ -107,14 +132,33 @@ export async function settleHlInbound(
   p: SettleParams & { destinationDex?: number },
 ): Promise<SettleHlResult> {
   const basePub = createPublicClient({ chain: base, transport: http() });
-  const message = await extractMessageFromBurnTx(basePub, p.baseBurnTxHash);
-  const att = await fetchAttestation(DOMAIN.BASE, message);
-
   const { pub: hlPub, wallet: hlWallet } = clients(hyperevm, hlWalletKey);
   const hlAccount = hlWallet.account!.address as Address;
 
-  const receiveHash = await receiveCctp(hlWallet, hlPub, att);
-  await waitHlUsdc(hlPub, hlAccount, p.amount);
+  const preBal = (await hlPub.readContract({
+    address: HL.USDC,
+    abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+      inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+    functionName: "balanceOf",
+    args: [hlAccount],
+  })) as bigint;
+
+  let receiveHash: Hex = ("0x" + "0".repeat(64)) as Hex;
+  let message: Hex = ("0x" + "0".repeat(64)) as Hex;
+  if (preBal >= p.amount) {
+    console.log(`[adapter] settleHlInbound: mint already on ${hlAccount} (bal=${preBal}), skipping receive`);
+  } else {
+    message = await extractMessageFromBurnTx(basePub, p.baseBurnTxHash);
+    const att = await fetchAttestation(DOMAIN.BASE, message);
+    try {
+      receiveHash = await receiveCctp(hlWallet, hlPub, att);
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err);
+      if (!/already used|NonceAlreadyUsed|already processed/i.test(msg)) throw err;
+      console.log(`[adapter] settleHlInbound: receive reverted (nonce used), continuing: ${msg}`);
+    }
+    await waitHlUsdc(hlPub, hlAccount, p.amount);
+  }
 
   const { approveHash, depositHash } = await forwardToHyperCore(hlWallet, hlPub, {
     amount: p.amount,
@@ -156,26 +200,28 @@ export async function unwindPmOutbound(
   return { burnTxHash: burnHash, baseReceiveTxHash: receiveHash };
 }
 
-/// @notice HL wallet (HyperEVM) → Base module. Assumes funds have already been withdrawn from
-///         HyperCore back to the HL wallet's HyperEVM balance (done via HL API `usdClassTransfer`
-///         or `withdraw3`). Then burns USDC on HyperEVM → mints on Base.
+/// @notice HL → Base unwind, one-step via HyperCore's `sendToEvmWithData` action. Debits
+///         HyperCore perp (or spot) balance, routes through HyperEVM, burns via CCTP with
+///         automatic forwarding, mints on Base to `moduleAddress`. No separate `withdraw3` +
+///         CCTP burn steps required.
 export async function unwindHlOutbound(
   hlWalletKey: Hex,
   moduleAddress: Address,
   amount: bigint,
 ): Promise<UnwindResult> {
-  const { pub: hlPub, wallet: hlWallet } = clients(hyperevm, hlWalletKey);
-  const { pub: basePub, wallet: baseRelayer } = clients(base);
-
-  const { hash: burnHash, message } = await depositForBurn(hlWallet, hlPub, {
-    amount,
-    destinationDomain: DOMAIN.BASE,
-    mintRecipient: moduleAddress,
-    usdc: HL.USDC,
+  const { sendHyperCoreToEvm } = await import("./hypercore-withdraw.js");
+  // amount is micro-USDC (6 decimals); sendToEvmWithData expects a human-readable string.
+  const humanAmount = (Number(amount) / 1_000_000).toString();
+  await sendHyperCoreToEvm(hlWalletKey, {
+    amount: humanAmount,
+    destinationRecipient: moduleAddress,
+    destinationChainId: DOMAIN.BASE, // CCTP domain 6 = Base
+    sourceDex: "", // perp balance (default)
   });
-  const att = await fetchAttestation(DOMAIN.HYPEREVM, message);
-  const receiveHash = await receiveCctp(baseRelayer, basePub, att);
-  return { burnTxHash: burnHash, baseReceiveTxHash: receiveHash };
+  // Automatic forwarding delivers the mint without us needing to call receiveMessage.
+  // Circle's forwarder will mint to moduleAddress on Base once attestation finalizes.
+  const zero32: Hex = ("0x" + "0".repeat(64)) as Hex;
+  return { burnTxHash: zero32, baseReceiveTxHash: zero32 };
 }
 
 export { CCTP_V2, DOMAIN, POLYMARKET, HL };

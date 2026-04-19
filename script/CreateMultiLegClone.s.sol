@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import "forge-std/Script.sol";
 import {ArchetypeFactory} from "../src/factories/ArchetypeFactory.sol";
 import {MultiLegController} from "../src/controllers/cross_venue/MultiLegController.sol";
-import {LegConfig, ML_VENUE_PM, ML_VENUE_HL_PERP} from "../src/controllers/cross_venue/MultiLegTypes.sol";
+import {LegConfig, ML_VENUE_PM, ML_VENUE_HL_PERP, REF_LEG_SENTINEL} from "../src/controllers/cross_venue/MultiLegTypes.sol";
 import {MarginMode} from "../src/controllers/cross_venue/SharedVenueTypes.sol";
 
 /// @notice Creates a MultiLegController clone via ArchetypeFactory and (optionally) auto-schedules
@@ -56,28 +56,43 @@ contract CreateMultiLegClone is Script {
         uint256 maxFeePerGas = vm.envOr("SCHEDULE_MAX_FEE", uint256(1_000_000_000));
         uint32 lockBlocks = uint32(vm.envOr("SCHEDULE_LOCK", uint256(50_000)));
 
+        uint256 pmBufferTarget = vm.envOr("PM_BUFFER_TARGET", uint256(100e6));
+        uint256 pmBufferMin = vm.envOr("PM_BUFFER_MIN", uint256(10e6));
+        uint256 hlBufferTarget = vm.envOr("HL_BUFFER_TARGET", uint256(100e6));
+        uint256 hlBufferMin = vm.envOr("HL_BUFFER_MIN", uint256(10e6));
+
+        // Framework: leg 0 is the reference (PM long — takes the exposure), leg 1 is a hedge
+        // against leg 0 with w=1.0 (full hedge) and β=1.0 (same-asset hedge ratio). Operator
+        // overrides via env to run partial hedges or cross-instrument betas.
         LegConfig[] memory legs = new LegConfig[](2);
         legs[0] = LegConfig({
             venue: ML_VENUE_PM,
             marketRef: pmMarketRef,
-            weightBps: int16(5000),
+            weightBps: int16(int256(vm.envOr("REF_WEIGHT_BPS", uint256(5000)))),
             maxAbsWeightBps: 10000,
-            sizeFromPrevFill: false,
+            referenceLegIndex: REF_LEG_SENTINEL,
+            betaBps: int16(0),                   // ignored for reference legs
+            driftToleranceBps: 0,                // ignored for reference legs
             maxSlippageBps: 50,
-            bufferTargetUsd: 100e6,
-            bufferMinUsd: 10e6,
+            bufferTargetUsd: pmBufferTarget,
+            bufferMinUsd: pmBufferMin,
             destinationRef: keccak256("dest:pm"),
             marginMode: MarginMode.Isolated
         });
         legs[1] = LegConfig({
             venue: ML_VENUE_HL_PERP,
-            marketRef: keccak256("ETH"),
-            weightBps: int16(-10000),
+            marketRef: vm.envOr("HL_MARKET_REF", keccak256("ETH")),
+            weightBps: int16(int256(vm.envOr("HEDGE_WEIGHT_BPS", uint256(10000)))),
             maxAbsWeightBps: 10000,
-            sizeFromPrevFill: true,
+            referenceLegIndex: 0,
+            // HEDGE_BETA_BPS: signed; default +10000 (β=+1.0). For anti-correlated hedges
+            // like PM YES vs PM NO set this to -10000 (β=-1.0).
+            betaBps: int16(int256(vm.envOr("HEDGE_BETA_BPS", uint256(10000)))),
+            // Auto-rebalance when |w_eff - w_target| drifts more than 500 bps (5%) by default.
+            driftToleranceBps: uint16(vm.envOr("HEDGE_DRIFT_TOL_BPS", uint256(500))),
             maxSlippageBps: 30,
-            bufferTargetUsd: 100e6,
-            bufferMinUsd: 10e6,
+            bufferTargetUsd: hlBufferTarget,
+            bufferMinUsd: hlBufferMin,
             destinationRef: keccak256("dest:hl"),
             marginMode: MarginMode.Isolated
         });
@@ -91,10 +106,14 @@ contract CreateMultiLegClone is Script {
             adapterUrl: adapterUrl,
             executor: address(0),
             legs: legs,
-            bufferStalenessSeconds: 3600,
-            minCycleNotionalUsd: 1e6,
-            maxCycleNotionalUsd: 100e6,
-            envelopeTtlSeconds: 3600,
+            // bufferStalenessSeconds is misleadingly named — Ritual block.timestamp is in MS,
+            // so this field is also in ms. 3_600_000 = 1 hour staleness window.
+            bufferStalenessSeconds: vm.envOr("BUFFER_STALENESS_MS", uint256(3_600_000)),
+            minCycleNotionalUsd: vm.envOr("MIN_CYCLE_NOTIONAL", uint256(1e6)),
+            maxCycleNotionalUsd: vm.envOr("MAX_CYCLE_NOTIONAL", uint256(100e6)),
+            // envelopeTtlSeconds is in SECONDS — used to compute Base-side deadline (Base
+            // block.timestamp is sec). Controller divides Ritual block.timestamp by 1000 first.
+            envelopeTtlSeconds: vm.envOr("ENVELOPE_TTL_SEC", uint256(3600)),
             kellySigner: address(0),
             reserveDestinationRef: keccak256("dest:refill")
         });

@@ -30,7 +30,7 @@ library MultiLegSubmitLib {
         RitualHttpLib.submit(
             RitualHttpLib.HttpRequest({
                 url: string(abi.encodePacked(ctx.adapterUrl, urlPath)),
-                payload: payload,
+                payload: RitualHttpLib.toHexAscii(payload),
                 executor: ctx.executor,
                 encryptedSecrets: ctx.encryptedSecrets,
                 secretSignatures: ctx.secretSignatures,

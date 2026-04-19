@@ -447,7 +447,8 @@ contract PtLoopController is ReentrancyGuard {
     function _emitCommand(CrossVenueCommandLib.CommandType cmd, uint256 amount, bytes32 destinationRef) internal {
         uint256 nonce = nextNonce++;
         bytes32 cycleId = currentCycleId == bytes32(0) ? _newCycleId() : currentCycleId;
-        uint256 deadline = block.timestamp + cfg.envelopeTtlSeconds;
+        // Ritual block.timestamp is ms; Base validates deadline in seconds. Convert before TTL.
+        uint256 deadline = (block.timestamp / 1000) + cfg.envelopeTtlSeconds;
         bytes32 payloadHash = keccak256(abi.encode(cmd, amount, destinationRef));
         bytes32 ritualTxHash = blockhash(block.number - 1);
         emit CommandReady(

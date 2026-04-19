@@ -65,7 +65,10 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         }
 
         ids = new bytes32[](1);
-        ids[0] = strategyId;
+        // Cap id follows Morpho V2 convention: keccak256(liquidityData). Lets the vault owner
+        // cap allocations via `increaseAbsoluteCap(liquidityData, cap)` without needing the
+        // strategyId preimage.
+        ids[0] = keccak256(data);
         change = int256(assets);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);
@@ -142,7 +145,7 @@ contract UniversalAdapterEscrow is UniversalAdapterEscrowValuation {
         }
 
         ids = new bytes32[](1);
-        ids[0] = strategyId;
+        ids[0] = keccak256(data);
         change = -int256(allocationDecrease);
 
         emit AllocationUpdated(strategyId, allocations[strategyId], change);

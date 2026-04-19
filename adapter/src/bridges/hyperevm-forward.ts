@@ -15,8 +15,14 @@ import {
 } from "viem";
 
 export const HL = {
-  /// HyperEVM mainnet CoreDepositWallet — confirm against Circle/HL docs before prod.
-  CORE_DEPOSIT_WALLET: "0x0B80659a4076E9E93C7DbE0f10675A16a3e5C206" as Address,
+  /// HyperEVM MAINNET CoreDepositWallet — Circle-deployed managed bridge for HyperEVM→HyperCore.
+  /// Per Circle docs: https://developers.circle.com/cctp/references/coredepositwallet-contract-interface
+  /// Historical gotcha: prior value `0x0B80659a4076E9E93C7DbE0f10675A16a3e5C206` was TESTNET and
+  /// has no deployed code on mainnet — calls were reverting silently, stranding CCTP-minted USDC
+  /// on HyperEVM. The mainnet address below is verified on-chain (hyperevmscan.io).
+  CORE_DEPOSIT_WALLET: "0x6B9E773128f453f5c2C60935Ee2DE2CBc5390A24" as Address,
+  /// Circle native CCTP USDC on HyperEVM (what `TokenMessengerV2.depositForBurn` mints to us
+  /// when we burn on Base with destinationDomain=19). NOT the same as the HL-linked spot USDC.
   USDC: "0xb88339CB7199b77E23DB6E890353E22632Ba630f" as Address,
   DEST_PERPS: 0,
   DEST_SPOT: 4294967295,

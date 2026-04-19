@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import "forge-std/Script.sol";
 import {ArchetypeFactory} from "../src/factories/ArchetypeFactory.sol";
 import {MultiLegController} from "../src/controllers/cross_venue/MultiLegController.sol";
-import {LegConfig, ML_VENUE_PM, ML_VENUE_HL_PERP} from "../src/controllers/cross_venue/MultiLegTypes.sol";
+import {LegConfig, ML_VENUE_PM, ML_VENUE_HL_PERP, REF_LEG_SENTINEL} from "../src/controllers/cross_venue/MultiLegTypes.sol";
 import {MarginMode} from "../src/controllers/cross_venue/SharedVenueTypes.sol";
 
 /// @notice Demo-sized PM-long + HL-perp-short hedge clone for ~$20 USDC E2E testing.
@@ -41,24 +41,28 @@ contract CreateSmallHedgeClone is Script {
         legs[0] = LegConfig({
             venue: ML_VENUE_PM,
             marketRef: pmMarketRef,
-            weightBps: int16(5000),     // +50% of cycle → buy PM YES
+            weightBps: int16(5000),
             maxAbsWeightBps: 10000,
-            sizeFromPrevFill: false,
-            maxSlippageBps: 100,         // wider for thin markets
-            bufferTargetUsd: 5_000_000,  // $5
-            bufferMinUsd:    1_000_000,  // $1
+            referenceLegIndex: REF_LEG_SENTINEL,
+            betaBps: int16(0),
+            driftToleranceBps: 0,
+            maxSlippageBps: 100,
+            bufferTargetUsd: 5_000_000,
+            bufferMinUsd:    1_000_000,
             destinationRef: keccak256("dest:pm"),
             marginMode: MarginMode.Isolated
         });
         legs[1] = LegConfig({
             venue: ML_VENUE_HL_PERP,
             marketRef: keccak256("ETH"),
-            weightBps: int16(-10000),    // -100% of PM fill → short hedge
+            weightBps: int16(10000),     // full hedge of leg 0, β sign carries direction
             maxAbsWeightBps: 10000,
-            sizeFromPrevFill: true,
+            referenceLegIndex: 0,
+            betaBps: int16(10000),       // β = +1.0
+            driftToleranceBps: 500,       // 5% drift
             maxSlippageBps: 50,
-            bufferTargetUsd: 5_000_000,  // $5
-            bufferMinUsd:    1_000_000,  // $1
+            bufferTargetUsd: 5_000_000,
+            bufferMinUsd:    1_000_000,
             destinationRef: keccak256("dest:hl"),
             marginMode: MarginMode.Isolated
         });

@@ -13,6 +13,22 @@ import {RitualPrecompiles} from "../../interfaces/ritual/IRitualPrecompiles.sol"
 ///         passes them in per request. `dkmsKeyIndex=0` is used throughout — dKMS is
 ///         not required; access delegation is handled via `SecretsAccessControl`.
 library RitualHttpLib {
+    /// @notice Convert arbitrary bytes to ASCII "0x<hex>" (length 2 + 2*N). TEE serializes
+    ///         HTTP bodies as UTF-8 strings, which corrupts raw binary bytes (non-ASCII bytes
+    ///         become U+FFFD replacement chars). Wrap request payloads in hex so the round trip
+    ///         is lossless; the adapter decodes hex → bytes → abi.decode.
+    function toHexAscii(bytes memory input) internal pure returns (bytes memory) {
+        bytes memory alpha = "0123456789abcdef";
+        bytes memory out = new bytes(2 + input.length * 2);
+        out[0] = "0";
+        out[1] = "x";
+        for (uint256 i; i < input.length; i++) {
+            out[2 + i * 2] = alpha[uint8(input[i]) >> 4];
+            out[3 + i * 2] = alpha[uint8(input[i]) & 0x0f];
+        }
+        return out;
+    }
+
     struct Delivery {
         address target;
         bytes4 callback;

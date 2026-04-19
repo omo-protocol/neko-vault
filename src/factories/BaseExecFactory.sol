@@ -28,6 +28,9 @@ contract BaseExecFactory {
         address asset;
         address vault;
         address sleeve;
+        /// @notice Strategy id that the module will ingest settlement for (passed to
+        ///         `setSleeveAndStrategyId` before ownership transfers to vaultOwner).
+        bytes32 strategyId;
         address cctpTokenMessenger; // Circle CCTP V2 TokenMessenger on this chain
         address[] gatewaySigners;
         uint256 gatewayThreshold;
@@ -63,11 +66,15 @@ contract BaseExecFactory {
         cctpSender.setAuthorizedCaller(d.module, true);
         d.cctpSender = address(cctpSender);
 
-        // Wire module: gateway, vault, cctpSender, refillSource (module = CCTP inbox for returns).
+        // Wire module: gateway, vault, cctpSender, refillSource (module = CCTP inbox for returns),
+        // and sleeve+strategyId binding for `refillReserve` → `sleeve.recordSettlement`.
         module.setGateway(d.gateway);
         module.setVault(p.vault);
         module.setCctpSender(d.cctpSender);
         module.setRefillSource(d.module);
+        if (p.strategyId != bytes32(0)) {
+            module.setSleeveAndStrategyId(p.sleeve, p.strategyId);
+        }
 
         // Gateway: signers + threshold + caps.
         uint256 sl = p.gatewaySigners.length;

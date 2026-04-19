@@ -9,7 +9,6 @@ import {
   encodeUnwindResult,
 } from "./codec.js";
 import { BaseClient } from "./base-client.js";
-import { MockVenueAdapter } from "./venues/mock.js";
 import { HyperliquidAdapter, V_HL_PERP as HL_PERP, V_HL_SPOT as HL_SPOT, type HlMarketRegistry } from "./venues/hyperliquid.js";
 import { PolymarketAdapter, V_POLYMARKET as PM_VENUE, type PmMarketRegistry } from "./venues/polymarket.js";
 import type { VenueAdapter } from "./venues/types.js";
@@ -67,21 +66,15 @@ export interface AdapterServerOptions {
 export function buildServer(opts: AdapterServerOptions) {
   const app = Fastify({ logger: true });
 
+  if (!opts.hlMarkets) {
+    throw new Error("Adapter requires HL market registry — auto-load from API failed and no override provided.");
+  }
   const venues: Map<Hex, VenueAdapter> =
     opts.venues ??
     new Map<Hex, VenueAdapter>([
-      [
-        V_HL_PERP,
-        opts.hlMarkets ? new HyperliquidAdapter(V_HL_PERP, opts.hlMarkets) : new MockVenueAdapter(V_HL_PERP),
-      ],
-      [
-        V_HL_SPOT,
-        opts.hlMarkets ? new HyperliquidAdapter(V_HL_SPOT, opts.hlMarkets) : new MockVenueAdapter(V_HL_SPOT),
-      ],
-      [
-        V_POLYMARKET,
-        opts.pmMarkets ? new PolymarketAdapter(opts.pmMarkets) : new MockVenueAdapter(V_POLYMARKET),
-      ],
+      [V_HL_PERP, new HyperliquidAdapter(V_HL_PERP, opts.hlMarkets)],
+      [V_HL_SPOT, new HyperliquidAdapter(V_HL_SPOT, opts.hlMarkets)],
+      [V_POLYMARKET, new PolymarketAdapter(opts.pmMarkets ?? {})],
     ]);
 
   // TEE executors send mismatched Content-Length headers — strip them to avoid Fastify 400s.
@@ -111,6 +104,15 @@ export function buildServer(opts: AdapterServerOptions) {
     return taskId;
   }
 
+  // Idempotency is handled two ways without any adapter-side state:
+  //   1. Controller (`MultiLegController.onLegResult`): silent no-op if `tradingState` drifted
+  //      or `pendingLegJobId` is already cleared → AsyncDelivery won't retry the precompile,
+  //      which means no duplicate /leg/execute POSTs from that path.
+  //   2. Adapter venue methods: delta-based rebalance — read current venue position, place
+  //      only the net delta (target − current). Second call with same intent finds position
+  //      already at target → returns a synthetic Filled receipt without placing a new order.
+  // Result: stateless adapter, no dedup cache needed.
+
   function credentialsFromHeaders(headers: Record<string, string | string[] | undefined>): VenueCredentials {
     const h = (k: string) => {
       const v = headers[k];
@@ -137,17 +139,20 @@ export function buildServer(opts: AdapterServerOptions) {
   // ─── POST /leg/execute ─── submit a trade intent for a single leg
   app.post("/leg/execute", async (req, reply) => {
     try {
-      const intent = decodeExecutionIntent(rawBodyToHex(req));
+      const hex = rawBodyToHex(req);
+      req.log.info({ bodyLen: hex.length, first64: hex.slice(0, 66), last64: hex.slice(-64) }, "leg-execute body");
+      const intent = decodeExecutionIntent(hex);
       const creds = credentialsFromHeaders(req.headers);
       const adapter = venues.get(intent.venue);
       const result: NormalizedExecutionReceipt =
         adapter == null
           ? failReceipt(intent)
-          : await adapter.execute(intent, creds);
+          : await adapter.execute(intent, creds, { moduleAddress: opts.module });
       return reply
         .type("application/json")
         .send((() => { const __r = encodeExecutionReceipt(result); const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
+      req.log.error({ err: String(err), stack: (err as Error)?.stack }, "leg-execute failed");
       return reply.status(400).send({ error: String(err) });
     }
   });
@@ -177,7 +182,9 @@ export function buildServer(opts: AdapterServerOptions) {
   // ─── POST /base/execute-command ─── TEE signs + submits envelope on Base
   app.post("/base/execute-command", async (req, reply) => {
     try {
-      const env = decodeCommandEnvelope(rawBodyToHex(req));
+      const hex = rawBodyToHex(req);
+      req.log.info({ bodyLen: hex.length, first64: hex.slice(0, 66), last64: hex.slice(-64) }, "base-cmd body");
+      const env = decodeCommandEnvelope(hex);
       const creds = credentialsFromHeaders(req.headers);
       if (creds.baseSignerKey == null) {
         return reply.status(401).send({ error: "missing x-base-signer-key" });
@@ -187,19 +194,26 @@ export function buildServer(opts: AdapterServerOptions) {
         opts.baseClient.walletClient.chain!.id,
         creds.baseSignerKey
       );
-      const { txHash, success } = await baseClient.submitCommandEnvelope(
+      const baseRes = await baseClient.submitCommandEnvelope(
         opts.gateway,
         env,
         opts.gatewayName,
         opts.gatewayVersion
       );
+      const { txHash, success } = baseRes;
+      if (!success) {
+        req.log.error({ txHash, errorMessage: baseRes.errorMessage, env }, "executeCommand failed");
+      }
 
-      // After a successful top-up command, drive the inbound CCTP settlement:
+      // After a successful top-up command, drive the inbound CCTP settlement INLINE.
       //   Base burn (just happened) → Circle attestation → venue-chain receive
       //   → (HL only) CoreDepositWallet.deposit to credit HyperCore
       //   → (PM only) ensure CTF Exchange allowance
-      // TOPUP_PM_BUFFER and TOPUP_HL_BUFFER trigger this. REFILL_RESERVE / PAUSE do not
-      // (REFILL mints USDC back to the module on Base, no venue-side action; PAUSE is a noop).
+      // With CCTP V2 Fast Transfer (maxFee ≥ 10000, finalityThreshold = 1000), end-to-end
+      // is typically 60–90 s — inside Ritual's HTTP precompile TTL (30 blocks ≈ 150 s).
+      // Blocking here lets the controller's `onBaseCommandSubmitted` callback encode
+      // "base success == funding confirmed", so fundingState can flip TOPUP_PENDING → OK
+      // without a separate off-chain receipt hop.
       if (success) {
         const cmdType = Number((env as any).commandType) as CommandType;
         const amount = BigInt((env as any).amount);
@@ -217,11 +231,14 @@ export function buildServer(opts: AdapterServerOptions) {
             });
           }
         } catch (settleErr) {
-          // We still return the Base tx hash as success — the burn landed on-chain. Inbound
-          // settlement failure is logged for operator intervention (attestation timeout etc).
-          // The controller's fundingState will stay TOPUP_PENDING until a subsequent
-          // ingestFundingReceipt is posted.
-          console.error(`[adapter] CCTP settlement failed for cmd=${cmdType}: ${settleErr}`);
+          // Settlement failed (attestation slow, RPC glitch, etc). We still return success for
+          // the Base tx — the burn landed — but surface the failure so the controller's callback
+          // sees it. The controller should stay in TOPUP_PENDING until operator retries.
+          req.log.error({ err: String(settleErr) }, "CCTP inbound settlement failed");
+          const failBody = encodeBaseSubmitResult(txHash, false);
+          return reply
+            .type("application/json")
+            .send((() => { const __r = failBody; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
         }
       }
 
@@ -231,6 +248,7 @@ export function buildServer(opts: AdapterServerOptions) {
         .type("application/json")
         .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
+      req.log.error({ err: String(err), stack: (err as Error)?.stack, baseKey: String(req.headers["x-base-signer-key"] ?? "").slice(0, 12) }, "base/execute-command failed");
       return reply.status(500).send({ error: String(err) });
     }
   });
@@ -275,6 +293,7 @@ export function buildServer(opts: AdapterServerOptions) {
         baseSuccess = res.success;
       }
 
+      req.log.info({ totalMarkUsd: totalMarkUsd.toString(), baseReserveUsd: baseReserveUsd.toString(), baseTxHash, baseSuccess }, "valuation ok");
       const body = encodeValuationResponse({
         navUsd: totalMarkUsd,
         baseReserveUsd,
@@ -285,6 +304,7 @@ export function buildServer(opts: AdapterServerOptions) {
         .type("application/json")
         .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
     } catch (err) {
+      req.log.error({ err: String(err), stack: (err as Error)?.stack }, "valuation failed");
       return reply.status(500).send({ error: String(err) });
     }
   });
@@ -335,6 +355,43 @@ export function buildServer(opts: AdapterServerOptions) {
       return reply
         .type("application/json")
         .send((() => { const __r = body; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
+    } catch (err) {
+      return reply.status(500).send({ error: String(err) });
+    }
+  });
+
+  // ─── POST /settle/:kind ─── manually (re-)trigger a CCTP inbound settlement for a past Base
+  //     burn (recovery path — idempotent). Body: { baseBurnTxHash: "0x...", amount: "5000000" }.
+  //     Credentials via the usual venue headers.
+  app.post<{ Params: { kind: string } }>("/settle/:kind", async (req, reply) => {
+    const kindParam = req.params.kind;
+    if (kindParam !== "pm" && kindParam !== "hl") {
+      return reply.status(400).send({ error: "kind must be 'pm' or 'hl'" });
+    }
+    const body = (req.body ?? {}) as { baseBurnTxHash?: string; amount?: string };
+    const baseBurnTxHash = body.baseBurnTxHash as Hex | undefined;
+    const amountStr = body.amount;
+    if (!baseBurnTxHash || !amountStr) {
+      return reply.status(400).send({ error: "need baseBurnTxHash and amount" });
+    }
+    const creds = credentialsFromHeaders(req.headers);
+    try {
+      if (kindParam === "pm") {
+        if (creds.pmPrivateKey == null) return reply.status(401).send({ error: "missing x-pm-key" });
+        const res = await settlePmInbound(creds.pmPrivateKey, {
+          baseBurnTxHash,
+          amount: BigInt(amountStr),
+          minAllowance: BigInt(amountStr),
+        });
+        return reply.send({ ok: true, ...res });
+      } else {
+        if (creds.hlPrivateKey == null) return reply.status(401).send({ error: "missing x-hl-key" });
+        const res = await settleHlInbound(creds.hlPrivateKey, {
+          baseBurnTxHash,
+          amount: BigInt(amountStr),
+        });
+        return reply.send({ ok: true, ...res });
+      }
     } catch (err) {
       return reply.status(500).send({ error: String(err) });
     }
