@@ -1,10 +1,10 @@
 /// High-level funding orchestrators used by the adapter server.
 ///
-/// These compose CCTP + venue-specific post-receive steps into one call each:
-///   - `settlePmInbound`  (Base burn → Polygon mint + PM approval check)
-///   - `settleHlInbound`  (Base burn → HyperEVM mint + HyperCore deposit)
-///   - `unwindPmOutbound` (Polygon burn → Base mint)
-///   - `unwindHlOutbound` (HyperCore withdraw → HyperEVM burn → Base mint)
+/// These compose the minimal venue-specific inbound/outbound steps into one call each:
+///   - `settlePmInbound`  (Base USDC.transfer → Polymarket Bridge → pUSD on PM EOA + approval)
+///   - `settleHlInbound`  (Base CCTP burn → HyperEVM mint → HyperCore deposit)
+///   - `unwindPmOutbound` (pUSD transfer → Polymarket Bridge → USDC on Base module)
+///   - `unwindHlOutbound` (HyperCore withdraw → Arbitrum → CCTP → Base)
 
 import {
   createPublicClient,
@@ -20,7 +20,14 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { CCTP_V2, DOMAIN, extractMessageFromBurnTx, fetchAttestation, receiveCctp, depositForBurn } from "./cctp.js";
 import { HL, forwardToHyperCore, waitForUsdcBalance as waitHlUsdc } from "./hyperevm-forward.js";
-import { POLYMARKET, ensurePmApproval, waitForPmUsdcBalance } from "./polygon-pm.js";
+import {
+  POLYMARKET,
+  ensurePmApproval,
+  waitForBalance,
+  createDepositAddresses,
+  createWithdrawAddresses,
+  waitForBridgeCompletion,
+} from "./polymarket-bridge.js";
 
 const base = defineChain({
   id: 8453,
@@ -50,69 +57,107 @@ function clients(chain: Chain, signerKey?: Hex): { pub: PublicClient; wallet: Wa
 }
 
 export interface SettleParams {
-  /// Base tx hash where BaseCctpSender.bridge was called (emits MessageSent).
+  /// Base tx hash (still required for HL CCTP path; unused by PM now).
   baseBurnTxHash: Hex;
-  /// Amount burned (for balance polling after receive).
+  /// Amount in USDC micro-units (6 decimals).
   amount: bigint;
 }
 
+/// Base USDC token — src for the Bridge API inbound transfer.
+const BASE_USDC: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+const erc20BalanceAbi = [{
+  name: "balanceOf",
+  type: "function",
+  stateMutability: "view",
+  inputs: [{ name: "account", type: "address" }],
+  outputs: [{ name: "", type: "uint256" }],
+}] as const;
+
+const erc20TransferAbi = [{
+  name: "transfer",
+  type: "function",
+  stateMutability: "nonpayable",
+  inputs: [
+    { name: "to", type: "address" },
+    { name: "amount", type: "uint256" },
+  ],
+  outputs: [{ name: "", type: "bool" }],
+}] as const;
+
 export interface SettlePmResult {
-  attestationMessageHash: Hex;
-  polygonReceiveTxHash: Hex;
+  bridgeDepositAddress: Address;
+  baseTransferTxHash: Hex;
+  bridgeTxHash: Hex | null;
   pmApprovalTxHash: Hex | null;
 }
 
-/// @notice After Base burned USDC for PM, wait for attestation, mint on Polygon, and ensure the PM
-///         wallet's CTF Exchange allowance covers `minAllowance`.
-///         Idempotent: if the mint already landed externally (e.g. prior attempt, manual receive),
-///         we skip the receive step and still ensure allowance. Useful when replaying failed
-///         settlements from the persistent queue.
+/// @notice Inbound Base → PM via Polymarket's Bridge API.
+///         1. POST /deposit with the PM EOA to get a one-time EVM deposit address.
+///         2. From Base, transfer `amount` USDC to that address (signed by baseSignerKey).
+///         3. Poll /status until COMPLETED — Polymarket bridges + wraps to pUSD internally.
+///         4. Approve pUSD for CTFExchange V2 so the CLOB can spend it.
+///
+/// @param pmWalletKey     PM EOA PK — used to derive the PM wallet address and post approval.
+/// @param baseSignerKey   Base EOA PK holding USDC — signs the transfer on Base.
+/// @param p               amount (micros), minAllowance (pUSD approval floor), optional exchange.
 export async function settlePmInbound(
   pmWalletKey: Hex,
-  p: SettleParams & { minAllowance: bigint; usdcToken?: Address; exchange?: Address },
+  baseSignerKey: Hex,
+  p: { amount: bigint; minAllowance: bigint; exchange?: Address },
 ): Promise<SettlePmResult> {
-  const basePub = createPublicClient({ chain: base, transport: http() });
   const { pub: polyPub, wallet: polyWallet } = clients(polygon, pmWalletKey);
+  const { pub: basePub, wallet: baseWallet } = clients(base, baseSignerKey);
   const pmAccount = polyWallet.account!.address as Address;
-  const usdc = p.usdcToken ?? POLYMARKET.USDC_E;
 
-  const preBal = (await polyPub.readContract({
-    address: usdc,
-    abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
-      inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+  // 1. Get a Bridge API deposit address for this PM wallet.
+  const addresses = await createDepositAddresses(pmAccount);
+  if (!addresses.evm) {
+    throw new Error(`bridge /deposit returned no EVM address for ${pmAccount}: ${JSON.stringify(addresses)}`);
+  }
+  const bridgeAddr = addresses.evm;
+  console.log(`[adapter] settlePmInbound: bridge deposit addr=${bridgeAddr} for PM EOA ${pmAccount}`);
+
+  // 2. Transfer `amount` USDC on Base to the bridge address.
+  const baseTransferTxHash = await baseWallet.writeContract({
+    account: baseWallet.account!,
+    chain: baseWallet.chain!,
+    address: BASE_USDC,
+    abi: erc20TransferAbi,
+    functionName: "transfer",
+    args: [bridgeAddr, p.amount],
+  });
+  await basePub.waitForTransactionReceipt({ hash: baseTransferTxHash });
+  console.log(`[adapter] settlePmInbound: Base USDC transfer=${baseTransferTxHash}`);
+
+  // 3. Poll /status until Polymarket completes the cross-chain bridge + wrap-to-pUSD.
+  const prePusd = (await polyPub.readContract({
+    address: POLYMARKET.PUSD,
+    abi: erc20BalanceAbi,
     functionName: "balanceOf",
     args: [pmAccount],
   })) as bigint;
 
-  let receiveHash: Hex = ("0x" + "0".repeat(64)) as Hex;
-  let message: Hex = ("0x" + "0".repeat(64)) as Hex;
-  if (preBal >= p.amount) {
-    // Mint already landed — skip attestation fetch + receive to keep replay idempotent.
-    console.log(`[adapter] settlePmInbound: mint already on ${pmAccount} (bal=${preBal}), skipping receive`);
-  } else {
-    message = await extractMessageFromBurnTx(basePub, p.baseBurnTxHash);
-    const att = await fetchAttestation(DOMAIN.BASE, message);
-    try {
-      receiveHash = await receiveCctp(polyWallet, polyPub, att);
-    } catch (err) {
-      // If the nonce was already used (externally-receive'd), fall through to balance check.
-      const msg = (err as Error)?.message ?? String(err);
-      if (!/already used|NonceAlreadyUsed|already processed/i.test(msg)) throw err;
-      console.log(`[adapter] settlePmInbound: receive reverted (nonce used), continuing: ${msg}`);
-    }
-    await waitForPmUsdcBalance(polyPub, usdc, pmAccount, p.amount);
-  }
+  const tx = await waitForBridgeCompletion(bridgeAddr);
+  console.log(`[adapter] settlePmInbound: bridge COMPLETED tx=${tx.txHash} (status=${tx.status})`);
 
+  // Safety: confirm pUSD actually landed. Bridge reports COMPLETED before Polygon state is fully
+  // queryable on every RPC — a short balance poll closes that race.
+  await waitForBalance(polyPub, POLYMARKET.PUSD, pmAccount, prePusd + 1n, 60_000);
+
+  // 4. Approve pUSD for CTFExchange V2.
   const approvalHash = await ensurePmApproval(
     polyWallet,
     polyPub,
-    p.usdcToken ?? POLYMARKET.USDC_E,
+    POLYMARKET.PUSD,
     p.exchange ?? POLYMARKET.CTF_EXCHANGE,
     p.minAllowance,
   );
+
   return {
-    attestationMessageHash: message,
-    polygonReceiveTxHash: receiveHash,
+    bridgeDepositAddress: bridgeAddr,
+    baseTransferTxHash,
+    bridgeTxHash: tx.txHash ?? null,
     pmApprovalTxHash: approvalHash,
   };
 }
@@ -177,32 +222,59 @@ export interface UnwindResult {
   baseReceiveTxHash: Hex;
 }
 
-/// @notice PM wallet (Polygon) → Base module. Burns USDC on Polygon, waits for attestation, and
-///         THE ADAPTER mints on Base. Blocks until the Base mint confirms so the caller knows
-///         `moduleAddress` holds the returned USDC before this returns. Fast Transfer by default.
+/// @notice Outbound PM → Base via Polymarket's Bridge API.
+///         1. POST /withdraw with (PM EOA, toChainId=Base, toToken=BASE_USDC, recipient=module).
+///            Returns a one-time Polygon address to send pUSD to.
+///         2. PM EOA transfers `amount` pUSD to that Polygon address.
+///         3. Poll /status until COMPLETED — Polymarket unwraps + CCTP-bridges + delivers USDC
+///            to the Base module.
 ///
-/// @param pmWalletKey     PM wallet PK — signs the burn + pays Polygon gas.
-/// @param moduleAddress   BaseStrategyModule that will hold returned USDC.
-/// @param amount          USDC micro-amount.
-/// @param baseSignerKey   Base EOA PK — submits `receiveMessage` on Base.
+/// @param pmWalletKey     PM EOA PK — signs pUSD transfer on Polygon.
+/// @param moduleAddress   BaseStrategyModule recipient on Base.
+/// @param amount          pUSD micro-amount to unwind (6 decimals).
+/// @param _baseSignerKey  Unused in Bridge API path; kept for call-site compatibility.
 export async function unwindPmOutbound(
   pmWalletKey: Hex,
   moduleAddress: Address,
   amount: bigint,
-  baseSignerKey: Hex,
+  _baseSignerKey?: Hex,
 ): Promise<UnwindResult> {
   const { pub: polyPub, wallet: polyWallet } = clients(polygon, pmWalletKey);
-  const { pub: basePub, wallet: baseWallet } = clients(base, baseSignerKey);
+  const pmAccount = polyWallet.account!.address as Address;
 
-  const { hash: burnHash, message } = await depositForBurn(polyWallet, polyPub, {
-    amount,
-    destinationDomain: DOMAIN.BASE,
-    mintRecipient: moduleAddress,
-    usdc: POLYMARKET.USDC_E,
+  // 1. Request Bridge API withdraw address for (Base, USDC, module).
+  const addresses = await createWithdrawAddresses({
+    pmWalletAddress: pmAccount,
+    toChainId: 8453, // Base
+    toTokenAddress: BASE_USDC,
+    recipientAddr: moduleAddress,
   });
-  const att = await fetchAttestation(DOMAIN.POLYGON, message);
-  const receiveHash = await receiveCctp(baseWallet, basePub, att);
-  return { burnTxHash: burnHash, baseReceiveTxHash: receiveHash };
+  if (!addresses.evm) {
+    throw new Error(`bridge /withdraw returned no EVM address: ${JSON.stringify(addresses)}`);
+  }
+  const bridgeAddr = addresses.evm;
+  console.log(`[adapter] unwindPmOutbound: bridge withdraw addr=${bridgeAddr} for module ${moduleAddress}`);
+
+  // 2. PM EOA transfers pUSD to the bridge address.
+  const burnTxHash = await polyWallet.writeContract({
+    account: polyWallet.account!,
+    chain: polyWallet.chain!,
+    address: POLYMARKET.PUSD,
+    abi: erc20TransferAbi,
+    functionName: "transfer",
+    args: [bridgeAddr, amount],
+  });
+  await polyPub.waitForTransactionReceipt({ hash: burnTxHash });
+  console.log(`[adapter] unwindPmOutbound: pUSD transfer=${burnTxHash}`);
+
+  // 3. Poll /status until COMPLETED — Bridge API handles unwrap + swap + CCTP + Base delivery.
+  const tx = await waitForBridgeCompletion(bridgeAddr);
+  console.log(`[adapter] unwindPmOutbound: bridge COMPLETED tx=${tx.txHash} (status=${tx.status})`);
+
+  return {
+    burnTxHash,
+    baseReceiveTxHash: (tx.txHash ?? `0x${"0".repeat(64)}`) as Hex,
+  };
 }
 
 /// @notice HL → Base unwind via `withdraw3 → Arbitrum → CCTP Fast → Base`. This is more

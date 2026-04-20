@@ -219,8 +219,10 @@ export function buildServer(opts: AdapterServerOptions) {
         const amount = BigInt((env as any).amount);
         try {
           if (cmdType === CommandType.TOPUP_PM_BUFFER && creds.pmPrivateKey != null && amount > 0n) {
-            await settlePmInbound(creds.pmPrivateKey, {
-              baseBurnTxHash: txHash,
+            if (creds.baseSignerKey == null) {
+              throw new Error("settlePmInbound requires x-base-signer-key for Base USDC transfer to PM Bridge");
+            }
+            await settlePmInbound(creds.pmPrivateKey, creds.baseSignerKey, {
               amount,
               minAllowance: amount,
             });
@@ -393,8 +395,8 @@ export function buildServer(opts: AdapterServerOptions) {
     try {
       if (kindParam === "pm") {
         if (creds.pmPrivateKey == null) return reply.status(401).send({ error: "missing x-pm-key" });
-        const res = await settlePmInbound(creds.pmPrivateKey, {
-          baseBurnTxHash,
+        if (creds.baseSignerKey == null) return reply.status(401).send({ error: "missing x-base-signer-key (required for PM Bridge API inbound)" });
+        const res = await settlePmInbound(creds.pmPrivateKey, creds.baseSignerKey, {
           amount: BigInt(amountStr),
           minAllowance: BigInt(amountStr),
         });
