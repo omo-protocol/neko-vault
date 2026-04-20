@@ -31,11 +31,11 @@ contract CreateSmallHedgeClone is Script {
         uint256 fundWei = vm.envOr("SCHEDULE_FUND", uint256(0));
         uint32 tickFreq = uint32(vm.envOr("TICK_FREQ", uint256(100)));
         uint32 valuationFreq = uint32(vm.envOr("VALUATION_FREQ", uint256(600)));
-        uint32 tickNumCalls = uint32(vm.envOr("TICK_NUM_CALLS", uint256(100)));
+        uint32 tickNumCalls = uint32(vm.envOr("TICK_NUM_CALLS", uint256(99)));
         uint32 valuationNumCalls = uint32(vm.envOr("VALUATION_NUM_CALLS", uint256(16)));
         uint32 gasLimit = uint32(vm.envOr("SCHEDULE_GAS", uint256(500_000)));
         uint256 maxFeePerGas = vm.envOr("SCHEDULE_MAX_FEE", uint256(1_000_000_000));
-        uint32 lockBlocks = uint32(vm.envOr("SCHEDULE_LOCK", uint256(20_000)));
+        uint32 lockBlocks = uint32(vm.envOr("SCHEDULE_LOCK", uint256(50_000)));
 
         LegConfig[] memory legs = new LegConfig[](2);
         legs[0] = LegConfig({

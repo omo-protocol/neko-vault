@@ -225,9 +225,20 @@ export function buildServer(opts: AdapterServerOptions) {
               minAllowance: amount,
             });
           } else if (cmdType === CommandType.TOPUP_HL_BUFFER && creds.hlPrivateKey != null && amount > 0n) {
+            // Route to HyperCore dex based on destinationRef. Dedicated refs
+            // `keccak("dest:hl:spot")` → SPOT dex, `keccak("dest:hl:perp")` → PERP. Fallback
+            // (legacy `keccak("dest:hl")` or unknown) → PERP. Lets a multi-leg clone mix HL
+            // spot + HL perp in the same strategy without ambiguity.
+            const destRef = String((env as any).destinationRef ?? "").toLowerCase();
+            const HL_SPOT_REF = "0x505c4f0d4540ebe3cf3a696872bd20475324e24a241d00cd1c67a9efa1bff9ff"; // keccak("dest:hl:spot")
+            const HL_PERP_REF = "0x14ea71fbfd6c1e5a474b882bed919af85a238641811bfb45bb190614cccbcb5d"; // keccak("dest:hl:perp")
+            let destDex: number | undefined;
+            if (destRef === HL_SPOT_REF) destDex = 4294967295;
+            else if (destRef === HL_PERP_REF) destDex = 0;
             await settleHlInbound(creds.hlPrivateKey, {
               baseBurnTxHash: txHash,
               amount,
+              destinationDex: destDex,
             });
           }
         } catch (settleErr) {
@@ -332,17 +343,21 @@ export function buildServer(opts: AdapterServerOptions) {
       // attestation, post receiveMessage on Base. Both legs run in parallel; we block until
       // both mints settle before returning so MultiLegController.onUnwindResult →
       // REFILL_RESERVE has an accurate realized figure.
+      if (creds.baseSignerKey == null) {
+        return reply.status(401).send({ error: "missing x-base-signer-key — unwind finalize needs Base EOA" });
+      }
+      const baseKey = creds.baseSignerKey;
       const unwindJobs: Promise<void>[] = [];
       if (hlRealized > 0n && creds.hlPrivateKey != null) {
         unwindJobs.push(
-          unwindHlOutbound(creds.hlPrivateKey, opts.module, hlRealized)
+          unwindHlOutbound(creds.hlPrivateKey, opts.module, hlRealized, baseKey, "")
             .then(() => {})
             .catch((err) => console.error(`[adapter] HL unwind CCTP failed: ${err}`))
         );
       }
       if (pmRealized > 0n && creds.pmPrivateKey != null) {
         unwindJobs.push(
-          unwindPmOutbound(creds.pmPrivateKey, opts.module, pmRealized)
+          unwindPmOutbound(creds.pmPrivateKey, opts.module, pmRealized, baseKey)
             .then(() => {})
             .catch((err) => console.error(`[adapter] PM unwind CCTP failed: ${err}`))
         );

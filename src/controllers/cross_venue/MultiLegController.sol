@@ -123,7 +123,6 @@ contract MultiLegController is ReentrancyGuard {
     MultiLegFundingState public fundingState;
     MultiLegTradingState public tradingState;
 
-    uint256 public nextNonce;
     uint64 public nextCycleSeq;
     bytes32 public currentCycleId;
     uint256 public currentCycleTargetUsd;
@@ -160,6 +159,14 @@ contract MultiLegController is ReentrancyGuard {
     uint256 public legFailCount;
     uint256 public legFailThreshold; // 0 = unlimited retries
 
+    /// @notice Minimum notional per HL leg order (micro-USD). HL's venue-side floor is ~$10
+    ///         notional per order; submitting below that gets rejected. Applies to HL_PERP +
+    ///         HL_SPOT venues only — PM legs bypass this check (PM's floor is per-share, not USD).
+    ///         Set to 0 to disable. Check runs in `_submitLeg`; on a ref-leg below-floor the
+    ///         cycle aborts cleanly (no orders placed). On a hedge-leg below-floor mid-cycle the
+    ///         state goes to UNHEDGED so operator can unwind the already-filled reference leg.
+    uint256 public minHlNotionalUsd;
+
     /// @notice Dust floors expressed in bps of *deployable* capital (`lastNavUsd - lastBaseReserveUsd`).
     ///         Below `deployable × floor / 10_000`, the controller skips the action entirely.
     ///         Relative so the vault behaves the same whether TVL is $17 or $17M. Before the first
@@ -188,11 +195,6 @@ contract MultiLegController is ReentrancyGuard {
     ///        3 = submit valuation sync after all legs filled
     uint8 internal _deferredKind;
     uint256 internal _deferredData;
-    /// @dev Schedule auto-extend params. Packed into one slot:
-    ///         tickFreq (uint32) | valuationFreq (uint32) | extendGas (uint32) — bits 0..95.
-    ///      Stored on first `fundAndSchedule` call; tick/syncValuation re-use them to extend.
-    uint96 internal _schedPacked;
-    uint256 public scheduleMaxFeePerGas;
 
     /// @notice Last Base-side NAV + reserve reported by the valuation-sync callback.
     uint256 public lastNavUsd;
@@ -316,34 +318,30 @@ contract MultiLegController is ReentrancyGuard {
 
     // ─── Admin ───────────────────────────────────────────────────────────────
 
-    function setAdapterUrl(string calldata u) external onlyOwner {
-        adapterUrl = u;
+    /// @notice Bundled setter for `executor` + `adapterUrl` + `funder` + `kellySigner`.
+    ///         Pass empty / zero to leave unchanged.
+    function setIntegrationRefs(address e, string calldata u, address f, address k) external onlyOwner {
+        if (e != address(0)) executor = e;
+        if (bytes(u).length > 0) adapterUrl = u;
+        if (f != address(0)) funder = f;
+        if (k != address(0)) {
+            kellySigner = k;
+            useKelly = true;
+        }
     }
 
-    function setExecutor(address e) external onlyOwner {
-        executor = e;
+    /// @notice Tune all HTTP async-precompile parameters. Pass 0 to leave unchanged.
+    function setHttpConfig(uint64 pi, uint64 mpb, uint256 dgl, uint256 ttl) external onlyOwner {
+        if (pi > 0) pollIntervalBlocks = pi;
+        if (mpb > 0) maxPollBlock = mpb;
+        if (dgl > 0) deliveryGasLimit = dgl;
+        if (ttl > 0) httpTtl = ttl;
     }
 
-    /// @notice Tune all HTTP async-precompile parameters without redeploying. Owner-only.
-    ///         Pass 0 to leave any field unchanged.
-    function setHttpConfig(
-        uint64 newPollInterval,
-        uint64 newMaxPollBlock,
-        uint256 newDeliveryGasLimit,
-        uint256 newHttpTtl
-    ) external onlyOwner {
-        if (newPollInterval > 0) pollIntervalBlocks = newPollInterval;
-        if (newMaxPollBlock > 0) maxPollBlock = newMaxPollBlock;
-        if (newDeliveryGasLimit > 0) deliveryGasLimit = newDeliveryGasLimit;
-        if (newHttpTtl > 0) httpTtl = newHttpTtl;
-    }
-
-    /// @notice Deposit msg.value into RitualWallet (credited to this clone) and schedule both
-    ///         `tick` and `syncValuation` recurring calls on the Ritual Scheduler. Owner-only.
-    ///         `tickFreq` / `valuationFreq` in blocks (1 block ≈ 350ms on Ritual, so
-    ///         `tickFreq = 100` ≈ every 35s). `numCalls = 0` means run until wallet runs dry.
-    ///         Lock duration must extend past `currentBlock + numCalls * frequency + ttl` or the
-    ///         Scheduler will reject.
+    /// @notice Deposit msg.value into RitualWallet (credited to this clone) and register `tick` +
+    ///         `syncValuation` recurring schedules. Scheduler constraint: numCalls × frequency
+    ///         ≤ 10_000 blocks (~58 min) per batch. For longer autonomy, re-invoke to register
+    ///         fresh schedules — harmless overlap with old one (old schedule finishes naturally).
     function fundAndSchedule(
         uint32 tickFreq,
         uint32 valuationFreq,
@@ -365,30 +363,13 @@ contract MultiLegController is ReentrancyGuard {
             lockDurationBlocks,
             msg.value
         );
-        _schedPacked = uint96(tickFreq) | (uint96(valuationFreq) << 32) | (uint96(gasLimit) << 64);
-        scheduleMaxFeePerGas = maxFeePerGas;
-    }
-
-    function _maybeExtend(bool isTick, uint256 executionIndex) internal {
-        if (msg.sender != RitualPrecompiles.SCHEDULER) return;
-        uint256 nid = SchedulerSetupLib.maybeExtend(
-            isTick ? this.tick.selector : this.syncValuation.selector,
-            isTick,
-            executionIndex,
-            _schedPacked,
-            scheduleMaxFeePerGas
-        );
-        if (nid != 0) {
-            if (isTick) tickScheduleId = nid; else valuationScheduleId = nid;
-        }
     }
 
 
-    /// @notice Replace the stored ECIES-encrypted venue secrets and their owner-EOA signatures.
-    ///         `blobs[i]` is the ECIES ciphertext of one secret (venue PK, etc.) to the executor pubkey;
-    ///         `sigs[i]` is `sign(keccak256(blobs[i]))` by the secret owner EOA. After calling this,
-    ///         the owner must also call `SecretsAccessControl.grantAccess(thisClone, secretsHash, ...)`
-    ///         so the executor accepts requests originating from this contract.
+    /// @notice Replace stored ECIES-encrypted venue secrets + owner-signatures + TEE header map
+    ///         in a single call. Bundled to stay under EIP-170. After calling, also invoke
+    ///         `SecretsAccessControl.grantAccess(thisClone, secretsHash, ...)` on Ritual so the
+    ///         executor will accept requests routed through this clone.
     function setSecrets(bytes[] calldata blobs, bytes[] calldata sigs) external onlyOwner {
         if (blobs.length != sigs.length) revert InvalidConfig();
         delete _encryptedSecrets;
@@ -402,14 +383,6 @@ contract MultiLegController is ReentrancyGuard {
     // getSecrets removed — operator re-runs bootstrapClone to refresh if needed (reads blobs
     // from `_encryptedSecrets` via storage slot if truly required). Dropped for size budget.
 
-    function setKellySigner(address s) external onlyOwner {
-        kellySigner = s;
-        useKelly = s != address(0);
-    }
-
-    function setFunder(address f) external onlyOwner {
-        funder = f;
-    }
 
     function setSecretHeaders(string[] calldata keys, string[] calldata values) external onlyOwner {
         if (keys.length != values.length) revert InvalidConfig();
@@ -447,48 +420,42 @@ contract MultiLegController is ReentrancyGuard {
         if (cfg.referenceLegIndex != REF_LEG_SENTINEL && cfg.betaBps == 0) revert InvalidConfig();
     }
 
-    function setCycleBounds(uint256 minUsd, uint256 maxUsd) external onlyOwner {
-        if (minUsd == 0 || maxUsd < minUsd) revert InvalidConfig();
-        minCycleNotionalUsd = minUsd;
-        maxCycleNotionalUsd = maxUsd;
+    /// @notice Bundled ops-config setter to stay under EIP-170. Pass 0 to leave any field
+    ///         unchanged. Ritual `block.timestamp` is MILLISECONDS so `bufferStalenessMs`
+    ///         is ms (e.g. `3_600_000` = 1h). `minCycleUsd`/`maxCycleUsd` validated as pair
+    ///         (must be non-zero with max≥min, or both zero to leave alone).
+    function setOpsConfig(
+        uint256 minCycleUsd,
+        uint256 maxCycleUsd,
+        uint256 bufferStalenessMs,
+        uint256 maxPendingB,
+        uint256 minBaseReserve,
+        uint256 legFailThresh
+    ) external onlyOwner {
+        if (minCycleUsd > 0 || maxCycleUsd > 0) {
+            if (minCycleUsd == 0 || maxCycleUsd < minCycleUsd) revert InvalidConfig();
+            minCycleNotionalUsd = minCycleUsd;
+            maxCycleNotionalUsd = maxCycleUsd;
+        }
+        if (bufferStalenessMs > 0) bufferStalenessSeconds = bufferStalenessMs;
+        // `0` is a valid value for the last three (disables the respective gate), so we can't
+        // gate on non-zero. Caller must be explicit — pass the current value to keep it.
+        maxPendingBlocks = maxPendingB;
+        minBaseReserveUsd = minBaseReserve;
+        legFailThreshold = legFailThresh;
     }
 
-    /// @notice Ritual `block.timestamp` is in MILLISECONDS (non-standard EVM). This field is
-    ///         therefore also in ms. Operator-tunable — e.g. `3_600_000` = 1-hour staleness.
-    function setBufferStalenessSeconds(uint256 ms_) external onlyOwner {
-        if (ms_ == 0) revert InvalidConfig();
-        bufferStalenessSeconds = ms_;
-    }
-
-    /// @notice Auto-recovery: if any `pending*JobId` has been set for more than `n` blocks,
-    ///         `tick()` forcibly clears it and resets tradingState to IDLE. Prevents manual
-    ///         pauseTrading/unpauseTrading dance when AsyncDelivery drops a callback. `0` disables.
-    function setMaxPendingBlocks(uint256 n) external onlyOwner {
-        maxPendingBlocks = n;
-    }
-
-    /// @notice Auto-unwind threshold — `tick()` triggers `requestPartialUnwind(shortfall)` when
-    ///         `lastBaseReserveUsd < minBaseReserveUsd`. 0 disables (manual-only). Operator
-    ///         typically sets this to the minimum vault reserve needed to service pending
-    ///         withdrawals; `tick()` will auto-replenish by shrinking venue positions.
-    function setMinBaseReserveUsd(uint256 min) external onlyOwner {
-        minBaseReserveUsd = min;
-    }
-
-    /// @notice Cap on LEG_FAILED auto-clears. When exceeded, `tick()` stops auto-clearing so
-    ///         repeated failures don't silently burn gas — operator must investigate + reset.
-    function setLegFailThreshold(uint256 n) external onlyOwner {
-        legFailThreshold = n;
-    }
-
-    /// @notice Dust floors expressed in bps of deployable capital (NAV − Base reserve).
-    ///         Below `deployable × bps / 10_000`, the controller skips TOPUP/REFILL/REBALANCE.
-    ///         Scales with vault size so a $17 demo and a $17M prod vault behave the same.
-    ///         Pass 0 for any field to disable the gate.
-    function setDustFloorsBps(uint256 topupBps, uint256 refillBps, uint256 rebalanceBps) external onlyOwner {
+    /// @notice Combined guard setter: three dust floors (bps of deployable) + HL venue-min
+    ///         notional (micro-USD). HL rejects orders below ~$10 notional so we set this
+    ///         floor to 10_000_000 = $10. Pass 0 for any field to disable its gate.
+    function setDustFloorsBps(uint256 topupBps, uint256 refillBps, uint256 rebalanceBps, uint256 hlMinNotional)
+        external
+        onlyOwner
+    {
         minTopupBps = topupBps;
         minRefillBps = refillBps;
         minRebalanceBps = rebalanceBps;
+        minHlNotionalUsd = hlMinNotional;
     }
 
     /// @notice Current signed USD notional of leg `legIndex`'s fill (from `currentCycleFills`,
@@ -640,9 +607,7 @@ contract MultiLegController is ReentrancyGuard {
 
     // ─── Scheduler entrypoints ───────────────────────────────────────────────
 
-    function tick(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
-        _maybeExtend(true, executionIndex);
-
+    function tick(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
         // Auto-recovery: if any pending job has been in flight longer than `maxPendingBlocks`
         // (AsyncDelivery presumably dropped the callback), clear it and reset tradingState so
         // the next tick can make progress. Prevents ops having to manually pause/unpause.
@@ -736,8 +701,7 @@ contract MultiLegController is ReentrancyGuard {
         }
     }
 
-    function syncValuation(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
-        _maybeExtend(false, executionIndex);
+    function syncValuation(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
         if (tradingState == MultiLegTradingState.LEG_PENDING) return;
         if (pendingValuationJobId != bytes32(0)) return;
         _submitValuationSync();
@@ -977,8 +941,14 @@ contract MultiLegController is ReentrancyGuard {
     }
 
     function _emitCommand(CrossVenueCommandLib.CommandType cmd, uint256 amount, bytes32 destinationRef) internal {
-        uint256 nonce = nextNonce++;
         bytes32 cycleId = currentCycleId == bytes32(0) ? _newCycleId() : currentCycleId;
+        // Nonce is derived from cycleId, cmd, and destinationRef — stateless and deterministic.
+        // Earlier `nextNonce++` counter broke autonomous operation: the Ritual HTTP precompile
+        // can dispatch the async request to the TEE out-of-band while the outer tick tx reverts,
+        // leaving the counter at its pre-tx value while the envelope is already en route to
+        // Base, creating a permanent `usedNonces` lock on the Gateway. Derived-nonce + cycleId-
+        // based Gateway dedup makes this safe even under partial tx failure.
+        uint256 nonce = uint256(keccak256(abi.encode(cycleId, cmd, destinationRef)));
         // Ritual `block.timestamp` is in MILLISECONDS; Base validates `env.deadline` against
         // its own SECONDS-scale `block.timestamp`. Convert to seconds before adding TTL so
         // Base's expiry check is meaningful. envelopeTtlSeconds is in seconds (per its name).
@@ -1037,18 +1007,15 @@ contract MultiLegController is ReentrancyGuard {
         pendingBaseCommandJobId = bytes32(0);
 
         (uint16 statusCode, bytes memory body, string memory errorMessage) = RitualHttpLib.decodeEnvelope(result);
-        if (statusCode < 200 || statusCode >= 300 || bytes(errorMessage).length > 0) {
-            emit BaseCommandFailed(lastSubmittedCommandNonce, statusCode, errorMessage);
-            return;
-        }
+        if (statusCode < 200 || statusCode >= 300 || bytes(errorMessage).length > 0) return;
         (bytes32 baseTxHash, bool success,) = abi.decode(body, (bytes32, bool, string));
         emit BaseCommandSubmitted(lastSubmittedCommandNonce, baseTxHash, success);
 
-        // Adapter blocks inline through CCTP settle + venue post-step before returning success,
-        // so `success == true` here means funding is confirmed on the venue side. Clear the
-        // TOPUP_PENDING gate so the next tick can advance the FSM (next top-up / cycle start).
-        // This replaces the separate off-chain `ingestFundingReceipt` hop.
         if (success && fundingState == MultiLegFundingState.TOPUP_PENDING) {
+            // Invalidate buffer snapshot for the topped-up leg → next tick forces a fresh
+            // `/buffers` read reflecting the newly-received funds (instead of waiting for
+            // bufferStalenessSeconds to expire, which would keep firing redundant top-ups).
+            bufferSnapshots[pendingTopUpLegIndex].timestamp = 0;
             pendingTopUpCycle = bytes32(0);
             pendingTopUpAmount = 0;
             _setFundingState(MultiLegFundingState.OK);
@@ -1080,6 +1047,21 @@ contract MultiLegController is ReentrancyGuard {
     function _submitLeg(uint8 legIndex) internal {
         LegConfig memory cfg = legs[legIndex];
         uint256 notional = _legNotional(legIndex);
+
+        // HL venue-min guard: HL rejects orders below ~$10 notional. Abort cycle cleanly.
+        // Ref-leg below → IDLE. Hedge-leg below → UNHEDGED. State-change event fires via
+        // _setTradingState; no separate event to save bytecode.
+        if (
+            (cfg.venue == ML_VENUE_HL_PERP || cfg.venue == ML_VENUE_HL_SPOT)
+                && minHlNotionalUsd > 0 && notional < minHlNotionalUsd
+        ) {
+            _setTradingState(
+                cfg.referenceLegIndex == REF_LEG_SENTINEL
+                    ? MultiLegTradingState.IDLE
+                    : MultiLegTradingState.UNHEDGED
+            );
+            return;
+        }
 
         ExecutionIntent memory intent = ExecutionIntent({
             cycleId: currentCycleId,

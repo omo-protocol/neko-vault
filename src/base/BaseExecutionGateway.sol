@@ -150,14 +150,20 @@ contract BaseExecutionGateway {
         if (env.dstVault != vault) revert WrongVault();
         if (env.asset != asset) revert WrongAsset();
         if (env.deadline < block.timestamp) revert EnvelopeExpired();
-        if (usedNonces[env.nonce]) revert NonceAlreadyUsed();
+        // Replay protection: cycleId ONLY. Controller derives cycleId from
+        // keccak256(strategyId, cycleSeq, block.number), and `nonce` from keccak256(cycleId,
+        // cmd, destinationRef) — both deterministic and stateless. Using `usedNonces` as a
+        // dedup mapping would be redundant with cycleId and fragile: an earlier counter-based
+        // `nextNonce++` design could roll back the counter on Ritual tx revert while the async
+        // HTTP precompile had already dispatched the envelope to the TEE, creating a permanent
+        // lock at nonce=0. Now nonce is derived deterministically so retries produce the same
+        // nonce, and cycleId carries the uniqueness guarantee.
         if (usedCycles[env.cycleId]) revert CycleAlreadyConsumed();
 
         bytes32 envHash = env.hashEnvelope();
         bytes32 d = CrossVenueCommandLib.digest(DOMAIN_SEPARATOR, envHash);
         _verifyQuorum(d, sigs);
 
-        usedNonces[env.nonce] = true;
         usedCycles[env.cycleId] = true;
 
         _enforceCaps(env.commandType, env.amount);

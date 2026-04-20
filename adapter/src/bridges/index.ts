@@ -177,15 +177,22 @@ export interface UnwindResult {
   baseReceiveTxHash: Hex;
 }
 
-/// @notice PM wallet (Polygon) → Base module. Burns USDC on Polygon, waits for attestation, mints
-///         on Base. `moduleAddress` is the BaseStrategyModule that will hold the returned funds.
+/// @notice PM wallet (Polygon) → Base module. Burns USDC on Polygon, waits for attestation, and
+///         THE ADAPTER mints on Base. Blocks until the Base mint confirms so the caller knows
+///         `moduleAddress` holds the returned USDC before this returns. Fast Transfer by default.
+///
+/// @param pmWalletKey     PM wallet PK — signs the burn + pays Polygon gas.
+/// @param moduleAddress   BaseStrategyModule that will hold returned USDC.
+/// @param amount          USDC micro-amount.
+/// @param baseSignerKey   Base EOA PK — submits `receiveMessage` on Base.
 export async function unwindPmOutbound(
   pmWalletKey: Hex,
   moduleAddress: Address,
   amount: bigint,
+  baseSignerKey: Hex,
 ): Promise<UnwindResult> {
   const { pub: polyPub, wallet: polyWallet } = clients(polygon, pmWalletKey);
-  const { pub: basePub, wallet: baseRelayer } = clients(base);
+  const { pub: basePub, wallet: baseWallet } = clients(base, baseSignerKey);
 
   const { hash: burnHash, message } = await depositForBurn(polyWallet, polyPub, {
     amount,
@@ -194,34 +201,93 @@ export async function unwindPmOutbound(
     usdc: POLYMARKET.USDC_E,
   });
   const att = await fetchAttestation(DOMAIN.POLYGON, message);
-  // Any signer can post the attestation on Base — use the relayer if we have one, else
-  // pm wallet can do it directly if it also has Base gas.
-  const receiveHash = await receiveCctp(baseRelayer, basePub, att);
+  const receiveHash = await receiveCctp(baseWallet, basePub, att);
   return { burnTxHash: burnHash, baseReceiveTxHash: receiveHash };
 }
 
-/// @notice HL → Base unwind, one-step via HyperCore's `sendToEvmWithData` action. Debits
-///         HyperCore perp (or spot) balance, routes through HyperEVM, burns via CCTP with
-///         automatic forwarding, mints on Base to `moduleAddress`. No separate `withdraw3` +
-///         CCTP burn steps required.
+/// @notice HL → Base unwind via `withdraw3 → Arbitrum → CCTP Fast → Base`. This is more
+///         reliable than HL's `sendToEvmWithData` for Base because:
+///           - Auto-forwarder is Arbitrum-only (per Circle docs); for Base the HL-side flow
+///             falls into a batched queue that can add 30+ min delay — breaks the ~10s HTTP TTL.
+///           - Arbitrum Fast Transfers have NO fee per Circle.
+///         Total: ~1-2 min — HL→Arb settlement (1min) + Arb→Base Fast CCTP (~60s) + mint (~5s).
+///
+///         Blocks until the Base mint confirms so the caller knows `moduleAddress` holds the
+///         returned USDC before this returns — matches the Base→HL settleHlInbound pattern.
+///
+/// @param hlWalletKey      HL wallet PK — signs withdraw3 (also the Arbitrum recipient + depositForBurn signer).
+/// @param moduleAddress    BaseStrategyModule mintRecipient on Base.
+/// @param amount           USDC micro-amount (6 decimals).
+/// @param baseSignerKey    Base EOA PK — pays Base gas for receiveMessage.
 export async function unwindHlOutbound(
   hlWalletKey: Hex,
   moduleAddress: Address,
   amount: bigint,
+  baseSignerKey: Hex,
+  _sourceDex: "" | "spot" = "",
 ): Promise<UnwindResult> {
-  const { sendHyperCoreToEvm } = await import("./hypercore-withdraw.js");
-  // amount is micro-USDC (6 decimals); sendToEvmWithData expects a human-readable string.
+  const { hlWithdrawToArbitrum } = await import("./hypercore-withdraw.js");
   const humanAmount = (Number(amount) / 1_000_000).toString();
-  await sendHyperCoreToEvm(hlWalletKey, {
-    amount: humanAmount,
-    destinationRecipient: moduleAddress,
-    destinationChainId: DOMAIN.BASE, // CCTP domain 6 = Base
-    sourceDex: "", // perp balance (default)
+
+  // 1. withdraw3 HyperCore → Arbitrum (HL native, free, ~1min).
+  const hlAccount = privateKeyToAccount(hlWalletKey);
+  const arb = defineChain({
+    id: 42161,
+    name: "Arbitrum",
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [process.env.ARBITRUM_RPC_URL ?? "https://arb1.arbitrum.io/rpc"] } },
   });
-  // Automatic forwarding delivers the mint without us needing to call receiveMessage.
-  // Circle's forwarder will mint to moduleAddress on Base once attestation finalizes.
-  const zero32: Hex = ("0x" + "0".repeat(64)) as Hex;
-  return { burnTxHash: zero32, baseReceiveTxHash: zero32 };
+  const arbPub = createPublicClient({ chain: arb, transport: http() });
+  const arbWallet = createWalletClient({ chain: arb, transport: http(), account: hlAccount });
+  const ARB_USDC: Address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+
+  const preArbBal = (await arbPub.readContract({
+    address: ARB_USDC,
+    abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+      inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+    functionName: "balanceOf",
+    args: [hlAccount.address],
+  })) as bigint;
+
+  await hlWithdrawToArbitrum(hlWalletKey, humanAmount);
+
+  // 2. Poll Arb until USDC lands (~30-90s, HL's arb settlement). Timeout 3min.
+  const targetArbBal = preArbBal + amount - 1_000_000n; // HL takes $1 withdrawal fee
+  const started = Date.now();
+  while (Date.now() - started < 180_000) {
+    const bal = (await arbPub.readContract({
+      address: ARB_USDC,
+      abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+        inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+      functionName: "balanceOf",
+      args: [hlAccount.address],
+    })) as bigint;
+    if (bal >= targetArbBal) break;
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+  const arbBal = (await arbPub.readContract({
+    address: ARB_USDC,
+    abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+      inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+    functionName: "balanceOf",
+    args: [hlAccount.address],
+  })) as bigint;
+  const freshlyArrived = arbBal > preArbBal ? arbBal - preArbBal : 0n;
+  if (freshlyArrived === 0n) throw new Error(`unwindHlOutbound: withdraw3 didn't land on Arbitrum within 3min`);
+
+  // 3. CCTP Fast burn Arbitrum → Base (maxFee=50k, finality=1000; Arbitrum→Base fast-fee is 0 per Circle).
+  const { hash: burnTxHash, message } = await depositForBurn(arbWallet as any, arbPub, {
+    amount: freshlyArrived,
+    destinationDomain: DOMAIN.BASE,
+    mintRecipient: moduleAddress,
+    usdc: ARB_USDC,
+    maxFee: 50_000n,
+    minFinalityThreshold: 1000,
+  });
+  const att = await fetchAttestation(DOMAIN.ARBITRUM, message);
+  const { pub: basePub, wallet: baseWallet } = clients(base, baseSignerKey);
+  const baseReceiveTxHash = await receiveCctp(baseWallet, basePub, att);
+  return { burnTxHash, baseReceiveTxHash };
 }
 
 export { CCTP_V2, DOMAIN, POLYMARKET, HL };

@@ -105,15 +105,12 @@ contract PtLoopController is ReentrancyGuard {
 
     uint256 public tickScheduleId;
     uint256 public valuationScheduleId;
-    uint96 internal _schedPacked;
-    uint256 public scheduleMaxFeePerGas;
 
     PtLoopConfig public cfg;
 
     PtFundingState public fundingState;
     PtTradingState public tradingState;
 
-    uint256 public nextNonce;
     uint64 public nextCycleSeq;
     bytes32 public currentCycleId;
     uint16 public currentIteration;
@@ -249,22 +246,6 @@ contract PtLoopController is ReentrancyGuard {
             lockDurationBlocks,
             msg.value
         );
-        _schedPacked = uint96(tickFreq) | (uint96(valuationFreq) << 32) | (uint96(gasLimit) << 64);
-        scheduleMaxFeePerGas = maxFeePerGas;
-    }
-
-    function _maybeExtend(bool isTick, uint256 executionIndex) internal {
-        if (msg.sender != RitualPrecompiles.SCHEDULER) return;
-        uint256 nid = SchedulerSetupLib.maybeExtend(
-            isTick ? this.tick.selector : this.syncValuation.selector,
-            isTick,
-            executionIndex,
-            _schedPacked,
-            scheduleMaxFeePerGas
-        );
-        if (nid != 0) {
-            if (isTick) tickScheduleId = nid; else valuationScheduleId = nid;
-        }
     }
 
     /// @notice Replace the stored ECIES-encrypted venue secrets and their owner-EOA signatures.
@@ -327,8 +308,7 @@ contract PtLoopController is ReentrancyGuard {
 
     // ─── Scheduler entrypoints ───────────────────────────────────────────────
 
-    function tick(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
-        _maybeExtend(true, executionIndex);
+    function tick(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
         if (tradingState == PtTradingState.PAUSED || fundingState == PtFundingState.PAUSED) return;
         if (tradingState == PtTradingState.RECOVERY_REQUIRED || tradingState == PtTradingState.ITER_FAILED) return;
 
@@ -341,8 +321,7 @@ contract PtLoopController is ReentrancyGuard {
         if (tradingState == PtTradingState.IDLE) _tryStartCycle();
     }
 
-    function syncValuation(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
-        _maybeExtend(false, executionIndex);
+    function syncValuation(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
         if (tradingState == PtTradingState.ITER_PENDING) return;
         if (pendingValuationJobId != bytes32(0)) return;
         _submitValuationSync();
@@ -445,8 +424,10 @@ contract PtLoopController is ReentrancyGuard {
     }
 
     function _emitCommand(CrossVenueCommandLib.CommandType cmd, uint256 amount, bytes32 destinationRef) internal {
-        uint256 nonce = nextNonce++;
         bytes32 cycleId = currentCycleId == bytes32(0) ? _newCycleId() : currentCycleId;
+        // Stateless nonce: keccak(cycleId, cmd, destinationRef). See MultiLegController._emitCommand
+        // for the rationale — avoids counter-rollback when Ritual tick tx reverts after async dispatch.
+        uint256 nonce = uint256(keccak256(abi.encode(cycleId, cmd, destinationRef)));
         // Ritual block.timestamp is ms; Base validates deadline in seconds. Convert before TTL.
         uint256 deadline = (block.timestamp / 1000) + cfg.envelopeTtlSeconds;
         bytes32 payloadHash = keccak256(abi.encode(cmd, amount, destinationRef));

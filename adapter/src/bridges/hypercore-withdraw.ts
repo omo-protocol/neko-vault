@@ -1,10 +1,13 @@
 /// HyperCore → external chain withdrawal helpers.
 ///
-/// Two actions exposed by the Hyperliquid exchange API:
+/// Three actions exposed by the Hyperliquid exchange API:
 ///   - `sendAsset`           — HyperCore → HyperEVM (same address only; USDC token system addr)
+///   - `withdraw3`           — HyperCore → Arbitrum (HL-native fast path, no CCTP). Lands in ~1min.
 ///   - `sendToEvmWithData`   — HyperCore → any CCTP-supported EVM chain (Base, Arbitrum, ETH, etc.)
 ///                              One-step: debits HyperCore → routes through HyperEVM → CCTP burn
-///                              → mints on destination. Automatic forwarding if `data="0x"`.
+///                              → mints on destination. Automatic forwarding is Arbitrum-only;
+///                              for Base/others HL's batched outbound queue can add 30+min delay.
+///                              Use `withdraw3` + a separate CCTP burn from Arbitrum instead.
 ///
 /// Docs:
 ///   https://developers.circle.com/cctp/howtos/withdraw-usdc-from-hypercore-to-evm
@@ -106,4 +109,57 @@ export async function sendHyperCoreToEvm(
     throw new Error(`sendToEvmWithData failed: ${JSON.stringify(json)}`);
   }
   return json;
+}
+
+/// @notice HL `withdraw3` action: HyperCore → Arbitrum (native HL bridge, no CCTP).
+///         Funds land at `account(hlKey).address` on Arbitrum in ~1min. Returns when HL
+///         accepts the action (HL's internal settlement is usually 30-60s after).
+export async function hlWithdrawToArbitrum(
+  hlKey: Hex,
+  amount: string, // human-readable USDC, e.g. "24.5"
+): Promise<{ txId: string }> {
+  const account = privateKeyToAccount(hlKey);
+  const nonce = Date.now();
+
+  const domain = {
+    name: "HyperliquidSignTransaction",
+    version: "1",
+    chainId: 42161, // Arbitrum
+    verifyingContract: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+  };
+  const types = {
+    "HyperliquidTransaction:Withdraw": [
+      { name: "hyperliquidChain", type: "string" },
+      { name: "destination", type: "string" },
+      { name: "amount", type: "string" },
+      { name: "time", type: "uint64" },
+    ],
+  } as const;
+  const message = {
+    hyperliquidChain: "Mainnet" as const,
+    destination: account.address.toLowerCase(),
+    amount,
+    time: BigInt(nonce),
+  };
+  const sigHex = await account.signTypedData({ domain, types, primaryType: "HyperliquidTransaction:Withdraw", message });
+  const r = ("0x" + sigHex.slice(2, 66)) as Hex;
+  const s = ("0x" + sigHex.slice(66, 130)) as Hex;
+  const v = parseInt(sigHex.slice(130, 132), 16);
+
+  const action = {
+    type: "withdraw3",
+    hyperliquidChain: "Mainnet",
+    signatureChainId: "0xa4b1",
+    amount,
+    time: nonce,
+    destination: account.address.toLowerCase(),
+  };
+  const res = await fetch(`${HL_API_URL}/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, nonce, signature: { r, s, v } }),
+  });
+  const json = await res.json();
+  if (!res.ok || json.status !== "ok") throw new Error(`withdraw3 failed: ${JSON.stringify(json)}`);
+  return { txId: String(json.response?.data?.type ?? "default") };
 }

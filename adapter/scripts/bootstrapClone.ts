@@ -101,7 +101,18 @@ const secretsAcAbi = [
 ] as const;
 
 const cloneAbi = [
-  { name: "setExecutor", type: "function", stateMutability: "nonpayable", inputs: [{ name: "e", type: "address" }], outputs: [] },
+  {
+    name: "setIntegrationRefs",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "e", type: "address" },
+      { name: "u", type: "string" },
+      { name: "f", type: "address" },
+      { name: "k", type: "address" },
+    ],
+    outputs: [],
+  },
   {
     name: "setSecrets",
     type: "function",
@@ -212,14 +223,16 @@ async function main() {
   const headerKeys = Object.keys(headerMap);
   const headerValues = Object.values(headerMap);
 
+  // setExecutor was merged into setIntegrationRefs(executor, url, funder, kellySigner).
+  // Pass zero / empty for fields we don't want to change.
   const txSetExec = await walletClient.writeContract({
     address: clone,
     abi: cloneAbi,
-    functionName: "setExecutor",
-    args: [executor],
+    functionName: "setIntegrationRefs",
+    args: [executor, "", "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000"],
   });
   await publicClient.waitForTransactionReceipt({ hash: txSetExec });
-  console.log(`       setExecutor tx       = ${txSetExec}`);
+  console.log(`       setIntegrationRefs tx = ${txSetExec}`);
 
   const txSetSecrets = await walletClient.writeContract({
     address: clone,

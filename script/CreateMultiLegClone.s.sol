@@ -48,9 +48,8 @@ contract CreateMultiLegClone is Script {
         uint256 fundWei = vm.envOr("SCHEDULE_FUND", uint256(0));
         uint32 tickFreq = uint32(vm.envOr("TICK_FREQ", uint256(100)));
         uint32 valuationFreq = uint32(vm.envOr("VALUATION_FREQ", uint256(600)));
-        // Scheduler enforces `numCalls × frequency ≤ 10000` per schedule. Defaults are
-        // tuned for a ~58-min demo window at base block-time (~350ms).
-        uint32 tickNumCalls = uint32(vm.envOr("TICK_NUM_CALLS", uint256(100)));
+        // Scheduler hard constraint: numCalls × frequency ≤ 10_000 per batch (~58min).
+        uint32 tickNumCalls = uint32(vm.envOr("TICK_NUM_CALLS", uint256(99)));
         uint32 valuationNumCalls = uint32(vm.envOr("VALUATION_NUM_CALLS", uint256(16)));
         uint32 gasLimit = uint32(vm.envOr("SCHEDULE_GAS", uint256(500_000)));
         uint256 maxFeePerGas = vm.envOr("SCHEDULE_MAX_FEE", uint256(1_000_000_000));

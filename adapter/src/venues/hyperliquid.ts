@@ -7,8 +7,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Hyperliquid, type ClearinghouseState, type SpotClearinghouseState, type OrderResponse } from "hyperliquid";
-import { sendHyperCoreToEvm } from "../bridges/hypercore-withdraw.js";
-import { DOMAIN } from "../bridges/cctp.js";
+import { unwindHlOutbound } from "../bridges/index.js";
 import type {
   ExecutionIntent,
   NormalizedExecutionReceipt,
@@ -89,6 +88,44 @@ export class HyperliquidAdapter implements VenueAdapter {
     return this.venueId === V_HL_PERP;
   }
 
+  /// @notice Sweep any USDC balance stranded on HyperEVM at the HL wallet into HyperCore via
+  ///         `CoreDepositWallet.deposit`. Runs on every `/buffers` call so partial-failure
+  ///         recovery is autonomous — no operator intervention needed if an adapter restart or
+  ///         gateway reject interrupted the Base→HL top-up flow between CCTP mint and HyperCore
+  ///         deposit. Dex split: the caller's own dex (spot/perp) gets min(half, all) per call.
+  ///         When there are two HL venue adapters in a multi-leg clone (one spot, one perp),
+  ///         each /buffers round-trip sweeps half, leaving the DN strategy funded on both sides.
+  private async sweepStrandedHyperEvmToHyperCore(hlKey: Hex, perp: boolean): Promise<void> {
+    const { createPublicClient, createWalletClient, http, defineChain } = await import("viem");
+    const { forwardToHyperCore, HL } = await import("../bridges/hyperevm-forward.js");
+    const hyperevm = defineChain({
+      id: 999,
+      name: "HyperEVM",
+      nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
+      rpcUrls: { default: { http: [process.env.HYPEREVM_RPC_URL ?? "https://rpc.hyperliquid.xyz/evm"] } },
+    });
+    const account = privateKeyToAccount(hlKey);
+    const pub = createPublicClient({ chain: hyperevm, transport: http() });
+    const bal = (await pub.readContract({
+      address: HL.USDC,
+      abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
+        inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+      functionName: "balanceOf",
+      args: [account.address],
+    })) as bigint;
+    // Ignore dust (<$0.10) — CoreDepositWallet rejects tiny deposits + HL charges account-creation fee.
+    if (bal < 100_000n) return;
+    // Sweep ALL stranded funds to the caller's dex. If multiple HL venue adapters exist in
+    // the clone (any combination of HL_SPOT + HL_PERP + future HL venues), whichever /buffers
+    // hits first takes it all — the controller's subsequent top-up flow will CCTP fresh funds
+    // from the sleeve to any under-funded venue via its own destinationDex. Taking half would
+    // be wrong for any leg count != 2 and adds complexity the strategy doesn't need.
+    const wallet = createWalletClient({ chain: hyperevm, transport: http(), account });
+    const dex = perp ? HL.DEST_PERPS : HL.DEST_SPOT;
+    console.log(`[hl] sweep stranded HyperEVM USDC ${Number(bal) / 1e6} → HyperCore (dex=${dex})`);
+    await forwardToHyperCore(wallet, pub, { amount: bal, destinationDex: dex });
+  }
+
   async execute(intent: ExecutionIntent, creds: VenueCredentials, ctx?: VenueExecContext): Promise<NormalizedExecutionReceipt> {
     if (!creds.hlPrivateKey) { console.log("[hl] no key"); return failReceipt(intent, "no HL key"); }
     const market = this.markets[intent.marketRef];
@@ -160,7 +197,31 @@ export class HyperliquidAdapter implements VenueAdapter {
         };
       }
 
-      // Net delta → real order.
+      // Net delta → real order. HL min-notional guard: venue rejects orders <$10 notional.
+      // If the DELTA is below min, two cases: (a) fresh open below min → return Failed so
+      // controller abandons cycle cleanly (LEG_FAILED at ref, UNHEDGED at hedge); (b) small
+      // drift rebalance on an existing position → report current position as filled (we can't
+      // tighten to exact target through the venue min, so accept the residual drift).
+      const HL_MIN_NOTIONAL = 10.0;
+      if (Math.abs(deltaUsd) < HL_MIN_NOTIONAL) {
+        console.log(`[hl] delta $${deltaUsd.toFixed(2)} < $${HL_MIN_NOTIONAL} min — reporting ${Math.abs(currentSigned) > 0 ? "current-position" : "FAILED"}`);
+        if (Math.abs(currentSigned) === 0) {
+          return failReceipt(intent, `delta ${deltaUsd.toFixed(2)} below HL min ${HL_MIN_NOTIONAL}`);
+        }
+        return {
+          cycleId: intent.cycleId,
+          venue: intent.venue,
+          status: ExecStatus.Filled,
+          filledNotionalUsd: BigInt(Math.floor(Math.abs(currentSigned) * 1e6)),
+          filledBaseQty: BigInt(Math.floor(Math.abs(currentSigned) / mid * 1e18)),
+          avgPriceE18: BigInt(Math.floor(mid * 1e18)),
+          externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
+          externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+          terminal: true,
+          rawPayloadHash: keccak256(toBytes(`hl-drift-below-min:${coinName}:${deltaUsd}`)),
+        };
+      }
+
       const orderIsBuy = deltaUsd > 0;
       const deltaBase = Math.abs(deltaUsd) / mid;
       const sz = Number(deltaBase.toFixed(market.szDecimals));
@@ -212,16 +273,17 @@ export class HyperliquidAdapter implements VenueAdapter {
         // HL API action (no attestation wait) and Circle's automatic forwarder credits Base.
         const shrank = Math.abs(currentSigned) - Math.abs(resultingSignedUsd);
         if (shrank > 1.0 && ctx?.moduleAddress) {
-          const freedUsd = shrank.toFixed(2);
-          console.log(`[hl] position shrank $${freedUsd} — firing CCTP-back to module ${ctx.moduleAddress}`);
-          sendHyperCoreToEvm(creds.hlPrivateKey, {
-            amount: freedUsd,
-            destinationRecipient: ctx.moduleAddress,
-            destinationChainId: DOMAIN.BASE,
-            sourceDex: "",
-          }).catch((err) => {
-            console.log(`[hl] CCTP-back failed (non-fatal): ${String(err).slice(0,200)}`);
-          });
+          if (!creds.baseSignerKey) {
+            throw new Error("missing x-base-signer-key — can't finalize HL→Base CCTP on unwind");
+          }
+          const freedMicro = BigInt(Math.floor(shrank * 1_000_000));
+          const moduleAddr = ctx.moduleAddress;
+          console.log(`[hl] position shrank $${shrank.toFixed(2)} — unwindHlOutbound → module ${moduleAddr}`);
+          // Inline-blocking: the /leg/execute response must NOT return before the Base mint is
+          // confirmed. Follows the Base→HL settleHlInbound pattern (pull msg → poll Iris → mint).
+          // baseSignerKey is TEE-injected per request via `x-base-signer-key` header.
+          const r = await unwindHlOutbound(creds.hlPrivateKey!, moduleAddr, freedMicro, creds.baseSignerKey, "");
+          console.log(`[hl] CCTP-back complete: burn=${r.burnTxHash} mint=${r.baseReceiveTxHash}`);
         }
 
         return {
@@ -248,10 +310,36 @@ export class HyperliquidAdapter implements VenueAdapter {
   async getBuffer(creds: VenueCredentials): Promise<LegBufferSnapshot> {
     if (!creds.hlPrivateKey) return { bufferUsd: 0n, timestamp: nowSec() };
     const account = privateKeyToAccount(creds.hlPrivateKey);
+
+    // Self-heal: if any USDC is stranded on HyperEVM at the HL wallet (happens when a
+    // prior `/base/execute-command` flow was interrupted between CCTP receive and
+    // CoreDepositWallet.deposit — e.g. adapter restart, gateway reject), sweep it to
+    // HyperCore on the right dex (perp=0 or spot=type(uint32).max) before reading balance.
+    // Makes the buffer read accurate + recovers funds without operator intervention.
+    try {
+      await this.sweepStrandedHyperEvmToHyperCore(creds.hlPrivateKey, this.isPerp());
+    } catch (e) {
+      console.log(`[hl] sweep-stranded non-fatal: ${String(e).slice(0, 160)}`);
+    }
+
     if (this.isPerp()) {
       const state = await this.hlInfo({ type: "clearinghouseState", user: account.address });
+      // HL unified accounts: perp orders can draw margin from the combined spot+perp balance.
+      // Report `accountValue` (or `withdrawable`, whichever is larger) so the controller's buffer
+      // check reflects actual available margin, not just the perp-only slice. Legacy isolated
+      // accounts return `accountValue == withdrawable` so this is a no-op there.
       const withdrawable = parseFloat(state?.withdrawable ?? "0");
-      return { bufferUsd: BigInt(Math.floor(withdrawable * 1e6)), timestamp: nowSec() };
+      const accountValue = parseFloat(state?.marginSummary?.accountValue ?? "0");
+      let available = Math.max(withdrawable, accountValue);
+      // In unified mode, also add the spot USDC slice since it backs perp margin cross-margin.
+      try {
+        const spotState = await this.hlInfo({ type: "spotClearinghouseState", user: account.address });
+        const spotUsdc = (spotState?.balances ?? []).find((b: { coin: string; total: string }) => b.coin === "USDC");
+        if (spotUsdc) available += parseFloat(spotUsdc.total ?? "0");
+      } catch {
+        // spot read optional — if it fails, withdrawable / accountValue still gives us a floor
+      }
+      return { bufferUsd: BigInt(Math.floor(available * 1e6)), timestamp: nowSec() };
     } else {
       const state = await this.hlInfo({ type: "spotClearinghouseState", user: account.address });
       const bal = Array.isArray(state?.balances) ? state.balances : [];

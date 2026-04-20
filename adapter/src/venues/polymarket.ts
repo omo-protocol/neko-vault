@@ -1,8 +1,15 @@
-import { keccak256, toBytes, toHex, pad, createPublicClient, createWalletClient, http, defineChain, type Hex } from "viem";
+import { keccak256, toBytes, toHex, pad, createWalletClient, http, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon as viemPolygon } from "viem/chains";
-import { ClobClient, Side as PmSide, OrderType as PmOrderType, Chain as PmChain } from "@polymarket/clob-client";
-import { depositForBurn, DOMAIN } from "../bridges/cctp.js";
+import {
+  ClobClient,
+  Side as PmSide,
+  OrderType as PmOrderType,
+  Chain as PmChain,
+  AssetType as PmAssetType,
+  type TickSize as PmTickSize,
+} from "@polymarket/clob-client-v2";
+import { unwindPmOutbound } from "../bridges/index.js";
 import type {
   ExecutionIntent,
   NormalizedExecutionReceipt,
@@ -12,19 +19,8 @@ import type {
 import { ExecStatus, Side } from "../types.js";
 import type { VenueAdapter, VenueExecContext } from "./types.js";
 
-/// Polymarket CLOB API base.
+/// Polymarket CLOB API base — passed as `host` to ClobClient; only the SDK talks to it.
 const PM_API_URL = process.env.PM_API_URL ?? "https://clob.polymarket.com";
-
-/// Polygon USDC.e (bridged) — what CCTP mints to on Polygon.
-const POLYGON_USDC_E = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
-
-const polygonChain = defineChain({
-  id: 137,
-  name: "Polygon",
-  nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-  rpcUrls: { default: { http: [process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com"] } },
-});
-const polygonPub = createPublicClient({ chain: polygonChain, transport: http() });
 
 /// Venue ID — must match Solidity constant.
 export const V_POLYMARKET = keccak256(toBytes("POLYMARKET"));
@@ -76,7 +72,7 @@ export class PolymarketAdapter implements VenueAdapter {
       chain: viemPolygon,
       transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com"),
     });
-    const bootstrap = new ClobClient(PM_API_URL, PmChain.POLYGON, walletClient as any);
+    const bootstrap = new ClobClient({ host: PM_API_URL, chain: PmChain.POLYGON, signer: walletClient as any });
 
     let creds = PolymarketAdapter.apiCredsByAddr.get(account.address.toLowerCase());
     if (!creds) {
@@ -89,27 +85,20 @@ export class PolymarketAdapter implements VenueAdapter {
         throw err;
       }
     }
-    return new ClobClient(PM_API_URL, PmChain.POLYGON, walletClient as any, creds);
+    return new ClobClient({ host: PM_API_URL, chain: PmChain.POLYGON, signer: walletClient as any, creds });
   }
 
-  /// Read current position size (token holdings) for a given PM tokenId. Used for delta-rebalance
-  /// so duplicate /leg/execute retries converge to target instead of double-buying.
-  private async currentPositionBase(ownerAddress: `0x${string}`, tokenId: string): Promise<number> {
+  /// Read current position size (CTF shares) for a PM tokenId via the SDK's
+  /// `getBalanceAllowance(CONDITIONAL, token_id)` endpoint. Used for delta-rebalance so duplicate
+  /// /leg/execute retries converge to target instead of double-buying.
+  private async currentPositionBase(client: ClobClient, tokenId: string): Promise<number> {
     try {
-      // Polymarket publishes user positions via CLOB — use SDK if available, fall back to CTF
-      // ERC-1155 balance on Polygon (authoritative source, same query path every time).
-      const ctfBalance = (await polygonPub.readContract({
-        address: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045", // Polymarket CTF
-        abi: [{
-          name: "balanceOf", type: "function", stateMutability: "view",
-          inputs: [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
-          outputs: [{ name: "", type: "uint256" }],
-        }],
-        functionName: "balanceOf",
-        args: [ownerAddress, BigInt(tokenId)],
-      })) as bigint;
-      // CTF shares have 6 decimals (USDC-denominated).
-      return Number(ctfBalance) / 1e6;
+      const resp = await client.getBalanceAllowance({
+        asset_type: PmAssetType.CONDITIONAL,
+        token_id: tokenId,
+      });
+      // CTF shares are reported in USDC-denominated 6-decimal atomic units.
+      return Number(BigInt(resp.balance ?? "0")) / 1e6;
     } catch {
       return 0;
     }
@@ -143,7 +132,7 @@ export class PolymarketAdapter implements VenueAdapter {
     const targetUsd = Number(intent.targetNotionalUsd) / 1e6;
     const wantsLong = intent.side === Side.Buy;
     const targetSignedUsd = wantsLong ? targetUsd : 0; // PM: "sell" means "hold zero" (or sell existing)
-    const currentBase = await this.currentPositionBase(account.address, market.tokenId);
+    const currentBase = await this.currentPositionBase(client, market.tokenId);
     const currentUsd = currentBase * mid;
     const deltaUsd = targetSignedUsd - currentUsd;
     const tolUsd = 1.0;
@@ -170,59 +159,70 @@ export class PolymarketAdapter implements VenueAdapter {
     const price = orderIsBuy ? Math.min(bestAsk + market.tickSize, 0.99) : Math.max(bestBid - market.tickSize, 0.01);
     const sizeBase = Math.abs(deltaUsd) / price;
     if (sizeBase < market.minOrderSize) {
-      console.log(`[pm] delta ${sizeBase} < min ${market.minOrderSize}, skip`);
-      // Still report target as filled — the drift is too small to trade through min order size.
+      // Two cases: (a) we already have a position (currentBase > 0) and the rebalance delta is
+      // too small to execute — report target USD as filled (drift-within-min-tick is fine). (b)
+      // opening from scratch and target position is below min — report Failed so controller
+      // enters LEG_FAILED cleanly instead of believing a phantom position exists.
+      console.log(`[pm] delta ${sizeBase} < min ${market.minOrderSize}, currentBase=${currentBase}`);
+      if (currentBase <= 0) {
+        return {
+          cycleId: intent.cycleId,
+          venue: this.venueId,
+          status: ExecStatus.Failed,
+          filledNotionalUsd: 0n,
+          filledBaseQty: 0n,
+          avgPriceE18: BigInt(Math.floor(mid * 1e18)),
+          externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
+          externalAccountRef: pad(account.address, { size: 32 }) as Hex,
+          terminal: true,
+          rawPayloadHash: keccak256(toBytes(`pm-below-min-open:${market.tokenId}:${sizeBase}`)),
+        };
+      }
+      // Drift rebalance can't execute through min order size — keep current position.
       return {
         cycleId: intent.cycleId,
         venue: this.venueId,
         status: ExecStatus.Filled,
-        filledNotionalUsd: BigInt(Math.floor(targetUsd * 1e6)),
+        filledNotionalUsd: BigInt(Math.floor(currentUsd * 1e6)),
         filledBaseQty: BigInt(Math.floor(currentBase * 1e18)),
         avgPriceE18: BigInt(Math.floor(mid * 1e18)),
         externalOrderId: pad(toHex(0), { size: 32 }) as Hex,
         externalAccountRef: pad(account.address, { size: 32 }) as Hex,
         terminal: true,
-        rawPayloadHash: keccak256(toBytes(`pm-rebalance-below-min:${market.tokenId}:${deltaUsd}`)),
+        rawPayloadHash: keccak256(toBytes(`pm-drift-below-min:${market.tokenId}:${deltaUsd}`)),
       };
     }
 
     try {
-      const signed = await client.createOrder({
-        tokenID: market.tokenId,
-        price: Math.round(price / market.tickSize) * market.tickSize,
-        size: sizeBase,
-        side,
-      });
-      console.log(`[pm] order signed ${orderIsBuy?'BUY':'SELL'} sz=${sizeBase.toFixed(3)} px=${price}, posting...`);
-      const resp = (await client.postOrder(signed, PmOrderType.FOK)) as Record<string, unknown>;
+      // v2 market-order (FOK/FAK) path: `amount` is USD for BUY, shares for SELL.
+      const amount = orderIsBuy ? Math.abs(deltaUsd) : sizeBase;
+      const resp = (await client.createAndPostMarketOrder(
+        {
+          tokenID: market.tokenId,
+          price: Math.round(price / market.tickSize) * market.tickSize,
+          amount,
+          side,
+        },
+        { tickSize: market.tickSize.toString() as PmTickSize },
+        PmOrderType.FOK,
+      )) as Record<string, unknown>;
+      console.log(`[pm] order ${orderIsBuy?'BUY':'SELL'} amount=${amount.toFixed(3)} px=${price}`);
       console.log(`[pm] resp: ${JSON.stringify(resp).slice(0,300)}`);
 
       // CLOSE-SIDE CCTP-BACK: if this rebalance SHRANK our PM exposure (SELL side), the freed
-      // USDC.e is now on our Polygon EOA. Bridge it to the Base module via CCTP V2 Fast Transfer
-      // so the controller's subsequent REFILL_RESERVE command finds USDC at the module to push
-      // into the sleeve. Fire-and-forget; failures logged but non-fatal for the leg response.
+      // USDC.e is now on our Polygon EOA. Bridge it to the Base module via CCTP V2 + mint on
+      // Base inline. BLOCKING: the /leg/execute response must NOT return before Base mint is
+      // confirmed, otherwise the controller's next REFILL_RESERVE finds the module empty.
       const freedUsd = currentUsd - targetSignedUsd; // positive when shrinking a long
       if (freedUsd > 1.0 && ctx?.moduleAddress) {
+        if (!creds.baseSignerKey) {
+          throw new Error("missing x-base-signer-key — can't finalize PM→Base CCTP on unwind");
+        }
         const micros = BigInt(Math.floor(freedUsd * 1e6));
-        console.log(`[pm] position shrank $${freedUsd.toFixed(2)} — firing CCTP-back to module ${ctx.moduleAddress}`);
-        (async () => {
-          try {
-            const { pub: polyPub, wallet: polyWallet } = (() => {
-              const pub = createPublicClient({ chain: viemPolygon, transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com") });
-              const wallet = createWalletClient({ chain: viemPolygon, transport: http(), account });
-              return { pub, wallet };
-            })();
-            await depositForBurn(polyWallet, polyPub, {
-              amount: micros,
-              destinationDomain: DOMAIN.BASE,
-              mintRecipient: ctx.moduleAddress,
-              usdc: POLYGON_USDC_E,
-            });
-            console.log(`[pm] CCTP-back burn fired, $${freedUsd.toFixed(2)} Polygon→Base`);
-          } catch (err) {
-            console.log(`[pm] CCTP-back failed (non-fatal): ${String(err).slice(0, 200)}`);
-          }
-        })();
+        console.log(`[pm] position shrank $${freedUsd.toFixed(2)} — unwindPmOutbound → module ${ctx.moduleAddress}`);
+        // baseSignerKey is TEE-injected per request via `x-base-signer-key` header.
+        const r = await unwindPmOutbound(creds.pmPrivateKey!, ctx.moduleAddress, micros, creds.baseSignerKey);
+        console.log(`[pm] CCTP-back complete: burn=${r.burnTxHash} mint=${r.baseReceiveTxHash}`);
       }
 
       return {
@@ -248,20 +248,13 @@ export class PolymarketAdapter implements VenueAdapter {
 
   async getBuffer(creds: VenueCredentials): Promise<LegBufferSnapshot> {
     if (!creds.pmPrivateKey) return zeroBuf();
-    const account = privateKeyToAccount(creds.pmPrivateKey);
-    // Buffer is raw USDC.e on Polygon at the PM wallet EOA — what CCTP mints to, and what
-    // the CLOB sees as deposited collateral once CTFExchange allowance is in place
-    // (ensurePmApproval runs in settlePmInbound post-burn). The PM CLOB `/balance` endpoint
-    // requires auth + proxy-address setup; reading wallet USDC directly is the source of truth.
+    // SDK-only: the CLOB's getBalanceAllowance(COLLATERAL) reports the user's USDC-denominated
+    // collateral allocated for PM — same source of truth as the CLOB uses for order matching.
+    // L1+L2 auth is derived automatically from the TEE-forwarded pmPrivateKey inside clobClient().
     try {
-      const bal = (await polygonPub.readContract({
-        address: POLYGON_USDC_E,
-        abi: [{ name: "balanceOf", type: "function", stateMutability: "view",
-          inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [account.address],
-      })) as bigint;
-      return { bufferUsd: bal, timestamp: nowSec() };
+      const client = await this.clobClient(creds.pmPrivateKey);
+      const resp = await client.getBalanceAllowance({ asset_type: PmAssetType.COLLATERAL });
+      return { bufferUsd: BigInt(resp.balance ?? "0"), timestamp: nowSec() };
     } catch {
       return zeroBuf();
     }
@@ -269,88 +262,68 @@ export class PolymarketAdapter implements VenueAdapter {
 
   async getPositionMarkValue(creds: VenueCredentials, _strategyId: Hex): Promise<bigint> {
     if (!creds.pmPrivateKey) return 0n;
-    const account = privateKeyToAccount(creds.pmPrivateKey);
-    try {
-      const res = await fetch(`${PM_API_URL}/positions?user=${account.address}`);
-      if (!res.ok) return 0n;
-      const positions: any[] = await res.json();
-      let total = 0;
-      for (const p of positions) {
-        const sz = parseFloat(p?.size ?? "0");
-        const px = parseFloat(p?.curPrice ?? p?.avgPrice ?? "0");
-        total += sz * px;
-      }
-      return BigInt(Math.floor(total * 1e6));
-    } catch {
-      return 0n;
+    // SDK-only: iterate the operator-supplied markets registry — for each known tokenId,
+    // ask the SDK for the current CTF balance + midpoint.
+    const client = await this.clobClient(creds.pmPrivateKey);
+    let totalUsd = 0;
+    for (const entry of Object.values(this.markets)) {
+      try {
+        const bal = await this.currentPositionBase(client, entry.tokenId);
+        if (bal <= 0) continue;
+        const mid = (await client.getMidpoint(entry.tokenId)) as { mid?: string } | number | string;
+        const midNum =
+          typeof mid === "number" ? mid :
+          typeof mid === "string" ? parseFloat(mid) :
+          parseFloat((mid as any)?.mid ?? "0");
+        if (!midNum) continue;
+        totalUsd += bal * midNum;
+      } catch {}
     }
+    return BigInt(Math.floor(totalUsd * 1e6));
   }
 
   async closeAllAndWithdraw(creds: VenueCredentials, strategyId: Hex): Promise<bigint> {
     if (!creds.pmPrivateKey) return 0n;
-    const account = privateKeyToAccount(creds.pmPrivateKey);
+    const client = await this.clobClient(creds.pmPrivateKey);
 
-    // 1. Fetch open positions from PM.
-    let positions: any[] = [];
-    try {
-      const res = await fetch(`${PM_API_URL}/positions?user=${account.address}`);
-      if (res.ok) positions = await res.json();
-    } catch {}
-
-    // 2. For each position with size > 0, post a signed SELL order via this.execute() with Side.Sell.
-    //    Reusing execute() keeps the EIP-712 signing + POLY header logic in one place.
-    for (const p of positions) {
-      const sz = parseFloat(p?.size ?? "0");
-      if (sz <= 0) continue;
-      const tokenIdStr: string | undefined = p?.asset ?? p?.tokenId;
-      if (!tokenIdStr) continue;
-
-      const marketRef = (`0x${BigInt(tokenIdStr).toString(16).padStart(64, "0")}`) as Hex;
-      const curPrice = parseFloat(p?.curPrice ?? p?.avgPrice ?? "0") || 0.5;
-      const notionalUsd = BigInt(Math.floor(sz * curPrice * 1e6));
-      if (notionalUsd === 0n) continue;
-
-      const sellIntent: ExecutionIntent = {
-        cycleId: strategyId, // use strategyId as correlation for unwind-time intents
-        venue: this.venueId,
-        marketRef,
-        side: Side.Sell,
-        targetNotionalUsd: notionalUsd,
-        maxSlippageBps: 100, // wider on unwind to prioritize completion
-        expiryBlock: 0n,
-        idempotencyKey: (`0x${BigInt(tokenIdStr).toString(16).padStart(64, "0")}`) as Hex,
-        marginMode: 0,
-      };
-      // Errors are swallowed — a failure on one position shouldn't block the others.
+    // SDK-only: walk the markets registry — for each tokenId we track, read the CTF balance
+    // via `getBalanceAllowance`, and if non-zero route a SELL through this.execute()
+    // (which reuses SDK signing for the order).
+    for (const [marketRef, entry] of Object.entries(this.markets) as [Hex, PmMarketEntry][]) {
       try {
+        const baseQty = await this.currentPositionBase(client, entry.tokenId);
+        if (baseQty <= 0) continue;
+        const mid = (await client.getMidpoint(entry.tokenId)) as { mid?: string } | number | string;
+        const midNum =
+          typeof mid === "number" ? mid :
+          typeof mid === "string" ? parseFloat(mid) :
+          parseFloat((mid as any)?.mid ?? "0");
+        if (!midNum) continue;
+
+        const notionalUsd = BigInt(Math.floor(baseQty * midNum * 1e6));
+        if (notionalUsd === 0n) continue;
+
+        const sellIntent: ExecutionIntent = {
+          cycleId: strategyId,
+          venue: this.venueId,
+          marketRef,
+          side: Side.Sell,
+          targetNotionalUsd: notionalUsd,
+          maxSlippageBps: 100,
+          expiryBlock: 0n,
+          idempotencyKey: marketRef,
+          marginMode: 0,
+        };
         await this.execute(sellIntent, creds);
       } catch {}
     }
 
-    // 3. Read ERC20 USDC.balanceOf(EOA) on Polygon — that's what's directly CCTP-burnable via
-    //    `unwindPmOutbound`. If PM settles positions via a CTF Exchange proxy wallet
-    //    instead of the EOA, the user (or adapter with proxy-owner auth) must first move USDC
-    //    from the proxy to the EOA — via PM's "Cash Out" UI or a direct transfer from the proxy
-    //    contract. We don't attempt that here because the proxy mechanism is account-specific.
+    // Post-unwind USDC collateral — exactly what `unwindPmOutbound` can CCTP-burn back to Base.
+    // SDK reports the collateral balance tracked by the CLOB (same value the caller would see
+    // after reconciliation), which is the correct signal for the unwind amount.
     try {
-      const { createPublicClient, http: viemHttp, defineChain } = await import("viem");
-      const polygon = defineChain({
-        id: 137,
-        name: "Polygon",
-        nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-        rpcUrls: { default: { http: ["https://polygon-bor-rpc.publicnode.com"] } },
-      });
-      const pub = createPublicClient({ chain: polygon, transport: viemHttp() });
-      const USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as const;
-      const erc20Abi = [{
-        name: "balanceOf", type: "function", stateMutability: "view",
-        inputs: [{ name: "account", type: "address" }],
-        outputs: [{ name: "", type: "uint256" }],
-      }] as const;
-      const bal = (await pub.readContract({
-        address: USDC_E, abi: erc20Abi, functionName: "balanceOf", args: [account.address],
-      })) as bigint;
-      return bal;
+      const resp = await client.getBalanceAllowance({ asset_type: PmAssetType.COLLATERAL });
+      return BigInt(resp.balance ?? "0");
     } catch {
       return 0n;
     }
