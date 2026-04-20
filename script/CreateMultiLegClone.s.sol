@@ -29,6 +29,12 @@ contract CreateMultiLegClone is Script {
 
         // Leg 0: long HL spot ETH (reference, w=+100%, β ignored)
         // Leg 1: short HL perp ETH (hedge, w=-100%, β=+100% → hedge sizes 1:1 with spot)
+        //
+        // Each leg gets its own destinationRef so the adapter can route USDC to the correct
+        // HL sub-balance (spot vs perp). Both routes target the SAME HL wallet at the CCTP layer
+        // — the split happens adapter-side via HL Core transfers after mint. The caller MUST
+        // register matching routes on BaseCctpSender via `ConfigureCloneCctpRoutes` (HL_WALLET
+        // env var configures both `dest:hl:spot` and `dest:hl:perp` to the same wallet).
         LegConfig[] memory legs = new LegConfig[](2);
         legs[0] = LegConfig({
             venue: ML_VENUE_HL_SPOT,

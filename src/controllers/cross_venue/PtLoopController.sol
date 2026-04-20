@@ -402,7 +402,11 @@ contract PtLoopController is ReentrancyGuard {
         scheduleGasLimit = _gasLimit;
         scheduleMaxFeePerGas = _maxFeePerGas;
         if (scheduleRenewThreshold == 0) scheduleRenewThreshold = 2;
-        if (perCallHttpBudget == 0) perCallHttpBudget = 2e15;
+        // 4e15 (0.004 RITUAL) covers Phase 1 commitment + Phase 1 settlement replay + Phase 2
+        // delivery for a 0x0805 long-running HTTP call per tick. An earlier 2e15 default only
+        // covered Phase 2 delivery, letting `maybeRenew` register batches the wallet couldn't
+        // sustain. Tune via `setPerCallHttpBudget` if operator sees under/over-spend.
+        if (perCallHttpBudget == 0) perCallHttpBudget = 4e15;
     }
 
     /// @notice Owner escape hatch: update the renewal threshold. Default 2 (renew when the

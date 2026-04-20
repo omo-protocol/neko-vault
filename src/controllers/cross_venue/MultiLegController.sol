@@ -401,7 +401,11 @@ contract MultiLegController is ReentrancyGuard {
         scheduleGasLimit = _gasLimit;
         scheduleMaxFeePerGas = _maxFeePerGas;
         if (scheduleRenewThreshold == 0) scheduleRenewThreshold = 2;
-        if (perCallHttpBudget == 0) perCallHttpBudget = 2e15;
+        // 4e15 (0.004 RITUAL) covers all three 0x0805 billing points per tick: Phase 1 commitment
+        // + Phase 1 settlement replay + Phase 2 delivery. An earlier 2e15 default only covered
+        // Phase 2, causing `maybeRenew` to greenlight renewals the wallet couldn't sustain.
+        // Tune via `setPerCallHttpBudget` if the executor quotes differently.
+        if (perCallHttpBudget == 0) perCallHttpBudget = 4e15;
     }
 
     /// @notice Owner escape hatch: update the per-tick HTTP fee estimate used by renewal cost
