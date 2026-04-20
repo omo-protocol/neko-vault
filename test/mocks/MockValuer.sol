@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
+import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
+
 contract MockValuer {
     mapping(address => uint256) public values;
     mapping(bytes32 => uint256) public strategyValues;
+    mapping(bytes32 => uint64) public reportTimestamps;
+
+    function isValuationHealthy(address) external pure returns (bool) {
+        return true;
+    }
 
     function setValue(address target, uint256 value) external {
         values[target] = value;
@@ -12,10 +19,12 @@ contract MockValuer {
         // This ensures tests using setValue(address) work with new getValue(ESCROW_TOTAL_ID) pattern
         bytes32 totalId = keccak256(abi.encodePacked("ESCROW_TOTAL", target));
         strategyValues[totalId] = value;
+        reportTimestamps[totalId] = uint64(block.timestamp);
     }
 
     function setValue(bytes32 strategyId, uint256 value) external {
         strategyValues[strategyId] = value;
+        reportTimestamps[strategyId] = uint64(block.timestamp);
     }
 
     function getValue(address target) external view returns (uint256) {
@@ -36,6 +45,10 @@ contract MockValuer {
         }
 
         return strategyValue;
+    }
+
+    function getReport(bytes32 strategyId) external view returns (IUniversalValuerOffchain.ValueReport memory report) {
+        report.timestamp = reportTimestamps[strategyId];
     }
 
 }

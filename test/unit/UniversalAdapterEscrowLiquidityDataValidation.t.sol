@@ -8,6 +8,7 @@ import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalA
 import "../mocks/MockERC20.sol";
 import "../mocks/MockVaultV2.sol";
 import "../mocks/MockValuer.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowLiquidityDataValidationTest
@@ -22,10 +23,12 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
     MockValuer valuer;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
     bytes32 strategyId = keccak256("test-strategy");
 
     function setUp() public {
+        agent = address(new MockAgent());
+
         vm.startPrank(owner);
 
         // Deploy contracts
@@ -35,12 +38,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
 
         // Deploy adapter via factory
         UniversalAdapterEscrowFactory factory = new UniversalAdapterEscrowFactory();
-        address adapterAddress = factory.deployAdapter(
-            address(vault),
-            address(valuer),
-            false,
-            bytes32(uint256(1))
-        );
+        address adapterAddress = factory.deployAdapter(address(vault), bytes32(uint256(1)));
         adapter = UniversalAdapterEscrow(payable(adapterAddress));
 
         // Configure strategy
@@ -54,7 +52,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
     function testAllocateWithEmptyCalls() public {
         // Prepare allocation with empty calls array
         IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
+        bytes memory allocData = abi.encode(strategyId, 0, emptyCalls);
 
         // Mint assets to vault
         asset.mint(address(vault), 1000e6);
@@ -72,7 +70,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
 
     function testAllocateMultipleDepositsWithEmptyCalls() public {
         IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
+        bytes memory allocData = abi.encode(strategyId, 0, emptyCalls);
 
         // First deposit: 500
         asset.mint(address(vault), 500e6);
@@ -104,7 +102,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
             value: 0
         });
 
-        bytes memory allocData = abi.encode(strategyId, 0, false, calls);
+        bytes memory allocData = abi.encode(strategyId, 0, calls);
 
         asset.mint(address(vault), 1000e6);
 
@@ -133,7 +131,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
             value: 0
         });
 
-        bytes memory allocData = abi.encode(strategyId, 0, false, calls);
+        bytes memory allocData = abi.encode(strategyId, 0, calls);
 
         asset.mint(address(vault), 1000e6);
 
@@ -154,7 +152,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
             value: 0
         });
 
-        bytes memory allocData = abi.encode(strategyId, 0, false, calls);
+        bytes memory allocData = abi.encode(strategyId, 0, calls);
 
         // Should revert due to InvalidAmount before checking calls
         vm.prank(address(vault));
@@ -167,7 +165,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
         amount = bound(amount, 1, 1_000_000_000e6);
 
         IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
+        bytes memory allocData = abi.encode(strategyId, 0, emptyCalls);
 
         asset.mint(address(vault), amount);
 
@@ -184,7 +182,7 @@ contract UniversalAdapterEscrowLiquidityDataValidationTest is Test {
     function testCompleteWorkflowWithEmptyCallsValidation() public {
         // 1. User deposits to vault (triggers allocate with empty calls)
         IUniversalAdapterEscrow.Call[] memory emptyCalls = new IUniversalAdapterEscrow.Call[](0);
-        bytes memory allocData = abi.encode(strategyId, 0, false, emptyCalls);
+        bytes memory allocData = abi.encode(strategyId, 0, emptyCalls);
 
         asset.mint(address(vault), 1000e6);
         vm.prank(address(vault));

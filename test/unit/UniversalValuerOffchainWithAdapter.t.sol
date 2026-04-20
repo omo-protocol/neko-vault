@@ -8,6 +8,7 @@ import "../../src/VaultV2.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {IUniversalValuerOffchain} from "../../src/adapters/interfaces/IUniversalValuerOffchain.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 contract UniversalValuerOffchainWithAdapterTest is Test {
     UniversalValuerOffchain valuer;
@@ -16,10 +17,13 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
     MockERC20 asset;
 
     address owner = address(0x1);
-    address agent = address(0x2);
+    address agent;
     bytes32 strategyId = keccak256("test-strategy");
 
     function setUp() public {
+        // Deploy MockAgent for agent address
+        agent = address(new MockAgent());
+
         // Deploy mock asset
         asset = new MockERC20("Test Token", "TEST", 18);
 
@@ -32,7 +36,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.stopPrank();
 
         // Deploy adapter (parentVault should be set during construction)
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Add adapter to vault and set permissions
         vm.startPrank(owner);
@@ -83,12 +87,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vault.increaseRelativeCap(idData, 1e18);
 
         // Prepare allocation data
-        bytes memory allocData = abi.encode(
-            strategyId,
-            100e18,
-            false, // don't execute now
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
 
         // Allocate funds to the strategy
         vault.allocate(address(adapter), allocData, 100e18);
@@ -144,12 +143,7 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.warp(block.timestamp + 1);
         vault.increaseRelativeCap(idData, 1e18);
 
-        bytes memory allocData = abi.encode(
-            strategyId,
-            100e18,
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vault.allocate(address(adapter), allocData, 100e18);
 
         // Verify strategy is active
@@ -160,7 +154,6 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         bytes memory deallocData = abi.encode(
             strategyId,
             0,
-            false,
             new IUniversalAdapterEscrow.Call[](0) // No withdrawal calls needed
         );
         vault.deallocate(address(adapter), deallocData, 100e18);
@@ -233,29 +226,23 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.warp(block.timestamp + 1);
         vault.increaseRelativeCap(idData, 1e18);
 
-        bytes memory allocData = abi.encode(
-            strategyId,
-            100e18,
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vault.allocate(address(adapter), allocData, 100e18);
         vm.stopPrank();
 
         // Update the strategy value in the valuer
-        bytes32 hash = keccak256(abi.encode(
-            strategyId,
-            500e18, // value
-            95,     // confidence
-            1,      // nonce
-            block.timestamp + 1 hours, // expiry
-            block.chainid,
-            address(valuer)
-        ));
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            hash
-        ));
+        bytes32 hash = keccak256(
+            abi.encode(
+                strategyId,
+                500e18, // value
+                95, // confidence
+                1, // nonce
+                block.timestamp + 1 hours, // expiry
+                block.chainid,
+                address(valuer)
+            )
+        );
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
 
         bytes[] memory signatures = new bytes[](1);
@@ -269,7 +256,11 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
 
         // getValue(ESCROW_TOTAL_ID) should return strategy value only (idle balance NOT included)
         uint256 totalValue = valuer.getValue(escrowTotalId);
-        assertEq(totalValue, 500e18, "Should return strategy value only (idle balance NOT included due to line 235 commented)");
+        assertEq(
+            totalValue,
+            500e18,
+            "Should return strategy value only (idle balance NOT included due to line 235 commented)"
+        );
     }
 
     /// @notice Test that unregistered ESCROW_TOTAL IDs still revert (security)
@@ -319,29 +310,14 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
         vm.warp(block.timestamp + 1);
         vault.increaseRelativeCap(idData, 1e18);
 
-        bytes memory allocData = abi.encode(
-            strategyId,
-            100e18,
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vault.allocate(address(adapter), allocData, 100e18);
         vm.stopPrank();
 
         // Update strategy value
-        bytes32 hash = keccak256(abi.encode(
-            strategyId,
-            500e18,
-            95,
-            1,
-            block.timestamp + 1 hours,
-            block.chainid,
-            address(valuer)
-        ));
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            hash
-        ));
+        bytes32 hash =
+            keccak256(abi.encode(strategyId, 500e18, 95, 1, block.timestamp + 1 hours, block.chainid, address(valuer)));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
 
         bytes[] memory signatures = new bytes[](1);
@@ -358,6 +334,10 @@ contract UniversalValuerOffchainWithAdapterTest is Test {
 
         // getValue(ESCROW_TOTAL_ID) should return 0 since strategy value is stale and idle balance NOT included
         uint256 totalValue = valuer.getValue(escrowTotalId);
-        assertEq(totalValue, 0, "Should return 0 when strategies are stale (idle balance NOT included due to line 235 commented)");
+        assertEq(
+            totalValue,
+            0,
+            "Should return 0 when strategies are stale (idle balance NOT included due to line 235 commented)"
+        );
     }
 }

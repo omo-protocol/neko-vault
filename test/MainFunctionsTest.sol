@@ -42,6 +42,8 @@ contract MainFunctionsTest is BaseTest {
     }
 
     function testPostConstruction(address _owner, address asset) public {
+        vm.assume(_owner != address(0));
+        vm.assume(asset != address(0));
         vm.assume(asset != address(vm));
         vm.assume(asset != CONSOLE);
         vm.mockCall(asset, IERC20.decimals.selector, abi.encode(uint8(18)));

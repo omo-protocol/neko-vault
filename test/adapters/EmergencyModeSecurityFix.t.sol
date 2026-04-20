@@ -7,6 +7,7 @@ import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalA
 import {VaultV2} from "../../src/VaultV2.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockValuer} from "../mocks/MockValuer.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /// @title EmergencyModeSecurityFixTest
 /// @notice Tests for SECURITY FIX Issue #2: Cached Valuation Exploitation via Emergency Mode
@@ -19,6 +20,7 @@ contract EmergencyModeSecurityFixTest is Test {
 
     address public owner;
     address public agent;
+    MockAgent public mockAgent;
     address public user;
 
     bytes32 public strategyId;
@@ -30,7 +32,8 @@ contract EmergencyModeSecurityFixTest is Test {
 
     function setUp() public {
         owner = address(this);
-        agent = makeAddr("agent");
+        mockAgent = new MockAgent();
+        agent = address(mockAgent);
         user = makeAddr("user");
 
         // Deploy mock asset
@@ -43,7 +46,7 @@ contract EmergencyModeSecurityFixTest is Test {
         valuer = new MockValuer();
 
         // Deploy adapter
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), true);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy
         strategyId = keccak256("test_strategy");
@@ -66,7 +69,7 @@ contract EmergencyModeSecurityFixTest is Test {
         assertEq(adapter.emergencyModeActivatedAt(), 0);
 
         vm.expectEmit(true, true, true, true);
-        emit EmergencyModeEnabled(block.timestamp, "Valuer unavailable");
+        emit EmergencyModeEnabled(block.timestamp, "Valuation unavailable");
 
         adapter.enableEmergencyMode();
 
@@ -123,7 +126,7 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.enableEmergencyMode();
 
         // Try to disable - should fail because valuer still returns 0
-        vm.expectRevert(IUniversalAdapterEscrow.ValuerStillUnavailable.selector);
+        vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.disableEmergencyMode();
     }
 
@@ -167,16 +170,13 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.refreshCachedValuation();
 
         // Verify cache was set
-        (uint256 cachedVal, uint256 cachedTime, bool isStale) = adapter.getCachedValuation();
+        (uint256 cachedVal,, bool isStale) = adapter.getCachedValuation();
         assertEq(cachedVal, 1000e6, "Should cache 1000");
         assertFalse(isStale, "Should not be stale");
 
         // Simulate valuer going down
         _setValuerValue(0);
 
-        // SECURITY FIX: When valuer is down and NOT in emergency mode, realAssets() reverts.
-        // This forces admin to explicitly enable emergency mode before any fallback is used,
-        // preventing attackers from exploiting automatic fallbacks during outages.
         vm.expectRevert(IUniversalAdapterEscrow.ValuationUnavailable.selector);
         adapter.realAssets();
 
@@ -184,14 +184,12 @@ contract EmergencyModeSecurityFixTest is Test {
         adapter.enableEmergencyMode();
 
         // Verify cache was invalidated
-        (, , bool isStaleAfter) = adapter.getCachedValuation();
+        (,, bool isStaleAfter) = adapter.getCachedValuation();
         assertTrue(isStaleAfter, "Cache should be stale after emergency mode enabled");
 
-        // In emergency mode with valuer down and stale cache, uses emergency fallback with haircut
-        // allocatedInAdapterBounded = 0, totalExternalDeposits = 0
-        // Result = (0 + 0) * 95% = 0
+        // In emergency mode, the adapter still reports the conservative tracked-asset fallback.
         uint256 emergencyValue = adapter.realAssets();
-        assertEq(emergencyValue, 0, "Should use emergency fallback (0) with haircut");
+        assertEq(emergencyValue, 0, "Should use emergency fallback with tracked-asset clamp");
     }
 
     // NOTE: testRealAssetsWithEmergencyModeUsesExternalDepositsFloor removed
@@ -299,15 +297,20 @@ contract EmergencyModeSecurityFixTest is Test {
         asset.mint(address(vault), amount);
 
         IUniversalAdapterEscrow.Call[] memory calls;
-        bytes memory data = abi.encode(_strategyId, 0, false, calls);
+        bytes memory data = abi.encode(_strategyId, 0, calls);
 
         vm.prank(address(vault));
         adapter.allocate(data, amount, bytes4(0), address(0));
     }
 
     function _setValuerValue(uint256 value) internal {
-        // Set the ESCROW_TOTAL ID value (what realAssets() queries)
-        valuer.setValue(totalId, value);
+        // Set agent's quoteCurrentAssets return value (what realAssets() queries)
+        if (value == 0) {
+            mockAgent.setShouldFail(true);
+        } else {
+            mockAgent.setShouldFail(false);
+            mockAgent.setAssets(value);
+        }
     }
 
     function _simulateExternalDeposit(bytes32 _strategyId, uint256 amount) internal {

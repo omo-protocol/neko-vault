@@ -1,0 +1,31 @@
+{
+  "name": "@neko-vault/adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "bootstrap-clone": "tsx scripts/bootstrapClone.ts"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "^1.0.0",
+    "dotenv": "^17.4.2",
+    "eciesjs": "^0.4.18",
+    "ethers": "^6.16.0",
+    "fastify": "^5.8.5",
+    "hyperliquid": "^1.7.7",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -39,7 +39,9 @@ contract UniversalValuerOffchainComprehensive is Test {
 
     event ValueUpdated(bytes32 indexed strategyId, uint256 value, uint256 confidence, uint256 timestamp, bool isPush);
     event SignerConfigured(address indexed signer, bool authorized, uint256 weight);
-    event StrategyConfigured(bytes32 indexed strategyId, uint256 minUpdateInterval, uint256 maxStaleness, uint256 pushThreshold);
+    event StrategyConfigured(
+        bytes32 indexed strategyId, uint256 minUpdateInterval, uint256 maxStaleness, uint256 pushThreshold
+    );
     event RequiredWeightUpdated(uint256 newWeight);
     event FallbackValueSet(bytes32 indexed strategyId, uint256 value);
     event EmergencyModeToggled(bool enabled);
@@ -57,7 +59,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer = new UniversalValuerOffchain(owner, address(asset));
         vm.stopPrank();
 
-        adapter = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup signers
         signer1 = vm.addr(signer1Key);
@@ -390,6 +392,21 @@ contract UniversalValuerOffchainComprehensive is Test {
         assertTrue(valuer.needsUpdate(STRATEGY_A));
     }
 
+    function testNeedsUpdateUsesEffectiveDefaultsForUnconfiguredStrategy() public {
+        bytes32 strategyId = keccak256("UNCONFIGURED_STRATEGY");
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = _signValue(strategyId, 1000e18, 90, 1, block.timestamp + 1 hours, signer1Key);
+
+        vm.prank(owner);
+        valuer.updateValue(strategyId, 1000e18, 90, 1, block.timestamp + 1 hours, signatures);
+
+        assertFalse(valuer.needsUpdate(strategyId));
+
+        vm.warp(block.timestamp + MAX_STALENESS + 1);
+
+        assertTrue(valuer.needsUpdate(strategyId));
+    }
+
     /* SIGNER MANAGEMENT TESTS */
 
     function testInitiateSignerChange() public {
@@ -423,7 +440,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Initiate removal
         valuer.initiateSignerChange(signerToRemove, false, 0);
 
-        // Try immediate execution (should fail)
+        // Try signer removal before timelock expiry (should fail)
         vm.expectRevert(IUniversalValuerOffchain.SignerRemovalTimelockNotExpired.selector);
         valuer.executeSignerRemoval(signerToRemove);
 
@@ -569,7 +586,8 @@ contract UniversalValuerOffchainComprehensive is Test {
         bytes[] memory signatures = new bytes[](1);
         signatures[0] = _signValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signer1Key);
         valuer.setEmergencyMode(false); // Temporarily disable to allow update
-        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures); // Already in owner context
+        valuer.updateValue(STRATEGY_A, 1000e18, 95, 1, block.timestamp + 1 hours, signatures); // Already in owner
+            // context
         valuer.setEmergencyMode(true); // Re-enable emergency mode
 
         // Make the report stale by warping time
@@ -707,7 +725,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             5 minutes,
             24 hours,
             1000,
-            50  // Allow 50% confidence for this test
+            50 // Allow 50% confidence for this test
         );
         vm.stopPrank();
 
@@ -793,20 +811,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 expiry,
         uint256 privateKey
     ) internal view returns (bytes memory) {
-        bytes32 messageHash = keccak256(abi.encode(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, ethSignedHash);
         return abi.encodePacked(r, s, v);
@@ -821,20 +829,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 privateKey
     ) internal view returns (bytes memory) {
         // Include domain separation to prevent cross-chain/cross-instance replay
-        bytes32 batchHash = keccak256(abi.encode(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 batchHash =
+            keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            batchHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, ethSignedHash);
         return abi.encodePacked(r, s, v);
@@ -872,12 +870,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         vault.increaseRelativeCap(idData, 1e18);
 
         // Allocate
-        bytes memory allocData = abi.encode(
-            STRATEGY_A,
-            100e18,
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory allocData = abi.encode(STRATEGY_A, 0, new IUniversalAdapterEscrow.Call[](0));
         vault.allocate(address(adapter), allocData, 100e18);
 
         vm.stopPrank();
@@ -902,10 +895,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.prank(owner);
         valuer.configureStrategy(
             STRATEGY_A,
-            5 minutes,    // minUpdateInterval
-            24 hours,     // maxStaleness (at maximum allowed)
-            1000,         // pushThreshold (10%)
-            95            // minConfidence
+            5 minutes, // minUpdateInterval
+            24 hours, // maxStaleness (at maximum allowed)
+            1000, // pushThreshold (10%)
+            95 // minConfidence
         );
 
         // Create a valid signature for value update
@@ -914,20 +907,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 nonce = 1;
         uint256 expiry = block.timestamp + 30 minutes;
 
-        bytes32 messageHash = keccak256(abi.encode(
-            STRATEGY_A,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(STRATEGY_A, value, confidence, nonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, ethSignedHash);
         bytes[] memory signatures = new bytes[](1);
@@ -944,7 +927,9 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         // Check that signer is still authorized but has pending deactivation
         assertTrue(valuer.isAuthorizedSigner(testSigner), "Signer should still be authorized");
-        assertTrue(valuer.signerChangeTimestamp(testSigner) > block.timestamp, "Should have future deactivation timestamp");
+        assertTrue(
+            valuer.signerChangeTimestamp(testSigner) > block.timestamp, "Should have future deactivation timestamp"
+        );
 
         // Advance time to exactly match signer timelock expiry (24 hours)
         vm.warp(block.timestamp + 24 hours); // Exactly at 24-hour SIGNER_TIMELOCK expiry
@@ -959,20 +944,11 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 currentTime = block.timestamp;
         uint256 testExpiry = currentTime + 59 minutes; // Maximum allowed (just under 1 hour)
 
-        bytes32 testMessageHash = keccak256(abi.encode(
-            STRATEGY_A,
-            testValue,
-            confidence,
-            testNonce,
-            testExpiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 testMessageHash = keccak256(
+            abi.encode(STRATEGY_A, testValue, confidence, testNonce, testExpiry, block.chainid, address(valuer))
+        );
 
-        bytes32 testEthSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            testMessageHash
-        ));
+        bytes32 testEthSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", testMessageHash));
 
         (uint8 testV, bytes32 testR, bytes32 testS) = vm.sign(signerKey, testEthSignedHash);
         bytes[] memory testSignatures = new bytes[](1);
@@ -998,33 +974,23 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Configure strategy with minimum confidence requirement
         valuer.configureStrategy(
             STRATEGY_A,
-            5 minutes,    // minUpdateInterval
-            24 hours,     // maxStaleness
-            1000,         // pushThreshold (10%)
-            90            // minConfidence - require at least 90% confidence
+            5 minutes, // minUpdateInterval
+            24 hours, // maxStaleness
+            1000, // pushThreshold (10%)
+            90 // minConfidence - require at least 90% confidence
         );
         vm.stopPrank();
 
         // Create a valid signature for value update with low confidence
         uint256 value = 1000e18;
-        uint256 lowConfidence = 50;  // Only 50% confidence, below the 90% requirement
+        uint256 lowConfidence = 50; // Only 50% confidence, below the 90% requirement
         uint256 nonce = 1;
         uint256 expiry = block.timestamp + 30 minutes;
 
-        bytes32 messageHash = keccak256(abi.encode(
-            STRATEGY_A,
-            value,
-            lowConfidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(STRATEGY_A, value, lowConfidence, nonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signer1Key, ethSignedHash);
         bytes[] memory signatures = new bytes[](1);
@@ -1039,20 +1005,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 goodConfidence = 95;
         uint256 newNonce = 2;
 
-        bytes32 newMessageHash = keccak256(abi.encode(
-            STRATEGY_A,
-            value,
-            goodConfidence,
-            newNonce,
-            expiry,
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 newMessageHash =
+            keccak256(abi.encode(STRATEGY_A, value, goodConfidence, newNonce, expiry, block.chainid, address(valuer)));
 
-        bytes32 newEthSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            newMessageHash
-        ));
+        bytes32 newEthSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", newMessageHash));
 
         (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(signer1Key, newEthSignedHash);
         signatures[0] = abi.encodePacked(r2, s2, v2);
@@ -1074,10 +1030,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Configure strategies with minimum confidence requirements
         valuer.configureStrategy(
             STRATEGY_A,
-            5 minutes,    // minUpdateInterval
-            24 hours,     // maxStaleness
-            1000,         // pushThreshold
-            85            // minConfidence - require at least 85% confidence
+            5 minutes, // minUpdateInterval
+            24 hours, // maxStaleness
+            1000, // pushThreshold
+            85 // minConfidence - require at least 85% confidence
         );
 
         valuer.configureStrategy(
@@ -1085,7 +1041,7 @@ contract UniversalValuerOffchainComprehensive is Test {
             5 minutes,
             24 hours,
             1000,
-            90            // minConfidence - require at least 90% confidence
+            90 // minConfidence - require at least 90% confidence
         );
         vm.stopPrank();
 
@@ -1098,21 +1054,14 @@ contract UniversalValuerOffchainComprehensive is Test {
         strategyIds[1] = STRATEGY_B;
         values[0] = 1000e18;
         values[1] = 2000e18;
-        confidences[0] = 85;  // Meets STRATEGY_A requirement
-        confidences[1] = 80;  // Below STRATEGY_B requirement (90)
+        confidences[0] = 85; // Meets STRATEGY_A requirement
+        confidences[1] = 80; // Below STRATEGY_B requirement (90)
 
         uint256 nonce = 1;
         uint256 expiry = block.timestamp + 30 minutes;
 
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         // Should revert due to STRATEGY_B's low confidence
         vm.prank(owner);
@@ -1120,17 +1069,10 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
 
         // Now try with sufficient confidence for both
-        confidences[0] = 95;  // Meets both STRATEGY_A (85) and global (95) requirements
-        confidences[1] = 95;  // Meets both STRATEGY_B (90) and global (95) requirements
+        confidences[0] = 95; // Meets both STRATEGY_A (85) and global (95) requirements
+        confidences[1] = 95; // Meets both STRATEGY_B (90) and global (95) requirements
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         // This should succeed
         vm.prank(owner);
@@ -1151,11 +1093,13 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer.setPriceChangeBounds(STRATEGY_A, 2000); // 20% max change
 
         // Try to configure strategy with pushThreshold > maxPriceChangeBps
-        vm.expectRevert(abi.encodeWithSelector(
-            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
-            3000, // pushThreshold
-            2000  // maxChange
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
+                3000, // pushThreshold
+                2000 // maxChange
+            )
+        );
         valuer.configureStrategy(
             STRATEGY_A,
             5 minutes,
@@ -1196,11 +1140,13 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         // Try to set price bounds lower than existing pushThreshold
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(
-            IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
-            3000, // pushThreshold
-            2000  // maxChange
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniversalValuerOffchain.PushThresholdExceedsMaxChange.selector,
+                3000, // pushThreshold
+                2000 // maxChange
+            )
+        );
         valuer.setPriceChangeBounds(STRATEGY_A, 2000); // 20% < 30%
 
         // Should work when bounds >= pushThreshold
@@ -1268,18 +1214,22 @@ contract UniversalValuerOffchainComprehensive is Test {
 
         // Update with change that exceeds price bounds (should revert)
         vm.warp(block.timestamp + 6 minutes); // Bypass update interval
-        signatures[0] = _signValue(STRATEGY_A, 1500e18, 95, 2, block.timestamp + 1 hours, signer1Key); // 50% increase > 40% limit
+        signatures[0] = _signValue(STRATEGY_A, 1500e18, 95, 2, block.timestamp + 1 hours, signer1Key); // 50% increase >
+            // 40% limit
 
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(
-            IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
-            5000, // 50% change
-            4000  // 40% limit
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
+                5000, // 50% change
+                4000 // 40% limit
+            )
+        );
         valuer.updateValue(STRATEGY_A, 1500e18, 95, 2, block.timestamp + 1 hours, signatures);
 
         // Update with change within bounds (should succeed)
-        signatures[0] = _signValue(STRATEGY_A, 1300e18, 95, 3, block.timestamp + 1 hours, signer1Key); // 30% increase < 40% limit
+        signatures[0] = _signValue(STRATEGY_A, 1300e18, 95, 3, block.timestamp + 1 hours, signer1Key); // 30% increase <
+            // 40% limit
         vm.prank(owner);
         valuer.updateValue(STRATEGY_A, 1300e18, 95, 3, block.timestamp + 1 hours, signatures);
 
@@ -1297,18 +1247,18 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Configure strategies with different parameters
         valuer.configureStrategy(
             STRATEGY_A,
-            5 minutes,  // minUpdateInterval
-            24 hours,   // maxStaleness
-            2000,       // 20% pushThreshold
-            90          // minConfidence
+            5 minutes, // minUpdateInterval
+            24 hours, // maxStaleness
+            2000, // 20% pushThreshold
+            90 // minConfidence
         );
 
         valuer.configureStrategy(
             STRATEGY_B,
             10 minutes, // different minUpdateInterval
             24 hours,
-            3000,       // 30% pushThreshold
-            95          // minConfidence
+            3000, // 30% pushThreshold
+            95 // minConfidence
         );
 
         // Set price bounds
@@ -1333,14 +1283,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 expiry = block.timestamp + 1 hours;
 
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
@@ -1354,14 +1297,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         nonce = 2;
         expiry = block.timestamp + 1 hours;
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         // ATOMICITY FIX: Batch updates are now atomic - this should revert instead of skipping
         vm.prank(owner);
@@ -1378,14 +1314,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         nonce = 3;
         expiry = block.timestamp + 1 hours;
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
@@ -1429,14 +1358,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 expiry = block.timestamp + 1 hours;
 
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
@@ -1449,22 +1371,17 @@ contract UniversalValuerOffchainComprehensive is Test {
         nonce = 2;
         expiry = block.timestamp + 1 hours;
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         // L-02 FIX: Should revert due to price bounds validation
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(
-            IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
-            4000, // 40% change
-            3000  // 30% limit
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniversalValuerOffchain.PriceChangeExceedsBounds.selector,
+                4000, // 40% change
+                3000 // 30% limit
+            )
+        );
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
 
         // Try with change within bounds
@@ -1472,14 +1389,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         nonce = 3;
         expiry = block.timestamp + 1 hours;
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
@@ -1531,14 +1441,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         uint256 expiry = block.timestamp + 1 hours;
 
         bytes[] memory signatures = new bytes[](1);
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         vm.prank(owner);
         valuer.batchUpdateValues(strategyIds, values, confidences, nonce, expiry, signatures);
@@ -1552,14 +1455,7 @@ contract UniversalValuerOffchainComprehensive is Test {
         nonce = 2;
         expiry = block.timestamp + 1 hours;
 
-        signatures[0] = _signBatch(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            signer1Key
-        );
+        signatures[0] = _signBatch(strategyIds, values, confidences, nonce, expiry, signer1Key);
 
         // ATOMICITY FIX: Since STRATEGY_B fails validation (insufficient change before interval),
         // the ENTIRE batch now reverts instead of partially updating
@@ -1721,14 +1617,13 @@ contract UniversalValuerOffchainComprehensive is Test {
         valuer.configureStrategy(
             STRATEGY_A,
             MIN_UPDATE_INTERVAL, // Exactly minimum
-            MAX_STALENESS,       // Exactly maximum
-            1000,               // 10% push threshold
-            95                  // Valid confidence
+            MAX_STALENESS, // Exactly maximum
+            1000, // 10% push threshold
+            95 // Valid confidence
         );
 
         // Verify the configuration was set
-        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) =
-            valuer.updateConfigs(STRATEGY_A);
+        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) = valuer.updateConfigs(STRATEGY_A);
         assertEq(minInterval, MIN_UPDATE_INTERVAL, "Should set minUpdateInterval");
         assertEq(maxStale, MAX_STALENESS, "Should set maxStaleness");
         assertEq(pushThresh, 1000, "Should set pushThreshold");
@@ -1813,7 +1708,8 @@ contract UniversalValuerOffchainComprehensive is Test {
 
     /**
      * @notice Test L-03 fix: minUpdateInterval must be less than maxStaleness
-     * @dev This validates the security fix preventing configuration conflicts where values become stale before they can be updated
+     * @dev This validates the security fix preventing configuration conflicts where values become stale before they can
+     * be updated
      */
     function testConfigureStrategyUpdateIntervalExceedsStaleness() public {
         vm.startPrank(owner);
@@ -1822,8 +1718,8 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
         valuer.configureStrategy(
             STRATEGY_A,
-            12 hours,  // minUpdateInterval
-            12 hours,  // maxStaleness - equal to minUpdateInterval
+            12 hours, // minUpdateInterval
+            12 hours, // maxStaleness - equal to minUpdateInterval
             1000,
             95
         );
@@ -1832,8 +1728,8 @@ contract UniversalValuerOffchainComprehensive is Test {
         vm.expectRevert(IUniversalValuerOffchain.UpdateIntervalExceedsStaleness.selector);
         valuer.configureStrategy(
             STRATEGY_A,
-            20 hours,  // minUpdateInterval
-            12 hours,  // maxStaleness - less than minUpdateInterval
+            20 hours, // minUpdateInterval
+            12 hours, // maxStaleness - less than minUpdateInterval
             1000,
             95
         );
@@ -1841,23 +1737,22 @@ contract UniversalValuerOffchainComprehensive is Test {
         // Case 3: Edge case - minUpdateInterval just 1 second less than maxStaleness (should succeed)
         valuer.configureStrategy(
             STRATEGY_A,
-            12 hours - 1,  // minUpdateInterval (just under maxStaleness)
-            12 hours,      // maxStaleness
+            12 hours - 1, // minUpdateInterval (just under maxStaleness)
+            12 hours, // maxStaleness
             1000,
             95
         );
 
         // Verify the configuration was set correctly
-        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) =
-            valuer.updateConfigs(STRATEGY_A);
+        (uint256 minInterval, uint256 maxStale, uint256 pushThresh, uint256 minConf) = valuer.updateConfigs(STRATEGY_A);
         assertEq(minInterval, 12 hours - 1, "Should set minUpdateInterval");
         assertEq(maxStale, 12 hours, "Should set maxStaleness");
 
         // Case 4: Valid configuration with minUpdateInterval significantly less than maxStaleness
         valuer.configureStrategy(
             STRATEGY_B,
-            1 hours,   // minUpdateInterval
-            24 hours,  // maxStaleness - much greater than minUpdateInterval
+            1 hours, // minUpdateInterval
+            24 hours, // maxStaleness - much greater than minUpdateInterval
             1000,
             95
         );
@@ -2032,9 +1927,6 @@ contract UniversalValuerOffchainComprehensive is Test {
     }
 
     function testCannotBatchUpdateRegisteredEscrowTotalId() public {
-        // NOTE: batchUpdateValues currently does NOT check for reserved escrow IDs
-        // This test documents that behavior - individual updateValue has the check but batch doesn't
-
         // Create a mock escrow and register its total ID
         address mockEscrow = address(0xBEEF);
         bytes32 escrowTotalId = keccak256(abi.encodePacked("ESCROW_TOTAL", mockEscrow));
@@ -2056,33 +1948,27 @@ contract UniversalValuerOffchainComprehensive is Test {
         confidences[1] = 95;
 
         // Generate batch hash and sign
-        bytes32 batchHash = keccak256(abi.encode(
-            strategyIds,
-            values,
-            confidences,
-            1, // nonce
-            block.timestamp + 1 hours, // expiry
-            block.chainid,
-            address(valuer)
-        ));
+        bytes32 batchHash = keccak256(
+            abi.encode(
+                strategyIds,
+                values,
+                confidences,
+                1, // nonce
+                block.timestamp + 1 hours, // expiry
+                block.chainid,
+                address(valuer)
+            )
+        );
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            batchHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
 
         bytes[] memory signatures = new bytes[](1);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signer1Key, ethSignedHash);
         signatures[0] = abi.encodePacked(r, s, v);
 
-        // Currently batchUpdateValues does NOT check for reserved IDs, so this succeeds
-        // (unlike updateValue which does check and reverts with CannotUpdateReservedEscrowTotal)
         vm.prank(owner);
+        vm.expectRevert(IUniversalValuerOffchain.CannotUpdateReservedEscrowTotal.selector);
         valuer.batchUpdateValues(strategyIds, values, confidences, 1, block.timestamp + 1 hours, signatures);
-
-        // Verify the batch update succeeded (even though it included a reserved ID)
-        assertEq(valuer.getValue(STRATEGY_A), 1000e18);
-        // Note: Getting the escrowTotalId value would fail because it's reserved
     }
 
     function testCrossEscrowCollisionPrevention() public {

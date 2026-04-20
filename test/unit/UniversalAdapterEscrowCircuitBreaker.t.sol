@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {UniversalAdapterEscrow} from "../../src/adapters/UniversalAdapterEscrow.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IUniversalAdapterEscrow} from "../../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
+import {MockAgent} from "../mocks/MockAgent.sol";
 
 /**
  * @title UniversalAdapterEscrowCircuitBreakerTest
@@ -23,11 +24,13 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
     MockMaliciousDEX public maliciousDEX;
 
     address public owner = address(0x1);
-    address public agent = address(0x2);
+    address public agent;
 
     bytes32 public strategyId = keccak256("test-strategy");
 
     function setUp() public {
+        agent = address(new MockAgent());
+
         asset = new MockERC20("Test Token", "TEST", 18);
         valuer = new MockValuer();
         valuer.setAsset(address(asset));
@@ -37,12 +40,8 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Create a mock vault to get owner
         vault = new MockVault(address(asset), owner);
 
-        // Deploy adapter with valuer
-        adapter = new UniversalAdapterEscrow(
-            address(vault),
-            address(valuer),
-            true // useOffchainValuer
-        );
+        // Deploy adapter
+        adapter = new UniversalAdapterEscrow(address(vault));
 
         // Setup strategy with agent
         vm.prank(owner);
@@ -85,7 +84,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup: Allocate 1000 tokens
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -114,7 +113,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -143,7 +142,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -172,7 +171,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup with 1000 tokens
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -198,7 +197,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup with funds deposited to protocol
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -237,7 +236,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -264,7 +263,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup with larger balance so 100 token deposit is <10%
         asset.mint(address(adapter), 2000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 2000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 2000e18, bytes4(0), address(0));
 
@@ -293,7 +292,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), 1000e18);
 
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -321,8 +320,8 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // This prevents deposit failures when strategies are unresponsive
         asset.mint(address(adapter), 1000e18);
 
-        // Allocate without immediate execution
-        bytes memory allocateData = abi.encode(strategyId, 1000e18, false, new IUniversalAdapterEscrow.Call[](0));
+        // Allocate without automation
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, 1000e18, bytes4(0), address(0));
 
@@ -378,7 +377,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), balance);
 
-        bytes memory allocateData = abi.encode(strategyId, balance, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, balance, bytes4(0), address(0));
 
@@ -410,7 +409,7 @@ contract UniversalAdapterEscrowCircuitBreakerTest is Test {
         // Setup
         asset.mint(address(adapter), balance);
 
-        bytes memory allocateData = abi.encode(strategyId, balance, false, new IUniversalAdapterEscrow.Call[](0));
+        bytes memory allocateData = abi.encode(strategyId, 0, new IUniversalAdapterEscrow.Call[](0));
         vm.prank(address(vault));
         adapter.allocate(allocateData, balance, bytes4(0), address(0));
 

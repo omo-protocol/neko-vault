@@ -89,6 +89,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
         UpdateConfig memory config = updateConfigs[strategyId];
         uint256 changePercent = _calculateChangePercent(lastReport.value, value);
+        uint256 minConfidence = _effectiveMinConfidence(config);
 
         if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
             if (changePercent < config.pushThreshold) {
@@ -105,16 +106,9 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
         }
 
-        if (confidence < config.minConfidence) revert LowConfidence();
+        if (confidence < minConfidence) revert LowConfidence();
 
-        uint256 totalWeight = _verifySignatures(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            signatures
-        );
+        uint256 totalWeight = _verifySignatures(strategyId, value, confidence, nonce, expiry, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
@@ -135,8 +129,8 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        bool isStale = block.timestamp > report.timestamp + config.maxStaleness;
-        bool lowConfidence = report.confidence < config.minConfidence;
+        bool isStale = block.timestamp > report.timestamp + _effectiveMaxStaleness(config);
+        bool lowConfidence = report.confidence < _effectiveMinConfidence(config);
 
         if (isStale || lowConfidence) {
             emit UpdateRequested(strategyId, msg.sender, UpdateReason.STALENESS);
@@ -179,7 +173,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @dev Used by isValuationHealthy() to determine if any strategy has stale data
     /// @param escrow The escrow address to compute total value for
     /// @return result Struct containing value and staleness indicators
-    function _computeTotalValueWithStaleness(address escrow) internal view returns (IUniversalValuerOffchain.TotalValueResult memory result) {
+    function _computeTotalValueWithStaleness(address escrow)
+        internal
+        view
+        returns (IUniversalValuerOffchain.TotalValueResult memory result)
+    {
         bytes32[] memory strategies = _getActiveStrategies(escrow);
 
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -187,25 +185,23 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             ValueReport memory report = latestReports[strategyId];
             UpdateConfig memory config = updateConfigs[strategyId];
 
-            uint256 maxStaleness = (config.minUpdateInterval > 0) ? config.maxStaleness : MAX_STALENESS;
-            uint256 minConfidence = (config.minConfidence > 0) ? config.minConfidence : defaultConfidenceThreshold;
+            uint256 maxStaleness = _effectiveMaxStaleness(config);
+            uint256 minConfidence = _effectiveMinConfidence(config);
             uint256 stalenessAge = block.timestamp - report.timestamp;
 
             if (stalenessAge <= maxStaleness && report.confidence >= minConfidence) {
                 result.value += report.value;
                 result.freshCount++;
-            }
-            else if (fallbackValues[strategyId] > 0) {
+            } else if (fallbackValues[strategyId] > 0) {
                 result.value += fallbackValues[strategyId];
                 result.hasStaleData = true;
                 result.fallbackCount++;
-            }
-            else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence) {
+            } else if (report.value > 0 && stalenessAge <= maxStaleness && report.confidence >= emergencyMinConfidence)
+            {
                 result.value += report.value;
                 result.hasStaleData = true;
                 result.staleCount++;
-            }
-            else {
+            } else {
                 result.hasStaleData = true;
                 result.staleCount++;
             }
@@ -221,28 +217,23 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 expiry,
         bytes[] calldata signatures
     ) external override onlyOwner notEmergency {
-        if (strategyIds.length != values.length ||
-            strategyIds.length != confidences.length) {
+        if (strategyIds.length != values.length || strategyIds.length != confidences.length) {
             revert ArrayLengthMismatch();
         }
         if (expiry < block.timestamp) revert SignatureExpired();
         if (expiry > block.timestamp + MAX_SIGNATURE_AGE) revert SignatureExpiryTooFar();
 
-        bytes32 batchHash = keccak256(abi.encode(
-            strategyIds,
-            values,
-            confidences,
-            nonce,
-            expiry,
-            block.chainid,
-            address(this)
-        ));
+        bytes32 batchHash =
+            keccak256(abi.encode(strategyIds, values, confidences, nonce, expiry, block.chainid, address(this)));
         uint256 totalWeight = _verifyBatchSignatures(batchHash, signatures);
 
         if (totalWeight < requiredWeight) revert InsufficientSignatures();
 
         for (uint256 i = 0; i < strategyIds.length; i++) {
             bytes32 strategyId = strategyIds[i];
+            if (registeredEscrowTotals[strategyId] != address(0)) {
+                revert CannotUpdateReservedEscrowTotal();
+            }
             ValueReport memory lastReport = latestReports[strategyId];
 
             if (nonce <= lastReport.nonce) revert StaleNonce();
@@ -250,6 +241,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             UpdateConfig memory config = updateConfigs[strategyId];
             uint256 changePercent = _calculateChangePercent(lastReport.value, values[i]);
+            uint256 minConfidence = _effectiveMinConfidence(config);
 
             if (block.timestamp < lastReport.timestamp + config.minUpdateInterval) {
                 if (changePercent < config.pushThreshold) {
@@ -258,8 +250,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
             }
             if (lastReport.value > 0) {
                 _validatePriceBounds(strategyId, changePercent);
+            } else {
+                uint256 maxInitial = maxInitialValue[strategyId];
+                if (maxInitial > 0 && values[i] > maxInitial) {
+                    revert InitialValueExceedsMax(values[i], maxInitial);
+                }
             }
-            if (confidences[i] < config.minConfidence) revert LowConfidence();
+            if (confidences[i] < minConfidence) revert LowConfidence();
         }
 
         for (uint256 i = 0; i < strategyIds.length; i++) {
@@ -293,6 +290,11 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         }
 
         registeredEscrowTotals[totalId] = msg.sender;
+
+        // Clear any pre-existing stale data to prevent uncorrectable values
+        delete fallbackValues[totalId];
+        delete latestReports[totalId];
+
         emit EscrowTotalRegistered(totalId, msg.sender);
     }
 
@@ -306,20 +308,13 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /* ADMIN FUNCTIONS */
 
     /// @notice Initiate signer configuration change (step 1 of 2-step process)
-    function initiateSignerChange(
-        address signer,
-        bool authorized,
-        uint256 weight
-    ) external onlyOwner {
+    function initiateSignerChange(address signer, bool authorized, uint256 weight) external onlyOwner {
         if (!authorized && signers[signer].authorized) {
             signerChangeTimestamp[signer] = block.timestamp + SIGNER_TIMELOCK;
             pendingSignerRemoval[signer] = true;
             emit SignerRemovalInitiated(signer, signerChangeTimestamp[signer]);
         } else {
-            signers[signer] = SignerConfig({
-                authorized: authorized,
-                weight: weight
-            });
+            signers[signer] = SignerConfig({authorized: authorized, weight: weight});
             emit SignerConfigured(signer, authorized, weight);
         }
     }
@@ -329,10 +324,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         if (!pendingSignerRemoval[signer]) revert NoSignerRemovalPending();
         if (block.timestamp < signerChangeTimestamp[signer]) revert SignerRemovalTimelockNotExpired();
 
-        signers[signer] = SignerConfig({
-            authorized: false,
-            weight: 0
-        });
+        signers[signer] = SignerConfig({authorized: false, weight: 0});
 
         pendingSignerRemoval[signer] = false;
         signerChangeTimestamp[signer] = 0;
@@ -433,6 +425,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
     /// @notice Set fallback value for emergency
     function setFallbackValue(bytes32 strategyId, uint256 value) external onlyOwner {
+        if (registeredEscrowTotals[strategyId] != address(0)) revert CannotUpdateReservedEscrowTotal();
         fallbackValues[strategyId] = value;
         emit FallbackValueSet(strategyId, value);
     }
@@ -446,6 +439,7 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
     /// @notice Force update a value in emergency
     function emergencyUpdate(bytes32 strategyId, uint256 value) external onlyOwner {
         if (!emergencyMode) revert NotInEmergencyMode();
+        if (registeredEscrowTotals[strategyId] != address(0)) revert CannotUpdateReservedEscrowTotal();
 
         latestReports[strategyId] = ValueReport({
             value: value,
@@ -466,11 +460,15 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         ValueReport memory report = latestReports[strategyId];
         UpdateConfig memory config = updateConfigs[strategyId];
 
-        if (block.timestamp > report.timestamp + config.maxStaleness) {
+        if (report.timestamp == 0) {
             return true;
         }
-        
-        if (report.confidence < config.minConfidence) {
+
+        if (block.timestamp > report.timestamp + _effectiveMaxStaleness(config)) {
+            return true;
+        }
+
+        if (report.confidence < _effectiveMinConfidence(config)) {
             return true;
         }
 
@@ -504,20 +502,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         uint256 expiry,
         bytes[] calldata signatures
     ) internal view returns (uint256 totalWeight) {
-        bytes32 messageHash = keccak256(abi.encode(
-            strategyId,
-            value,
-            confidence,
-            nonce,
-            expiry,
-            block.chainid,
-            address(this)
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encode(strategyId, value, confidence, nonce, expiry, block.chainid, address(this)));
 
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
 
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
@@ -535,7 +523,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
+            if (
+                signers[signer].authorized
+                    && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)
+            ) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;
@@ -545,15 +536,21 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
         return totalWeight;
     }
 
+    function _effectiveMaxStaleness(UpdateConfig memory config) internal view returns (uint256 maxStaleness) {
+        return config.minUpdateInterval > 0 ? config.maxStaleness : MAX_STALENESS;
+    }
+
+    function _effectiveMinConfidence(UpdateConfig memory config) internal view returns (uint256 minConfidence) {
+        return config.minConfidence > 0 ? config.minConfidence : defaultConfidenceThreshold;
+    }
+
     /// @dev Verify batch signatures
-    function _verifyBatchSignatures(
-        bytes32 batchHash,
-        bytes[] calldata signatures
-    ) internal view returns (uint256 totalWeight) {
-        bytes32 ethSignedHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            batchHash
-        ));
+    function _verifyBatchSignatures(bytes32 batchHash, bytes[] calldata signatures)
+        internal
+        view
+        returns (uint256 totalWeight)
+    {
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", batchHash));
 
         address[] memory usedSigners = new address[](signatures.length);
         uint256 usedCount = 0;
@@ -571,7 +568,10 @@ contract UniversalValuerOffchain is IUniversalValuerOffchain {
 
             if (alreadyUsed) continue;
 
-            if (signers[signer].authorized && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)) {
+            if (
+                signers[signer].authorized
+                    && (!pendingSignerRemoval[signer] || signerChangeTimestamp[signer] > block.timestamp)
+            ) {
                 totalWeight += signers[signer].weight;
                 usedSigners[usedCount] = signer;
                 usedCount++;

@@ -6,6 +6,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {UniversalAdapterEscrow} from "../src/adapters/UniversalAdapterEscrow.sol";
 import {IUniversalAdapterEscrow} from "../src/adapters/interfaces/IUniversalAdapterEscrow.sol";
 import {ERC20Mock} from "./mocks/ERC20Mock.sol";
+import {MockAgent} from "./mocks/MockAgent.sol";
 
 // ============================================
 // MOCK CONTRACTS
@@ -167,11 +168,7 @@ contract UniversalAdapterEscrowHandler is Test {
     // ============================================
 
     /// @notice Set a new strategy
-    function handler_setStrategy(
-        uint256 strategySeed,
-        uint256 agentSeed,
-        uint256 dailyLimit
-    ) external {
+    function handler_setStrategy(uint256 strategySeed, uint256 agentSeed, uint256 dailyLimit) external {
         // Limit number of strategies
         if (activeStrategyIds.length >= MAX_STRATEGIES) return;
 
@@ -228,12 +225,7 @@ contract UniversalAdapterEscrowHandler is Test {
     }
 
     /// @notice Update whitelist
-    function handler_updateWhitelist(
-        address target,
-        bytes4 selector,
-        bool allowed,
-        uint256 limit
-    ) external {
+    function handler_updateWhitelist(address target, bytes4 selector, bool allowed, uint256 limit) external {
         vm.prank(owner);
         escrow.updateWhitelist(target, selector, allowed, limit);
     }
@@ -281,22 +273,27 @@ contract UniversalAdapterEscrowHandler is Test {
         try escrow.reduceExternalDeposits(strategyId, newValue) {} catch {}
     }
 
-    /// @notice Sync strategy with valuer
-    function handler_syncStrategyWithValuer(uint256 strategySeed, uint256 valuerValue) external {
+    /// @notice Sync strategy external deposits via per-strategy reduction
+    function handler_syncStrategyWithValuer(uint256 strategySeed, uint256 newValue) external {
         if (activeStrategyIds.length == 0) return;
 
         bytes32 strategyId = _getStrategyId(strategySeed);
 
         if (!isStrategyActive[strategyId]) return;
 
-        // Set a reasonable valuer value - bound to prevent unrealistic increases
         uint256 currentDeposits = escrow.externalDeposits(strategyId);
-        // Max 20% increase to simulate reasonable yield
-        valuerValue = bound(valuerValue, 0, currentDeposits + (currentDeposits / 5) + 1e18);
-        valuer.setValue(strategyId, valuerValue);
+        if (currentDeposits == 0) return;
+
+        // Can only reduce, so bound newValue to [0, currentDeposits]
+        newValue = bound(newValue, 0, currentDeposits);
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = strategyId;
+        uint256[] memory vals = new uint256[](1);
+        vals[0] = newValue;
 
         vm.prank(owner);
-        try escrow.syncStrategyWithValuer(strategyId) {} catch {}
+        try escrow.syncExternalDepositsPerStrategy(ids, vals) {} catch {}
     }
 
     // ============================================
@@ -314,12 +311,7 @@ contract UniversalAdapterEscrowHandler is Test {
 
         amount = _boundAmount(amount);
 
-        bytes memory data = abi.encode(
-            strategyId,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(strategyId, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         try escrow.allocate(data, amount, bytes4(0), address(0)) {
@@ -342,12 +334,7 @@ contract UniversalAdapterEscrowHandler is Test {
         uint256 balance = token.balanceOf(address(escrow));
         amount = bound(amount, 1, balance > allocation ? allocation : balance);
 
-        bytes memory data = abi.encode(
-            strategyId,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(strategyId, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         vm.prank(address(vault));
         try escrow.deallocate(data, amount, bytes4(0), address(0)) {
@@ -372,12 +359,7 @@ contract UniversalAdapterEscrowHandler is Test {
 
         amount = bound(amount, 1, slack);
 
-        bytes memory data = abi.encode(
-            strategyId,
-            uint256(0),
-            false,
-            new IUniversalAdapterEscrow.Call[](0)
-        );
+        bytes memory data = abi.encode(strategyId, uint256(0), new IUniversalAdapterEscrow.Call[](0));
 
         bytes4 forceDeallocateSelector = 0xe4d38cd8;
 
@@ -490,11 +472,9 @@ contract UniversalAdapterEscrowHandler is Test {
     }
 
     /// @notice Execute strategy with slippage protection
-    function handler_executeStrategyWithSlippage(
-        uint256 strategySeed,
-        uint256 amount,
-        uint256 minBalanceIncrease
-    ) external {
+    function handler_executeStrategyWithSlippage(uint256 strategySeed, uint256 amount, uint256 minBalanceIncrease)
+        external
+    {
         if (activeStrategyIds.length == 0) return;
         if (escrow.paused()) return;
 
@@ -538,9 +518,8 @@ contract UniversalAdapterEscrowHandler is Test {
 
         // Set valuer value within valid range (80%-150% of totalAllocations)
         uint256 balance = token.balanceOf(address(escrow));
-        uint256 allocatedInAdapter = totalAlloc > escrow.totalExternalDeposits()
-            ? totalAlloc - escrow.totalExternalDeposits()
-            : 0;
+        uint256 allocatedInAdapter =
+            totalAlloc > escrow.totalExternalDeposits() ? totalAlloc - escrow.totalExternalDeposits() : 0;
         uint256 excessIdle = balance > allocatedInAdapter ? balance - allocatedInAdapter : 0;
 
         // totalValueAdj = totalValue - excessIdle (if totalValue >= excessIdle)
@@ -591,7 +570,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
     function setUp() public {
         // Setup actors
         owner = makeAddr("owner");
-        agent = makeAddr("agent");
+        agent = address(new MockAgent());
 
         // Deploy token
         token = new ERC20Mock(18);
@@ -606,7 +585,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         vm.label(address(valuer), "valuer");
 
         // Deploy escrow
-        escrow = new UniversalAdapterEscrow(address(vault), address(valuer), false);
+        escrow = new UniversalAdapterEscrow(address(vault));
         vm.label(address(escrow), "escrow");
 
         // Deploy external protocol
@@ -628,15 +607,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         token.approve(address(protocol), type(uint256).max);
 
         // Deploy handler
-        handler = new UniversalAdapterEscrowHandler(
-            escrow,
-            token,
-            vault,
-            valuer,
-            protocol,
-            owner,
-            agent
-        );
+        handler = new UniversalAdapterEscrowHandler(escrow, token, vault, valuer, protocol, owner, agent);
 
         // Add default strategy to handler
         handler.handler_setStrategy(0, 0, type(uint256).max);
@@ -664,10 +635,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         selectors[15] = handler.handler_refreshCachedValuation.selector;
         selectors[16] = handler.handler_updateWhitelist.selector;
 
-        targetSelector(FuzzSelector({
-            addr: address(handler),
-            selectors: selectors
-        }));
+        targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
 
         // Exclude contracts that shouldn't be called directly
         excludeContract(address(escrow));
@@ -695,10 +663,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         uint256 balance = token.balanceOf(address(escrow));
 
         // Total tracked value should not exceed initial supply significantly
-        assertTrue(
-            totalExternal + balance <= INITIAL_BALANCE * 3,
-            "Total tracked value unreasonably high"
-        );
+        assertTrue(totalExternal + balance <= INITIAL_BALANCE * 3, "Total tracked value unreasonably high");
     }
 
     /// @notice Invariant: Sum of per-strategy allocations equals totalAllocations
@@ -742,20 +707,14 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
 
         // Key invariant: The token balance should never exceed what was originally minted
         // to the escrow contract (INITIAL_BALANCE), since no new tokens are minted during tests
-        assertTrue(
-            balance <= INITIAL_BALANCE,
-            "Balance exceeds initial supply"
-        );
+        assertTrue(balance <= INITIAL_BALANCE, "Balance exceeds initial supply");
 
         // External deposits tracking should not grow unboundedly
         // Given our handler bounds valuer values to max 20% increase over current deposits,
         // the total external deposits should remain reasonable over the test run.
         // However, multiple syncs can compound, so we use a generous bound.
         // Max expected: INITIAL_BALANCE (could all be deposited) * 2 (generous margin for yield accumulation)
-        assertTrue(
-            externalDeps <= INITIAL_BALANCE * 2,
-            "External deposits unreasonably high"
-        );
+        assertTrue(externalDeps <= INITIAL_BALANCE * 2, "External deposits unreasonably high");
 
         // Balance should never go negative (implicit by uint256)
         // External deposits should never go negative (implicit by uint256)
@@ -814,11 +773,6 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         assertEq(escrow.asset(), address(token), "Asset changed");
     }
 
-    /// @notice Invariant: Valuer is immutable and correct
-    function invariant_valuerImmutable() public view {
-        assertEq(escrow.valuer(), address(valuer), "Valuer changed");
-    }
-
     /// @notice Invariant: Ghost tracking matches contract state (approximate)
     /// @dev This is a soft invariant - ghost variables track successful calls only
     function invariant_ghostTrackingConsistent() public view {
@@ -834,10 +788,7 @@ contract UniversalAdapterEscrowInvariantTest is StdInvariant, Test {
         // 2. Failed operations don't update ghost vars
         // 3. Multiple paths can modify state
         // Just check reasonable bounds
-        assertTrue(
-            escrow.totalAllocations() <= netAllocated + INITIAL_BALANCE,
-            "Ghost allocation tracking way off"
-        );
+        assertTrue(escrow.totalAllocations() <= netAllocated + INITIAL_BALANCE, "Ghost allocation tracking way off");
     }
 
     /// @notice Invariant: Active strategies have valid configuration
