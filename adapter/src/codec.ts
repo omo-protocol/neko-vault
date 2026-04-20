@@ -120,3 +120,67 @@ export function encodeValuationResponse(v: ValuationSyncResponse): Hex {
 export function encodeUnwindResult(realizedUsd: bigint): Hex {
   return encodeAbiParameters(UNWIND_RESULT_ABI, [realizedUsd]);
 }
+
+// ─── PT loop payloads ───────────────────────────────────────────────────────
+
+const PT_ITERATION_INTENT_ABI: AbiParameter[] = [
+  {
+    type: "tuple",
+    components: [
+      {
+        type: "tuple",
+        name: "intent",
+        components: [
+          { name: "cycleId", type: "bytes32" },
+          { name: "venue", type: "bytes32" },
+          { name: "marketRef", type: "bytes32" },
+          { name: "side", type: "uint8" },
+          { name: "targetNotionalUsd", type: "uint256" },
+          { name: "maxSlippageBps", type: "uint16" },
+          { name: "expiryBlock", type: "uint256" },
+          { name: "idempotencyKey", type: "bytes32" },
+          { name: "marginMode", type: "uint8" },
+        ],
+      },
+      { name: "targetLeverageBps", type: "uint16" },
+      { name: "hfMinBps", type: "uint16" },
+      { name: "targetChainId", type: "uint64" },
+      { name: "morphoMarketId", type: "bytes32" },
+      { name: "isUnwind", type: "bool" },
+    ],
+  },
+];
+
+const PT_BUFFER_SNAPSHOT_ABI: AbiParameter[] = [
+  {
+    type: "tuple",
+    components: [
+      { name: "bufferUsd", type: "uint256" },
+      { name: "timestamp", type: "uint256" },
+    ],
+  },
+];
+
+export function decodePtIterationIntent(raw: Hex): {
+  intent: ExecutionIntent;
+  targetLeverageBps: number;
+  hfMinBps: number;
+  targetChainId: number;
+  morphoMarketId: Hex;
+  isUnwind: boolean;
+} {
+  const [t] = decodeAbiParameters(PT_ITERATION_INTENT_ABI, raw);
+  const d = t as any;
+  return {
+    intent: d.intent as ExecutionIntent,
+    targetLeverageBps: Number(d.targetLeverageBps),
+    hfMinBps: Number(d.hfMinBps),
+    targetChainId: Number(d.targetChainId),
+    morphoMarketId: d.morphoMarketId as Hex,
+    isUnwind: Boolean(d.isUnwind),
+  };
+}
+
+export function encodePtBufferSnapshot(snap: LegBufferSnapshot): Hex {
+  return encodeAbiParameters(PT_BUFFER_SNAPSHOT_ABI, [snap]);
+}

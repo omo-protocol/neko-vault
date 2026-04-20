@@ -5,7 +5,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {KellySignLib} from "./KellySignLib.sol";
 import {DustFloorLib} from "./DustFloorLib.sol";
 import {RitualPrecompiles} from "../../interfaces/ritual/IRitualPrecompiles.sol";
+import {IRitualWallet} from "../../interfaces/ritual/IScheduler.sol";
 import {SchedulerSetupLib} from "./SchedulerSetupLib.sol";
+import {ControllerAdminLib} from "./ControllerAdminLib.sol";
 import {MultiLegSubmitLib} from "./MultiLegSubmitLib.sol";
 import {CrossVenueCommandLib} from "../../base/CrossVenueCommandLib.sol";
 import {RitualHttpLib} from "./RitualHttpLib.sol";
@@ -186,6 +188,23 @@ contract MultiLegController is ReentrancyGuard {
     uint256 public tickScheduleId;
     uint256 public valuationScheduleId;
 
+    /// @dev Schedule params cached for on-chain self-renewal via `_maybeRenew*`. Without this
+    ///      the batch silently dies after `numCalls × frequency` blocks (~58min at default
+    ///      cadence) and the controller goes dark.
+    uint32 public tickFreq;
+    uint32 public valuationFreq;
+    uint32 public tickNumCalls;
+    uint32 public valuationNumCalls;
+    uint32 public scheduleGasLimit;
+    uint256 public scheduleMaxFeePerGas;
+    uint32 public scheduleRenewThreshold;
+
+    /// @dev Upper bound on the 0x0805 async HTTP precompile fee per tick, in wei. Used by
+    ///      SchedulerSetupLib balance checks — the precompile bills the RitualWallet on top of
+    ///      scheduler tx gas, so renewals must account for it or schedules die mid-batch.
+    ///      Default 2e15 (0.002 RITUAL); owner-updatable via `setPerCallHttpBudget`.
+    uint256 public perCallHttpBudget;
+
     /// @dev Deferred async-submit queue. Callbacks can't nest a new 0x0805 precompile call
     ///      (Ritual enforces "one per tx"), so they set a kind+data pair here and the next
     ///      `tick()` dispatches. Kinds:
@@ -351,6 +370,7 @@ contract MultiLegController is ReentrancyGuard {
         uint256 maxFeePerGas,
         uint32 lockDurationBlocks
     ) external payable onlyOwner {
+        _cacheScheduleParams(tickFreq, valuationFreq, tickNumCalls, valuationNumCalls, gasLimit, maxFeePerGas);
         (tickScheduleId, valuationScheduleId) = SchedulerSetupLib.fundAndScheduleBoth(
             this.tick.selector,
             this.syncValuation.selector,
@@ -361,46 +381,76 @@ contract MultiLegController is ReentrancyGuard {
             gasLimit,
             maxFeePerGas,
             lockDurationBlocks,
-            msg.value
+            msg.value,
+            perCallHttpBudget
         );
     }
 
+    function _cacheScheduleParams(
+        uint32 _tickFreq,
+        uint32 _valuationFreq,
+        uint32 _tickNumCalls,
+        uint32 _valuationNumCalls,
+        uint32 _gasLimit,
+        uint256 _maxFeePerGas
+    ) internal {
+        tickFreq = _tickFreq;
+        valuationFreq = _valuationFreq;
+        tickNumCalls = _tickNumCalls;
+        valuationNumCalls = _valuationNumCalls;
+        scheduleGasLimit = _gasLimit;
+        scheduleMaxFeePerGas = _maxFeePerGas;
+        if (scheduleRenewThreshold == 0) scheduleRenewThreshold = 2;
+        if (perCallHttpBudget == 0) perCallHttpBudget = 2e15;
+    }
 
-    /// @notice Replace stored ECIES-encrypted venue secrets + owner-signatures + TEE header map
-    ///         in a single call. Bundled to stay under EIP-170. After calling, also invoke
+    /// @notice Owner escape hatch: update the per-tick HTTP fee estimate used by renewal cost
+    ///         checks. Raise if observed precompile fees climb; set 0 only if scheduled
+    ///         callbacks don't emit 0x0805 async HTTP requests.
+    function setPerCallHttpBudget(uint256 b) external onlyOwner {
+        perCallHttpBudget = b;
+    }
+
+    /// @notice Owner-only rescue of funds sitting in the Ritual system wallet under this
+    ///         clone's account. Without this, deposits made via `fundAndSchedule` would be
+    ///         permanently stranded.
+    function withdrawRitualWallet(address payable to, uint256 amount) external onlyOwner {
+        if (to == address(0) || amount == 0) revert InvalidAddress();
+        IRitualWallet(RitualPrecompiles.RITUAL_WALLET).withdraw(amount);
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "native forward failed");
+    }
+
+    /// @dev Self-renew logic lives in SchedulerSetupLib.maybeRenew — stays out of controller
+    ///      bytecode. Called from tick/syncValuation on every execution; internal lib call is
+    ///      free when no renewal is due.
+    function _maybeRenewTick(uint256 executionIndex) internal {
+        uint256 id = SchedulerSetupLib.maybeRenew(
+            this.tick.selector, executionIndex, tickNumCalls, tickFreq,
+            scheduleGasLimit, scheduleMaxFeePerGas, scheduleRenewThreshold, perCallHttpBudget
+        );
+        if (id != 0) tickScheduleId = id;
+    }
+
+    function _maybeRenewValuation(uint256 executionIndex) internal {
+        uint256 id = SchedulerSetupLib.maybeRenew(
+            this.syncValuation.selector, executionIndex, valuationNumCalls, valuationFreq,
+            scheduleGasLimit, scheduleMaxFeePerGas, scheduleRenewThreshold, perCallHttpBudget
+        );
+        if (id != 0) valuationScheduleId = id;
+    }
+
+
+    /// @notice Replace stored ECIES-encrypted venue secrets + owner-signatures. Body lives in
+    ///         `ControllerAdminLib` to stay under EIP-170. After calling, also invoke
     ///         `SecretsAccessControl.grantAccess(thisClone, secretsHash, ...)` on Ritual so the
     ///         executor will accept requests routed through this clone.
     function setSecrets(bytes[] calldata blobs, bytes[] calldata sigs) external onlyOwner {
-        if (blobs.length != sigs.length) revert InvalidConfig();
-        delete _encryptedSecrets;
-        delete _secretSignatures;
-        for (uint256 i; i < blobs.length; i++) {
-            _encryptedSecrets.push(blobs[i]);
-            _secretSignatures.push(sigs[i]);
-        }
+        ControllerAdminLib.applySecrets(_encryptedSecrets, _secretSignatures, blobs, sigs);
     }
-
-    // getSecrets removed — operator re-runs bootstrapClone to refresh if needed (reads blobs
-    // from `_encryptedSecrets` via storage slot if truly required). Dropped for size budget.
-
 
     function setSecretHeaders(string[] calldata keys, string[] calldata values) external onlyOwner {
-        if (keys.length != values.length) revert InvalidConfig();
-        delete secretHeaderKeys;
-        delete secretHeaderValues;
-        for (uint256 i; i < keys.length; i++) {
-            secretHeaderKeys.push(keys[i]);
-            secretHeaderValues.push(values[i]);
-        }
-    }
-
-    function setLegConfig(uint8 index, LegConfig calldata cfg) external onlyOwner {
-        if (index >= legCount) revert InvalidConfig();
-        // Only mutate LegConfig while idle — changing venue/market/weights mid-cycle could corrupt
-        // `currentCycleFills[]` accounting and leave stale positions untracked.
-        if (tradingState != MultiLegTradingState.IDLE) revert InvalidState();
-        _validateLeg(cfg);
-        legs[index] = cfg;
+        ControllerAdminLib.applyHeaders(secretHeaderKeys, secretHeaderValues, keys, values);
     }
 
     /// @notice MultiLeg supports exactly three venue types. Spot requires a positive weight
@@ -511,14 +561,8 @@ contract MultiLegController is ReentrancyGuard {
         _setTradingState(MultiLegTradingState.IDLE);
     }
 
-    function pauseFunding() external onlyVaultManager {
-        _setFundingState(MultiLegFundingState.PAUSED);
-    }
-
-    function unpauseFunding() external onlyVaultManager {
-        if (fundingState != MultiLegFundingState.PAUSED) revert InvalidState();
-        _setFundingState(MultiLegFundingState.STALE);
-    }
+    // Funding pause/unpause removed — use pauseTrading() for emergencies; funding state flips
+    // autonomously via buffer-sync callback and the TOPUP_PENDING/OK transitions.
 
     /// @notice Admin escape hatch: clear frozen pending job IDs when the TEE adapter fails to
     ///         deliver and the Long-Running HTTP TTL elapsed without a callback. Each boolean
@@ -607,7 +651,13 @@ contract MultiLegController is ReentrancyGuard {
 
     // ─── Scheduler entrypoints ───────────────────────────────────────────────
 
-    function tick(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
+    function tick(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
+        // Self-renew the tick schedule before the current batch exhausts. Runs first so a
+        // failure-state early-return below doesn't block the renewal. No-op if not within the
+        // last `scheduleRenewThreshold` executions or if RitualWallet balance can't cover a
+        // full new batch.
+        _maybeRenewTick(executionIndex);
+
         // Auto-recovery: if any pending job has been in flight longer than `maxPendingBlocks`
         // (AsyncDelivery presumably dropped the callback), clear it and reset tradingState so
         // the next tick can make progress. Prevents ops having to manually pause/unpause.
@@ -701,7 +751,8 @@ contract MultiLegController is ReentrancyGuard {
         }
     }
 
-    function syncValuation(uint256 /* executionIndex */) external nonReentrant onlySchedulerOrOwner {
+    function syncValuation(uint256 executionIndex) external nonReentrant onlySchedulerOrOwner {
+        _maybeRenewValuation(executionIndex);
         if (tradingState == MultiLegTradingState.LEG_PENDING) return;
         if (pendingValuationJobId != bytes32(0)) return;
         _submitValuationSync();

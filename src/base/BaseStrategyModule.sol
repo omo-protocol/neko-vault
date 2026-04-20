@@ -27,6 +27,7 @@ contract BaseStrategyModule is IBaseStrategyModule {
     error InsufficientBalance();
     error CycleAlreadyConsumed();
     error CctpSenderNotSet();
+    error AlreadyInitialized();
 
     event TopUpPm(bytes32 indexed cycleId, uint256 amount, bytes32 destinationRef, bytes32 payloadHash);
     event TopUpHl(bytes32 indexed cycleId, uint256 amount, bytes32 destinationRef, bytes32 payloadHash);
@@ -39,7 +40,8 @@ contract BaseStrategyModule is IBaseStrategyModule {
     event CctpSenderSet(address indexed sender);
     event CctpBridged(bytes32 indexed cycleId, bytes32 indexed destinationRef, uint256 amount);
 
-    address public immutable asset;
+    bool internal _initialized;
+    address public asset;
     address public owner;
     address public gateway;
     /// @notice Source of USDC for OUTBOUND top-ups. Typically the sleeve.
@@ -73,8 +75,17 @@ contract BaseStrategyModule is IBaseStrategyModule {
         _;
     }
 
-    constructor(address owner_, address asset_, address bufferSource_) {
+    /// @notice Sentinel constructor. Marks the template as initialized so it can't be used
+    ///         directly; clones call `initialize` after CREATE2.
+    constructor() {
+        _initialized = true;
+    }
+
+    /// @notice One-time init for EIP-1167 clones. Same logic as the old constructor.
+    function initialize(address owner_, address asset_, address bufferSource_) external {
+        if (_initialized) revert AlreadyInitialized();
         if (owner_ == address(0) || asset_ == address(0)) revert InvalidAddress();
+        _initialized = true;
         owner = owner_;
         asset = asset_;
         bufferSource = bufferSource_;

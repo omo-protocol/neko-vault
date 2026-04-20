@@ -8,6 +8,9 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { Hyperliquid, type ClearinghouseState, type SpotClearinghouseState, type OrderResponse } from "hyperliquid";
 import { unwindHlOutbound } from "../bridges/index.js";
+import { reconcileCctpForDestRef } from "../bridges/cctpReconcile.js";
+import { DOMAIN } from "../bridges/cctp.js";
+import { createPublicClient, createWalletClient, defineChain, http, type Address } from "viem";
 import type {
   ExecutionIntent,
   NormalizedExecutionReceipt,
@@ -311,11 +314,49 @@ export class HyperliquidAdapter implements VenueAdapter {
     if (!creds.hlPrivateKey) return { bufferUsd: 0n, timestamp: nowSec() };
     const account = privateKeyToAccount(creds.hlPrivateKey);
 
-    // Self-heal: if any USDC is stranded on HyperEVM at the HL wallet (happens when a
+    // Self-heal layer 1: CCTP reconciliation. Scan Base CCTP sender events for any stranded
+    // HL top-up burns and submit receiveMessage on HyperEVM. Recovers from inline-settle
+    // failures (crash, stale code, gateway reject). Zero cost if no pending.
+    const cctpSender = process.env.BASE_CCTP_SENDER as Address | undefined;
+    if (cctpSender && creds.hlPrivateKey) {
+      try {
+        const base = defineChain({
+          id: 8453, name: "Base",
+          nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+          rpcUrls: { default: { http: ["https://mainnet.base.org"] } },
+        });
+        const hyperevm = defineChain({
+          id: 999, name: "HyperEVM",
+          nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
+          rpcUrls: { default: { http: ["https://rpc.hyperliquid.xyz/evm"] } },
+        });
+        const basePub = createPublicClient({ chain: base, transport: http() });
+        const hlPub = createPublicClient({ chain: hyperevm, transport: http() });
+        const hlWallet = createWalletClient({
+          chain: hyperevm, transport: http(),
+          account: privateKeyToAccount(creds.hlPrivateKey),
+        });
+        // HL perp + HL spot both route via `dest:hl:perp` / `dest:hl:spot`. Reconcile the one
+        // matching this venue; the other's handled by its own adapter instance's getBuffer.
+        const destRef: `0x${string}` = this.isPerp()
+          ? "0x14ea71fbfd6c1e5a474b882bed919af85a238641811bfb45bb190614cccbcb5d"
+          : "0x505c4f0d4540ebe3cf3a696872bd20475324e24a241d00cd1c67a9efa1bff9ff";
+        const r = await reconcileCctpForDestRef({
+          basePub, baseCctpSender: cctpSender, destRef,
+          destPub: hlPub, destWallet: hlWallet, sourceDomain: DOMAIN.BASE,
+        });
+        if (r.settled > 0 || r.pending > 0) {
+          console.log(`[hl] cctp reconcile: scanned=${r.scanned} settled=${r.settled} pending=${r.pending}`);
+        }
+      } catch (e) {
+        console.log(`[hl] cctp reconcile skipped: ${String(e).slice(0, 160)}`);
+      }
+    }
+
+    // Self-heal layer 2: if any USDC is stranded on HyperEVM at the HL wallet (happens when a
     // prior `/base/execute-command` flow was interrupted between CCTP receive and
     // CoreDepositWallet.deposit — e.g. adapter restart, gateway reject), sweep it to
     // HyperCore on the right dex (perp=0 or spot=type(uint32).max) before reading balance.
-    // Makes the buffer read accurate + recovers funds without operator intervention.
     try {
       await this.sweepStrandedHyperEvmToHyperCore(creds.hlPrivateKey, this.isPerp());
     } catch (e) {

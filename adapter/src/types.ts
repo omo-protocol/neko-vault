@@ -25,6 +25,23 @@ export enum CommandType {
   TOPUP_HL_BUFFER = 1,
   PAUSE = 2,
   REFILL_RESERVE = 3,
+  TOPUP_PT_BUFFER = 4,
+}
+
+// ─── PT loop intent (matches PtLoopController.PtIterationIntent) ────────────
+
+export interface PtIterationIntent {
+  intent: ExecutionIntent;
+  targetLeverageBps: number;
+  hfMinBps: number;
+  targetChainId: number;
+  morphoMarketId: Hex;
+  isUnwind: boolean;
+}
+
+export interface PtVenueCredentials extends VenueCredentials {
+  /// Arb-side signing key for the PT loop executor. TEE-injected (x-arb-key).
+  arbPrivateKey?: Hex;
 }
 
 // ─── ExecutionIntent ────────────────────────────────────────────────────────
@@ -95,6 +112,8 @@ export interface VenueCredentials {
   pmApiPassphrase?: string;
   baseSignerKey?: Hex; // TEE-injected Base EOA for /base/execute-command + /valuation push
   valuerSignerKey?: Hex; // TEE-injected valuer signer (may equal baseSignerKey)
+  /// Arb-side signing key for PT loop executor (enter/exit/rebalance). TEE-injected (x-arb-key).
+  arbPrivateKey?: Hex;
 }
 
 // ─── Async HTTP envelope (Long-Running HTTP result format) ──────────────────

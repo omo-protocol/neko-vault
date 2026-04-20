@@ -3,14 +3,17 @@ import { keccak256, toBytes, pad, toHex, type Hex, type Address } from "viem";
 import {
   decodeExecutionIntent,
   decodeCommandEnvelope,
+  decodePtIterationIntent,
   encodeExecutionReceipt,
   encodeBufferSnapshots,
+  encodePtBufferSnapshot,
   encodeValuationResponse,
   encodeUnwindResult,
 } from "./codec.js";
 import { BaseClient } from "./base-client.js";
 import { HyperliquidAdapter, V_HL_PERP as HL_PERP, V_HL_SPOT as HL_SPOT, type HlMarketRegistry } from "./venues/hyperliquid.js";
 import { PolymarketAdapter, V_POLYMARKET as PM_VENUE, type PmMarketRegistry } from "./venues/polymarket.js";
+import { PendleLoopAdapter, V_PENDLE } from "./venues/pendle.js";
 import type { VenueAdapter } from "./venues/types.js";
 import type {
   ExecutionIntent,
@@ -75,6 +78,7 @@ export function buildServer(opts: AdapterServerOptions) {
       [V_HL_PERP, new HyperliquidAdapter(V_HL_PERP, opts.hlMarkets)],
       [V_HL_SPOT, new HyperliquidAdapter(V_HL_SPOT, opts.hlMarkets)],
       [V_POLYMARKET, new PolymarketAdapter(opts.pmMarkets ?? {})],
+      [V_PENDLE, new PendleLoopAdapter()],
     ]);
 
   // TEE executors send mismatched Content-Length headers — strip them to avoid Fastify 400s.
@@ -157,6 +161,53 @@ export function buildServer(opts: AdapterServerOptions) {
     }
   });
 
+  // ─── POST /pt/execute ─── PT loop iteration (open/unwind). Wraps ExecutionIntent +
+  //                           leverage + HF + chain + morphoMarketId + isUnwind flag.
+  app.post("/pt/execute", async (req, reply) => {
+    try {
+      const hex = rawBodyToHex(req);
+      const ptIntent = decodePtIterationIntent(hex);
+      const creds = credentialsFromHeaders(req.headers);
+      const adapter = venues.get(ptIntent.intent.venue);
+      const result: NormalizedExecutionReceipt =
+        adapter == null
+          ? failReceipt(ptIntent.intent)
+          : await (adapter as any).execute(
+              ptIntent.intent, creds, { moduleAddress: opts.module }, ptIntent,
+            );
+      return reply
+        .type("application/json")
+        .send((() => { const __r = encodeExecutionReceipt(result); const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
+    } catch (err) {
+      req.log.error({ err: String(err), stack: (err as Error)?.stack }, "pt-execute failed");
+      return reply.status(400).send({ error: String(err) });
+    }
+  });
+
+  // ─── POST /pt/buffer ─── single-buffer snapshot for PT loop
+  app.post("/pt/buffer", async (req, reply) => {
+    try {
+      const creds = credentialsFromHeaders(req.headers);
+      const adapter = venues.get(V_PENDLE);
+      const snap = adapter == null
+        ? { bufferUsd: 0n, timestamp: BigInt(Date.now()) }
+        : await adapter.getBuffer(creds);
+      return reply
+        .type("application/json")
+        .send((() => { const __r = encodePtBufferSnapshot(snap); const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
+    } catch (err) {
+      return reply.status(400).send({ error: String(err) });
+    }
+  });
+
+  // ─── POST /pt/valuation ─── NAV + Base reserve snapshot (same shape as /valuation)
+  app.post("/pt/valuation", async (req, reply) => {
+    // Reuse the existing /valuation handler by forwarding internally. Same semantics — TEE
+    // signs + pushes NAV on Base, reads reserve, returns (nav, reserve, txHash, ok).
+    (req as any).raw.url = "/valuation";
+    (app as any).routing(req.raw, (reply as any).raw);
+  });
+
   // ─── POST /buffers ─── return buffer snapshots for all configured legs
   app.post("/buffers", async (req, reply) => {
     try {
@@ -226,12 +277,29 @@ export function buildServer(opts: AdapterServerOptions) {
               amount,
               minAllowance: amount,
             });
-          } else if (cmdType === CommandType.TOPUP_HL_BUFFER && creds.hlPrivateKey != null && amount > 0n) {
+          } else if (cmdType === CommandType.TOPUP_HL_BUFFER && amount > 0n) {
+            const destRef = String((env as any).destinationRef ?? "").toLowerCase();
+            const PT_ARB_REF = "0xed455b9eef2ae29d317f4124dd21e4eb631b05ccc0d3885f2091c08849c1b2c6"; // keccak("dest:arb:ptloop")
+            if (destRef === PT_ARB_REF) {
+              // PT loop inbound: settle CCTP → executor clone on Arb. The clone's first
+              // enterLoop consumes the USDC; we only drive the mint here so subsequent
+              // /pt/execute finds balance in place.
+              if (creds.arbPrivateKey == null) throw new Error("missing x-arb-key for PT CCTP receive");
+              const { settlePtLoopCctpOnly } = await import("./bridges/pt-loop.js");
+              await settlePtLoopCctpOnly(creds.arbPrivateKey, {
+                targetChainId: 42161,
+                baseBurnTxHash: txHash,
+                amount,
+              });
+              return reply
+                .type("application/json")
+                .send((() => { const __r = `0x${txHash.slice(2)}${"01"}${"0".repeat(62)}` as `0x${string}`; const __id = cacheResult(__r); return { task_id: __id, status: "completed", result: __r }; })());
+            }
+            if (creds.hlPrivateKey == null) throw new Error("missing x-hl-key for HL top-up");
             // Route to HyperCore dex based on destinationRef. Dedicated refs
             // `keccak("dest:hl:spot")` → SPOT dex, `keccak("dest:hl:perp")` → PERP. Fallback
             // (legacy `keccak("dest:hl")` or unknown) → PERP. Lets a multi-leg clone mix HL
             // spot + HL perp in the same strategy without ambiguity.
-            const destRef = String((env as any).destinationRef ?? "").toLowerCase();
             const HL_SPOT_REF = "0x505c4f0d4540ebe3cf3a696872bd20475324e24a241d00cd1c67a9efa1bff9ff"; // keccak("dest:hl:spot")
             const HL_PERP_REF = "0x14ea71fbfd6c1e5a474b882bed919af85a238641811bfb45bb190614cccbcb5d"; // keccak("dest:hl:perp")
             let destDex: number | undefined;

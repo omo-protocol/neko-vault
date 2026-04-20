@@ -223,16 +223,26 @@ async function main() {
   const headerKeys = Object.keys(headerMap);
   const headerValues = Object.values(headerMap);
 
-  // setExecutor was merged into setIntegrationRefs(executor, url, funder, kellySigner).
-  // Pass zero / empty for fields we don't want to change.
-  const txSetExec = await walletClient.writeContract({
-    address: clone,
-    abi: cloneAbi,
-    functionName: "setIntegrationRefs",
-    args: [executor, "", "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000"],
-  });
+  // Try `setIntegrationRefs` (MultiLegController); fall back to `setExecutor` (PtLoopController).
+  let txSetExec: Hex;
+  try {
+    txSetExec = await walletClient.writeContract({
+      address: clone,
+      abi: cloneAbi,
+      functionName: "setIntegrationRefs",
+      args: [executor, "", "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000"],
+    });
+  } catch {
+    txSetExec = await walletClient.writeContract({
+      address: clone,
+      abi: [{ name: "setExecutor", type: "function", stateMutability: "nonpayable",
+        inputs: [{ name: "e", type: "address" }], outputs: [] }],
+      functionName: "setExecutor",
+      args: [executor],
+    });
+  }
   await publicClient.waitForTransactionReceipt({ hash: txSetExec });
-  console.log(`       setIntegrationRefs tx = ${txSetExec}`);
+  console.log(`       setExecutor/setIntegrationRefs tx = ${txSetExec}`);
 
   const txSetSecrets = await walletClient.writeContract({
     address: clone,

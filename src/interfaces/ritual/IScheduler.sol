@@ -25,4 +25,8 @@ interface IScheduler {
 
 interface IRitualWallet {
     function deposit(uint256 lockDuration) external payable;
+    function balanceOf(address account) external view returns (uint256);
+    /// @notice Caller withdraws `amount` from their own deposit; native RITUAL is returned to
+    ///         `msg.sender`. Must be called after the deposit's lock duration has elapsed.
+    function withdraw(uint256 amount) external;
 }

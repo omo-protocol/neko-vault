@@ -2,35 +2,33 @@
 pragma solidity 0.8.28;
 
 import "forge-std/Script.sol";
-import {ArchetypeFactory} from "../src/factories/ArchetypeFactory.sol";
 import {MultiLegController} from "../src/controllers/cross_venue/MultiLegController.sol";
 import {PtLoopController} from "../src/controllers/cross_venue/PtLoopController.sol";
+import {ArchetypeFactory} from "../src/factories/ArchetypeFactory.sol";
 
-/// @notice Deploys Ritual-side control plane in three separate txs to stay under EIP-3860:
-///         1. MultiLegController template
-///         2. PtLoopController template
-///         3. ArchetypeFactory referencing both templates
+/// @notice Fresh Ritual-side control plane: MultiLeg + PtLoop templates + ArchetypeFactory.
+///         Both templates include the post-2026-04 fixes — `perCallHttpBudget` for
+///         schedule-renewal accuracy, and `withdrawRitualWallet` for rescue of system-wallet
+///         balances. Deploy order: templates first (sentinels mark themselves initialized via
+///         constructor), then factory references their addresses.
 ///
-///         Env vars:
-///           PRIVATE_KEY — deployer
-///           OWNER       — ArchetypeFactory admin (rotates templates)
+///         Env:
+///           PRIVATE_KEY — deployer / owner of the ArchetypeFactory
 contract DeployRitualControlPlane is Script {
     function run() external {
-        uint256 deployerPk = vm.envUint("PRIVATE_KEY");
-        address owner_ = vm.envAddress("OWNER");
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(pk);
 
-        vm.startBroadcast(deployerPk);
-        MultiLegController multiLegTemplate = new MultiLegController();
-        PtLoopController ptLoopTemplate = new PtLoopController();
-        ArchetypeFactory factory =
-            new ArchetypeFactory(owner_, address(multiLegTemplate), address(ptLoopTemplate));
+        vm.startBroadcast(pk);
+        MultiLegController mlTemplate = new MultiLegController();
+        PtLoopController ptTemplate = new PtLoopController();
+        ArchetypeFactory factory = new ArchetypeFactory(deployer, address(mlTemplate), address(ptTemplate));
         vm.stopBroadcast();
 
-        console.log("=== Ritual Control Plane Deployed ===");
-        console.log("MultiLegController template:", address(multiLegTemplate));
-        console.log("PtLoopController  template:", address(ptLoopTemplate));
-        console.log("ArchetypeFactory:           ", address(factory));
-        console.log("");
-        console.log("Next: factory.createMultiLeg(params, salt) / createPtLoop(params, salt)");
+        console.log("=== Ritual control plane deployed ===");
+        console.log("MultiLeg template: ", address(mlTemplate));
+        console.log("PtLoop template:   ", address(ptTemplate));
+        console.log("ArchetypeFactory:  ", address(factory));
+        console.log("Owner:             ", deployer);
     }
 }

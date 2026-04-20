@@ -18,6 +18,7 @@ contract BaseExecutionGateway {
     // ─── Errors ──────────────────────────────────────────────────────────────
 
     error NotOwner();
+    error AlreadyInitialized();
     error InvalidAddress();
     error WrongVault();
     error WrongAsset();
@@ -48,13 +49,12 @@ contract BaseExecutionGateway {
     event PausedSet(bool paused);
     event ModuleSet(address indexed module);
 
-    // ─── Immutables ──────────────────────────────────────────────────────────
+    // ─── Storage (was partially immutable; made mutable for EIP-1167 clones) ─
 
-    address public immutable vault;
-    address public immutable asset;
-    bytes32 public immutable DOMAIN_SEPARATOR;
-
-    // ─── Storage ─────────────────────────────────────────────────────────────
+    bool internal _initialized;
+    address public vault;
+    address public asset;
+    bytes32 public DOMAIN_SEPARATOR;
 
     address public owner;
     address public module;
@@ -82,10 +82,25 @@ contract BaseExecutionGateway {
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
-    constructor(address owner_, address vault_, address asset_, address module_, string memory name_, string memory version_) {
+    constructor() {
+        _initialized = true;
+    }
+
+    /// @notice One-time init for EIP-1167 clones. DOMAIN_SEPARATOR is computed per-clone
+    ///         from `address(this)`, so it differs between clones of the same template.
+    function initialize(
+        address owner_,
+        address vault_,
+        address asset_,
+        address module_,
+        string calldata name_,
+        string calldata version_
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
         if (owner_ == address(0) || vault_ == address(0) || asset_ == address(0) || module_ == address(0)) {
             revert InvalidAddress();
         }
+        _initialized = true;
         owner = owner_;
         vault = vault_;
         asset = asset_;

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.28;
 
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {BaseExecutionGateway} from "../base/BaseExecutionGateway.sol";
 import {BaseStrategyModule} from "../base/BaseStrategyModule.sol";
 import {BaseCctpSender} from "../base/BaseCctpSender.sol";
 import {CrossVenueCommandLib} from "../base/CrossVenueCommandLib.sol";
 
 /// @title BaseExecFactory
-/// @notice Phase 2 of the split deploy. Takes the core contracts from `BaseCoreFactory`, deploys
-///         module + gateway + CCTP sender, wires them, and transfers ownership of the full stack
-///         (vault + sleeve + module + gateway + cctpSender) to `vaultOwner`. Valuer is owned by
-///         `valuerOwner` (set in phase 1).
+/// @notice Phase 2 of the split deploy. EIP-1167-based: one sentinel of each (module + gateway +
+///         cctp sender) is deployed at factory construction, and every user stack gets minimal
+///         45-byte proxies cloned via CREATE2 — roughly 20× cheaper than `new` each.
+///
+///         Takes the core contracts from `BaseCoreFactory`, clones + initializes module +
+///         gateway + CCTP sender, wires them, and transfers ownership of the full stack
+///         (vault + sleeve + module + gateway + cctpSender) to `vaultOwner`.
 contract BaseExecFactory {
     error InvalidConfig();
     error InvalidAddress();
@@ -23,15 +27,24 @@ contract BaseExecFactory {
         address cctpSender
     );
 
+    /// @notice Shared implementations cloned per-user. Deployed once at factory construction.
+    address public immutable moduleImpl;
+    address public immutable gatewayImpl;
+    address public immutable cctpSenderImpl;
+
+    constructor() {
+        moduleImpl = address(new BaseStrategyModule());
+        gatewayImpl = address(new BaseExecutionGateway());
+        cctpSenderImpl = address(new BaseCctpSender());
+    }
+
     struct ExecParams {
         address vaultOwner;
         address asset;
         address vault;
         address sleeve;
-        /// @notice Strategy id that the module will ingest settlement for (passed to
-        ///         `setSleeveAndStrategyId` before ownership transfers to vaultOwner).
         bytes32 strategyId;
-        address cctpTokenMessenger; // Circle CCTP V2 TokenMessenger on this chain
+        address cctpTokenMessenger;
         address[] gatewaySigners;
         uint256 gatewayThreshold;
         uint256 capPmTopUp;
@@ -40,6 +53,9 @@ contract BaseExecFactory {
         uint256 dailyCap;
         string gatewayName;
         string gatewayVersion;
+        /// @dev Deterministic CREATE2 salt for the three clones. Pass `keccak256(strategyId)`
+        ///      or similar so per-user stack addresses are predictable.
+        bytes32 salt;
     }
 
     struct ExecDeployment {
@@ -56,18 +72,23 @@ contract BaseExecFactory {
         if (p.gatewaySigners.length == 0 || p.gatewayThreshold == 0) revert InvalidConfig();
         if (p.gatewayThreshold > p.gatewaySigners.length) revert InvalidConfig();
 
-        BaseStrategyModule module = new BaseStrategyModule(address(this), p.asset, p.sleeve);
-        d.module = address(module);
-        BaseExecutionGateway gateway = new BaseExecutionGateway(
-            address(this), p.vault, p.asset, d.module, p.gatewayName, p.gatewayVersion
-        );
-        d.gateway = address(gateway);
-        BaseCctpSender cctpSender = new BaseCctpSender(p.asset, p.cctpTokenMessenger, address(this));
-        cctpSender.setAuthorizedCaller(d.module, true);
-        d.cctpSender = address(cctpSender);
+        // Three cheap CREATE2 clones. Each ~45 bytes of proxy bytecode + init.
+        d.module = Clones.cloneDeterministic(moduleImpl, keccak256(abi.encode(p.salt, "module")));
+        d.gateway = Clones.cloneDeterministic(gatewayImpl, keccak256(abi.encode(p.salt, "gateway")));
+        d.cctpSender = Clones.cloneDeterministic(cctpSenderImpl, keccak256(abi.encode(p.salt, "cctp")));
 
-        // Wire module: gateway, vault, cctpSender, refillSource (module = CCTP inbox for returns),
-        // and sleeve+strategyId binding for `refillReserve` → `sleeve.recordSettlement`.
+        BaseStrategyModule module = BaseStrategyModule(d.module);
+        BaseExecutionGateway gateway = BaseExecutionGateway(d.gateway);
+        BaseCctpSender cctpSender = BaseCctpSender(payable(d.cctpSender));
+
+        // Init each proxy. Factory retains owner briefly to finish wiring.
+        module.initialize(address(this), p.asset, p.sleeve);
+        gateway.initialize(address(this), p.vault, p.asset, d.module, p.gatewayName, p.gatewayVersion);
+        cctpSender.initialize(p.asset, p.cctpTokenMessenger, address(this));
+
+        cctpSender.setAuthorizedCaller(d.module, true);
+
+        // Wire module: gateway, vault, cctpSender, refillSource, and sleeve+strategyId binding.
         module.setGateway(d.gateway);
         module.setVault(p.vault);
         module.setCctpSender(d.cctpSender);
@@ -99,5 +120,13 @@ contract BaseExecFactory {
         cctpSender.setOwner(p.vaultOwner);
 
         emit BaseExecDeployed(p.vaultOwner, p.vault, d.module, d.gateway, d.cctpSender);
+    }
+
+    /// @notice Predict CREATE2 addresses for a given salt. FE uses this to pre-wire routes
+    ///         or CCTP destinations before the stack is deployed.
+    function predict(bytes32 salt) external view returns (address module, address gateway, address cctpSender) {
+        module = Clones.predictDeterministicAddress(moduleImpl, keccak256(abi.encode(salt, "module")), address(this));
+        gateway = Clones.predictDeterministicAddress(gatewayImpl, keccak256(abi.encode(salt, "gateway")), address(this));
+        cctpSender = Clones.predictDeterministicAddress(cctpSenderImpl, keccak256(abi.encode(salt, "cctp")), address(this));
     }
 }

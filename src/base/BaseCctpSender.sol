@@ -49,6 +49,7 @@ contract BaseCctpSender {
     error NotAuthorized();
     error RouteInactive();
     error InvalidAddress();
+    error AlreadyInitialized();
 
     event RouteConfigured(
         bytes32 indexed destinationRef,
@@ -72,8 +73,9 @@ contract BaseCctpSender {
         bool active;
     }
 
-    address public immutable asset;
-    address public immutable tokenMessenger;
+    bool internal _initialized;
+    address public asset;
+    address public tokenMessenger;
     address public owner;
     mapping(address => bool) public authorizedCallers;
     mapping(bytes32 => Route) public routes;
@@ -83,8 +85,14 @@ contract BaseCctpSender {
         _;
     }
 
-    constructor(address asset_, address tokenMessenger_, address owner_) {
+    constructor() {
+        _initialized = true;
+    }
+
+    function initialize(address asset_, address tokenMessenger_, address owner_) external {
+        if (_initialized) revert AlreadyInitialized();
         if (asset_ == address(0) || tokenMessenger_ == address(0) || owner_ == address(0)) revert InvalidAddress();
+        _initialized = true;
         asset = asset_;
         tokenMessenger = tokenMessenger_;
         owner = owner_;
